@@ -65,4 +65,34 @@ public sealed class SmaTests
     [Fact]
     public void Average_TinyPrices_NoPrecisionLoss() =>
         SmaCalculator.Average([P(0.00001234m), P(0.00001236m)]).ShouldBe(0.00001235m);
+
+    [Fact]
+    public void Window_HugeNWithS_ClipsToLastCompleteBucket() =>
+        SmaWindowCalculator.Compute(Period.OneWeek, int.MaxValue, Utc("2026-10-01T00:00:00"), Utc("2026-11-03T15:00:00"))
+            .ShouldBe(new SmaWindow(Utc("2026-10-05T00:00:00"), Utc("2026-11-02T00:00:00")));
+
+    [Fact]
+    public void Window_HugeNWithoutS_Throws() =>
+        Should.Throw<ArgumentOutOfRangeException>(
+            () => SmaWindowCalculator.Compute(Period.OneWeek, int.MaxValue, null, Utc("2026-11-03T15:00:00")))
+            .ParamName.ShouldBe("n");
+
+    [Fact]
+    public void Window_SAfterNow_IsEmpty() =>
+        SmaWindowCalculator.Compute(Period.OneDay, 3, Utc("2027-01-01T00:00:00"), Utc("2026-11-03T15:00:00"))
+            .IsEmpty.ShouldBeTrue();
+
+    [Fact]
+    public void Window_WeekWithSMidWeek_StartsNextMonday() =>
+        SmaWindowCalculator.Compute(Period.OneWeek, 1, Utc("2026-10-07T12:00:00"), Utc("2026-11-03T15:00:00"))
+            .ShouldBe(new SmaWindow(Utc("2026-10-12T00:00:00"), Utc("2026-10-19T00:00:00")));
+
+    [Fact]
+    public void Window_UninitialisedPeriod_Throws() =>
+        Should.Throw<InvalidOperationException>(
+            () => SmaWindowCalculator.Compute(default, 1, null, Utc("2026-11-03T15:00:00")));
+
+    [Fact]
+    public void Average_HalfwayCase_RoundsToEven() =>
+        SmaCalculator.Average([P(0.000000025m)]).ShouldBe(0.00000002m);
 }

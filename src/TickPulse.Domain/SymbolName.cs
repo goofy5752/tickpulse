@@ -9,13 +9,13 @@ public readonly partial record struct SymbolName
 
     public string Value { get; }
 
-    /// <summary>Trims and upper-cases <paramref name="raw"/>, then validates it against <c>^[A-Z0-9]{5,20}$</c>.</summary>
+    /// <summary>Trims <paramref name="raw"/>, validates it as ASCII against <c>^[A-Za-z0-9]{5,20}$</c>, then upper-cases it.</summary>
     public static bool TryCreate(string? raw, out SymbolName name)
     {
-        var normalised = raw?.Trim().ToUpperInvariant();
-        if (normalised is not null && Pattern().IsMatch(normalised))
+        var trimmed = raw?.Trim();
+        if (trimmed is not null && Pattern().IsMatch(trimmed))
         {
-            name = new SymbolName(normalised);
+            name = new SymbolName(trimmed.ToUpperInvariant());
             return true;
         }
 
@@ -25,6 +25,6 @@ public readonly partial record struct SymbolName
 
     public override string ToString() => Value;
 
-    [GeneratedRegex("^[A-Z0-9]{5,20}$")]
+    [GeneratedRegex("^[A-Za-z0-9]{5,20}$")]
     private static partial Regex Pattern();
 }

@@ -13,6 +13,8 @@ public sealed class SymbolNameTests
 
     [Theory]
     [InlineData("BTC-USDT")]
+    [InlineData("ſolusdt")]
+    [InlineData("btcusdı")]
     [InlineData("BTC")]
     [InlineData("")]
     [InlineData(null)]

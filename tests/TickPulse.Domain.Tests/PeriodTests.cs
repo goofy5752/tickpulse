@@ -60,4 +60,15 @@ public sealed class PeriodTests
     [Fact]
     public void Align_UnspecifiedKind_Throws() =>
         Should.Throw<ArgumentException>(() => Period.OneMinute.AlignDown(new DateTime(2026, 1, 1)));
+
+    [Fact]
+    public void AlignDown_WeekBeforeOrigin_LandsOnMonday() =>
+        Period.OneWeek.AlignDown(Utc("1999-12-31T12:00:00")).ShouldBe(Utc("1999-12-27T00:00:00"));
+
+    [Fact]
+    public void Align_UninitialisedPeriod_Throws()
+    {
+        Should.Throw<InvalidOperationException>(() => default(Period).AlignDown(Utc("2026-01-01T00:00:00")));
+        Should.Throw<InvalidOperationException>(() => default(Period).AlignUp(Utc("2026-01-01T00:00:00")));
+    }
 }

@@ -44,13 +44,14 @@ public readonly record struct Period
         return false;
     }
 
-    /// <summary>Start of the bucket containing <paramref name="utc"/>.</summary>
+    /// <summary>
+    /// Start of the bucket containing <paramref name="utc"/>. Throws <see cref="ArgumentOutOfRangeException"/>
+    /// when the result is not representable (at the extremes of the <see cref="DateTime"/> range).
+    /// </summary>
     public DateTime AlignDown(DateTime utc)
     {
-        if (utc.Kind != DateTimeKind.Utc)
-        {
-            throw new ArgumentException("Timestamp must have Kind=Utc.", nameof(utc));
-        }
+        EnsureInitialised();
+        Guard.RequireUtc(utc, nameof(utc));
 
         var offset = utc.Ticks - Origin.Ticks;
         var buckets = Math.DivRem(offset, Length.Ticks, out var remainder);
@@ -62,10 +63,21 @@ public readonly record struct Period
         return new DateTime(Origin.Ticks + (buckets * Length.Ticks), DateTimeKind.Utc);
     }
 
-    /// <summary>The timestamp itself when on a boundary, otherwise the start of the next bucket.</summary>
+    /// <summary>
+    /// The timestamp itself when on a boundary, otherwise the start of the next bucket. Throws
+    /// <see cref="ArgumentOutOfRangeException"/> at the extremes of the <see cref="DateTime"/> range.
+    /// </summary>
     public DateTime AlignUp(DateTime utc)
     {
         var down = AlignDown(utc);
         return down == utc ? utc : down + Length;
+    }
+
+    internal void EnsureInitialised()
+    {
+        if (Length <= TimeSpan.Zero)
+        {
+            throw new InvalidOperationException("Uninitialised Period.");
+        }
     }
 }

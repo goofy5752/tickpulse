@@ -10,34 +10,35 @@ public readonly record struct SmaWindow(DateTime Start, DateTime EndExclusive)
 public static class SmaWindowCalculator
 {
     /// <summary>
-    /// Without <paramref name="startUtc"/> the window is the <paramref name="n"/> last complete buckets.
-    /// With it, the window starts at the first bucket boundary at or after the offset and is clipped
-    /// to the last complete bucket.
+    /// Without <paramref name="startUtc"/> the window is the <paramref name="n"/> last complete buckets;
+    /// an <paramref name="n"/> reaching before <see cref="DateTime.MinValue"/> throws
+    /// <see cref="ArgumentOutOfRangeException"/>. With it, the window starts at the first bucket boundary
+    /// at or after the offset and is clipped to the last complete bucket. Alignment throws at the extremes
+    /// of the <see cref="DateTime"/> range.
     /// </summary>
     public static SmaWindow Compute(Period p, int n, DateTime? startUtc, DateTime nowUtc)
     {
+        p.EnsureInitialised();
         ArgumentOutOfRangeException.ThrowIfLessThan(n, 1);
-        RequireUtc(nowUtc, nameof(nowUtc));
+        Guard.RequireUtc(nowUtc, nameof(nowUtc));
 
         var lastComplete = p.AlignDown(nowUtc);
-        var span = p.Length * n;
+        var lengthTicks = p.Length.Ticks;
 
         if (startUtc is not { } s)
         {
-            return new SmaWindow(lastComplete - span, lastComplete);
+            if (n > lastComplete.Ticks / lengthTicks)
+            {
+                throw new ArgumentOutOfRangeException(nameof(n), n, "The window reaches before the earliest representable time.");
+            }
+
+            return new SmaWindow(new DateTime(lastComplete.Ticks - (n * lengthTicks), DateTimeKind.Utc), lastComplete);
         }
 
-        RequireUtc(s, nameof(startUtc));
+        Guard.RequireUtc(s, nameof(startUtc));
         var start = p.AlignUp(s);
-        var end = start + span;
-        return new SmaWindow(start, end < lastComplete ? end : lastComplete);
-    }
-
-    private static void RequireUtc(DateTime value, string name)
-    {
-        if (value.Kind != DateTimeKind.Utc)
-        {
-            throw new ArgumentException("Timestamp must have Kind=Utc.", name);
-        }
+        var remaining = (lastComplete.Ticks - start.Ticks) / lengthTicks;
+        var end = n >= remaining ? lastComplete : new DateTime(start.Ticks + (n * lengthTicks), DateTimeKind.Utc);
+        return new SmaWindow(start, end);
     }
 }
