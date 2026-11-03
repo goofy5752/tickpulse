@@ -1,3 +1,4 @@
+using System.Data;
 using Npgsql;
 using NpgsqlTypes;
 using TickPulse.Application.Abstractions;
@@ -11,11 +12,24 @@ namespace TickPulse.Infrastructure.Persistence;
 /// <c>ON CONFLICT DO NOTHING</c>, never reach <c>RETURNING</c> and so never touch a candle. That keeps
 /// <c>price_sum</c>/<c>tick_count</c> exact under reconnect replays, rotation overlap and gap-fill.
 /// </summary>
-public sealed class TickWriter(NpgsqlDataSource dataSource) : ITickWriter
+public sealed class TickWriter(NpgsqlDataSource dataSource, TimeProvider clock) : ITickWriter
 {
+    /// <summary>The raw-tick retention policy on <c>price_ticks</c> (see the Initial migration).</summary>
+    public static readonly TimeSpan RawRetention = TimeSpan.FromDays(14);
+
+    /// <summary>
+    /// Ticks at or before <c>now - ReplayWindow</c> are never inserted. Once retention has dropped a tick's chunk, a
+    /// replay of it would no longer hit the primary key and would be counted into its candle a second time. The
+    /// window is one day narrower than <see cref="RawRetention"/> as headroom for skew between this clock and the
+    /// database clock that the retention job uses; any tick inside it is guaranteed to still be stored.
+    /// </summary>
+    public static readonly TimeSpan ReplayWindow = RawRetention - TimeSpan.FromDays(1);
+
     // A session temp table, private to this connection, so concurrent writers never see each other's rows.
     // ON COMMIT DELETE ROWS empties it at the end of every batch transaction. LIKE copies the column types
-    // (and their numeric scales) but no primary key, so a batch may hold duplicates.
+    // (and their numeric scales) but no primary key, so a batch may hold duplicates. On the writer's own
+    // data source (NoResetOnClose, see DependencyInjection.BuildTickWriterDataSource) the table survives
+    // between batches, so IF NOT EXISTS is a no-op after the first batch on each connection.
     private const string CreateStagingSql =
         "CREATE TEMP TABLE IF NOT EXISTS tick_staging (LIKE price_ticks INCLUDING DEFAULTS) ON COMMIT DELETE ROWS";
 
@@ -31,6 +45,7 @@ public sealed class TickWriter(NpgsqlDataSource dataSource) : ITickWriter
             INSERT INTO price_ticks (symbol_id, agg_trade_id, price, quantity, trade_time, ingested_at)
             SELECT symbol_id, agg_trade_id, price, quantity, trade_time, ingested_at
               FROM tick_staging
+             WHERE trade_time > $1
              ORDER BY symbol_id, agg_trade_id, trade_time
             ON CONFLICT DO NOTHING
             RETURNING symbol_id, agg_trade_id, price, quantity, trade_time),
@@ -80,7 +95,10 @@ public sealed class TickWriter(NpgsqlDataSource dataSource) : ITickWriter
         }
 
         await using var connection = await dataSource.OpenConnectionAsync(ct);
-        await using var transaction = await connection.BeginTransactionAsync(ct);
+        // READ COMMITTED is required for the exact merge: a tick that a concurrent batch is inserting makes ON
+        // CONFLICT wait for that batch and then skip the tick, and the candle upsert then re-reads the latest
+        // committed candle. Under REPEATABLE READ or SERIALIZABLE those cases fail with serialization errors.
+        await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
 
         await using (var create = new NpgsqlCommand(CreateStagingSql, connection, transaction))
         {
@@ -106,6 +124,11 @@ public sealed class TickWriter(NpgsqlDataSource dataSource) : ITickWriter
         int inserted;
         await using (var upsert = new NpgsqlCommand(UpsertSql, connection, transaction))
         {
+            upsert.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = clock.GetUtcNow().UtcDateTime - ReplayWindow,
+                NpgsqlDbType = NpgsqlDbType.TimestampTz,
+            });
             inserted = (int)(await upsert.ExecuteScalarAsync(ct))!;
         }
 

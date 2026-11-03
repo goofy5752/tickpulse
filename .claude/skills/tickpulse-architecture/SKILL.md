@@ -61,7 +61,8 @@ Rules of thumb:
 
 1. **Idempotent ticks.** `price_ticks` PK is `(symbol_id, agg_trade_id, trade_time)`. Every insert
    is `ON CONFLICT DO NOTHING`. Replays after reconnect, rotation overlap and gap-fill must be
-   harmless.
+   harmless. Ticks older than `TickWriter.ReplayWindow` (raw retention minus one day) are never
+   inserted: once retention dropped them they would no longer conflict and would be counted twice.
 2. **Single-statement candle upsert.** Per batch, in one transaction:
    `CREATE TEMP TABLE IF NOT EXISTS tick_staging (LIKE price_ticks INCLUDING DEFAULTS) ON COMMIT DELETE ROWS`
    (a session table, so concurrent writers never see each other's rows; there is no permanent

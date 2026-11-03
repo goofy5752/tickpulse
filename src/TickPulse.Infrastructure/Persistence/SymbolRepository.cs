@@ -93,7 +93,11 @@ public sealed class SymbolRepository(NpgsqlDataSource dataSource, TimeProvider c
             write.Parameters.Add(NameParameter(name));
             write.Parameters.Add(NowParameter());
             await using var reader = await write.ExecuteReaderAsync(ct);
-            await reader.ReadAsync(ct);
+            if (!await reader.ReadAsync(ct))
+            {
+                throw new InvalidOperationException($"Writing symbol {name} returned no row.");
+            }
+
             stored = Read(reader);
         }
 

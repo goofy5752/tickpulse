@@ -1,5 +1,7 @@
+using Microsoft.Extensions.Time.Testing;
 using Npgsql;
 using TickPulse.Domain;
+using TickPulse.Infrastructure;
 using TickPulse.Infrastructure.Persistence;
 using TickPulse.Integration.Tests.Fixtures;
 
@@ -12,17 +14,25 @@ public sealed class TickWriterTests(TimescaleFixture db) : IAsyncLifetime
 
     private static readonly DateTime Minute = new(2026, 3, 2, 10, 15, 0, DateTimeKind.Utc);
 
+    // Trade times in these tests sit an hour before "now", well inside the replay window.
+    private readonly FakeTimeProvider _clock = new(new DateTimeOffset(Minute.AddHours(1)));
     private NpgsqlDataSource _dataSource = null!;
+    private NpgsqlDataSource _writerDataSource = null!;
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     public async ValueTask InitializeAsync()
     {
         await db.ResetAsync();
-        _dataSource = NpgsqlDataSource.Create(db.ConnectionString);
+        _dataSource = DependencyInjection.BuildDataSource(db.ConnectionString, null);
+        _writerDataSource = DependencyInjection.BuildTickWriterDataSource(db.ConnectionString, null);
     }
 
-    public async ValueTask DisposeAsync() => await _dataSource.DisposeAsync();
+    public async ValueTask DisposeAsync()
+    {
+        await _writerDataSource.DisposeAsync();
+        await _dataSource.DisposeAsync();
+    }
 
     [Fact]
     public async Task WriteBatch_InsertsTicksAndBuildsCandle()
@@ -46,8 +56,8 @@ public sealed class TickWriterTests(TimescaleFixture db) : IAsyncLifetime
             Open: 100.10m, High: 102.00000001m, Low: 99.75m, Close: 99.75m,
             FirstTradeId: 1, LastTradeId: 4,
             PriceSum: 403.10000001m, TickCount: 4,
-            // 100.10 + 25.5000000025 + 50.625 + 199.5, stored at the column's 8 dp.
-            Volume: 3.75m, QuoteVolume: 375.725m,
+            // 100.10 + 25.5000000025 + 50.625 + 199.5, kept exactly (quote_volume is unconstrained numeric).
+            Volume: 3.75m, QuoteVolume: 375.7250000025m,
             Source: 1));
     }
 
@@ -224,6 +234,7 @@ public sealed class TickWriterTests(TimescaleFixture db) : IAsyncLifetime
     [Fact]
     public async Task ConcurrentWriters_DoNotSeeEachOthersStagedRows()
     {
+        // Smoke test, not a proof: whether the two transactions really interleave depends on scheduling.
         // Two writers on separate connections, each with its own session temp table, write overlapping
         // id ranges at the same time. Every tick must be counted exactly once.
         const int rounds = 5;
@@ -257,15 +268,123 @@ public sealed class TickWriterTests(TimescaleFixture db) : IAsyncLifetime
               FROM candles_1m k
               FULL JOIN (SELECT symbol_id, time_bucket(INTERVAL '1 minute', trade_time) AS bucket_start,
                                 first(price, agg_trade_id) AS o, max(price) AS h, min(price) AS l,
-                                last(price, agg_trade_id) AS c, sum(price) AS ps, count(*) AS tc, sum(quantity) AS v
+                                last(price, agg_trade_id) AS c, sum(price) AS ps, count(*) AS tc, sum(quantity) AS v,
+                                min(agg_trade_id) AS fid, max(agg_trade_id) AS lid, sum(price * quantity) AS qv
                            FROM price_ticks GROUP BY 1, 2) r
                      USING (symbol_id, bucket_start)
              WHERE k.open IS DISTINCT FROM r.o OR k.high IS DISTINCT FROM r.h OR k.low IS DISTINCT FROM r.l
                 OR k.close IS DISTINCT FROM r.c OR k.price_sum IS DISTINCT FROM r.ps
                 OR k.tick_count IS DISTINCT FROM r.tc OR k.volume IS DISTINCT FROM r.v
+                OR k.first_trade_id IS DISTINCT FROM r.fid OR k.last_trade_id IS DISTINCT FROM r.lid
+                OR k.quote_volume IS DISTINCT FROM r.qv
             """,
             connection);
         ((long)(await command.ExecuteScalarAsync(Ct))!).ShouldBe(0, "every candle must equal the raw aggregate of its ticks");
+    }
+
+    [Fact]
+    public async Task BackfillThenOutOfOrderStream_MergesCorrectly()
+    {
+        (await CandleWriter().InsertBackfillAsync(Btc, [new Kline(Minute, 1m, 9m, 0.5m, 2m, 100m, 150m)], Ct)).ShouldBe(1);
+        var writer = Writer();
+
+        (await writer.WriteBatchAsync([T(Btc, 5, 30m, 1m, 40), T(Btc, 6, 25m, 2m, 50)], Ct)).ShouldBe(2);
+        (await writer.WriteBatchAsync([T(Btc, 3, 20m, 1m, 10), T(Btc, 4, 35m, 3m, 20)], Ct)).ShouldBe(2);
+
+        var candle = (await ReadCandlesAsync()).ShouldHaveSingleItem();
+        candle.ShouldBe(new CandleState(
+            Btc, Minute,
+            Open: 20m, High: 35m, Low: 20m, Close: 25m,
+            FirstTradeId: 3, LastTradeId: 6,
+            PriceSum: 110m, TickCount: 4,
+            Volume: 7m, QuoteVolume: 30m + 50m + 20m + 105m,
+            Source: 1));
+    }
+
+    [Fact]
+    public async Task WriteBatch_TickOlderThanReplayWindow_IsIgnored()
+    {
+        var floor = _clock.GetUtcNow().UtcDateTime - TickWriter.ReplayWindow;
+        Tick[] ticks =
+        [
+            new Tick(Btc, 1, 10m, 1m, floor.AddDays(-2), floor),
+            new Tick(Btc, 2, 11m, 1m, floor, floor),
+            new Tick(Btc, 3, 12m, 1m, floor.AddTicks(10), floor),
+        ];
+
+        var inserted = await Writer().WriteBatchAsync(ticks, Ct);
+
+        // Only the tick strictly inside the window (1 µs after the floor) is stored and counted.
+        inserted.ShouldBe(1);
+        (await CountTicksAsync()).ShouldBe(1);
+        var candle = (await ReadCandlesAsync()).ShouldHaveSingleItem();
+        candle.FirstTradeId.ShouldBe(3);
+        candle.TickCount.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task WriteBatch_ReplayAfterRetentionDroppedTick_ReturnsZeroAndLeavesCandle()
+    {
+        Tick[] ticks = [T(Btc, 1, 10m, 1m, 1), T(Btc, 2, 20m, 1m, 2)];
+        var writer = Writer();
+        (await writer.WriteBatchAsync(ticks, Ct)).ShouldBe(2);
+        var before = await ReadCandlesAsync();
+
+        // Retention has dropped the raw ticks; the candle (kept forever) still counts them.
+        _clock.Advance(TickWriter.RawRetention + TimeSpan.FromDays(1));
+        await ExecuteAsync("DELETE FROM price_ticks");
+
+        var replayed = await writer.WriteBatchAsync(ticks, Ct);
+
+        replayed.ShouldBe(0);
+        (await CountTicksAsync()).ShouldBe(0);
+        (await ReadCandlesAsync()).ShouldBe(before);
+    }
+
+    [Fact]
+    public async Task ReplayWindow_IsInsideRetentionPolicy()
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(Ct);
+        await using var command = new NpgsqlCommand(
+            """
+            SELECT (config->>'drop_after')::interval
+              FROM timescaledb_information.jobs
+             WHERE hypertable_name = 'price_ticks' AND proc_name = 'policy_retention'
+            """,
+            connection);
+        var dropAfter = (TimeSpan)(await command.ExecuteScalarAsync(Ct))!;
+
+        dropAfter.ShouldBe(TickWriter.RawRetention);
+        TickWriter.ReplayWindow.ShouldBeLessThan(TickWriter.RawRetention);
+    }
+
+    [Fact]
+    public async Task TickWriterDataSource_KeepsEmptyStagingTableBetweenBatches()
+    {
+        await Writer().WriteBatchAsync([T(Btc, 1, 10m, 1m, 1)], Ct);
+
+        // The writer's pool has one idle connection now; it comes back without DISCARD ALL.
+        await using var connection = await _writerDataSource.OpenConnectionAsync(Ct);
+        await using var command = new NpgsqlCommand(
+            "SELECT to_regclass('pg_temp.tick_staging') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM tick_staging)",
+            connection);
+
+        ((bool)(await command.ExecuteScalarAsync(Ct))!).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task WriteBatch_AfterFailedBatch_StartsWithEmptyStaging()
+    {
+        var writer = Writer();
+        (await writer.WriteBatchAsync([T(Btc, 1, 10m, 1m, 1)], Ct)).ShouldBe(1);
+
+        // Symbol 999 does not exist: COPY stages the row, then the insert fails on the foreign key.
+        await Should.ThrowAsync<PostgresException>(() => writer.WriteBatchAsync([T(999, 2, 10m, 1m, 2)], Ct));
+
+        // Same pooled connection and temp table. A leftover staged row would fail this batch again.
+        (await writer.WriteBatchAsync([T(Btc, 3, 30m, 1m, 3)], Ct)).ShouldBe(1);
+        (await CountTicksAsync()).ShouldBe(2);
+        (await ReadCandlesAsync()).ShouldHaveSingleItem().PriceSum.ShouldBe(40m);
     }
 
     private static Tick[] Range(long fromId, long toId)
@@ -287,9 +406,16 @@ public sealed class TickWriterTests(TimescaleFixture db) : IAsyncLifetime
     private static Tick T(int symbolId, long id, decimal price, decimal qty, int second) =>
         new(symbolId, id, price, qty, Minute.AddSeconds(second), Minute.AddSeconds(second).AddMilliseconds(5));
 
-    private TickWriter Writer() => new(_dataSource);
+    private TickWriter Writer() => new(_writerDataSource, _clock);
 
     private CandleWriter CandleWriter() => new(_dataSource);
+
+    private async Task ExecuteAsync(string sql)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(Ct);
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(Ct);
+    }
 
     private async Task<long> CountTicksAsync()
     {

@@ -81,7 +81,8 @@ public partial class Initial : Migration
             """);
 
         // 1-minute candles, kept forever. source: 1 = stream, 2 = backfill. Backfill rows carry no
-        // trade ids or sums and never feed the 24 h average.
+        // trade ids or sums and never feed the 24 h average. quote_volume (sum of price * quantity, up to
+        // 16 dp) is unconstrained numeric so that adding batch after batch never rounds.
         migrationBuilder.Sql("""
             CREATE TABLE candles_1m (
                 symbol_id      integer        NOT NULL,
@@ -95,7 +96,7 @@ public partial class Initial : Migration
                 price_sum      numeric(38, 8) NULL,
                 tick_count     bigint         NULL,
                 volume         numeric(28, 8) NOT NULL,
-                quote_volume   numeric(38, 8) NOT NULL,
+                quote_volume   numeric        NOT NULL,
                 source         smallint       NOT NULL,
                 CONSTRAINT pk_candles_1m PRIMARY KEY (symbol_id, bucket_start),
                 CONSTRAINT fk_candles_1m_symbols_symbol_id FOREIGN KEY (symbol_id) REFERENCES symbols (id),
