@@ -25,6 +25,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
         provider.GetRequiredService<ITickWriter>().ShouldBeOfType<TickWriter>();
         provider.GetRequiredService<ICandleWriter>().ShouldBeOfType<CandleWriter>();
         provider.GetRequiredService<ISymbolRepository>().ShouldBeOfType<SymbolRepository>();
+        provider.GetRequiredService<IMarketDataQueries>().ShouldBeOfType<MarketDataQueries>();
         provider.GetRequiredService<TimeProvider>().ShouldBe(TimeProvider.System);
 
         var shared = provider.GetRequiredService<NpgsqlDataSource>();

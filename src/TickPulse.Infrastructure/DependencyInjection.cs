@@ -22,7 +22,8 @@ public static class DependencyInjection
 
     /// <summary>
     /// Registers the shared <see cref="NpgsqlDataSource"/> singleton built from <c>ConnectionStrings:TickPulse</c>,
-    /// the EF Core context on top of it, a keyed data source for the tick writer, and the Npgsql persistence ports.
+    /// the EF Core context on top of it, a keyed data source for the tick writer, and the Npgsql persistence ports
+    /// and read-side queries.
     /// </summary>
     public static IServiceCollection AddTickPulseInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
@@ -43,6 +44,7 @@ public static class DependencyInjection
             sp.GetRequiredService<TimeProvider>()));
         services.AddSingleton<ICandleWriter, CandleWriter>();
         services.AddSingleton<ISymbolRepository, SymbolRepository>();
+        services.AddSingleton<IMarketDataQueries, MarketDataQueries>();
 
         return services;
     }
