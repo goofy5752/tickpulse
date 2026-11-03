@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Live Binance spot prices, 24h averages and simple moving averages from the TickPulse API." />
+    <meta name="theme-color" content="#07070d" />
+    <!-- The page ships its own dark and light themes; stop dark-mode extensions from recolouring it. -->
+    <meta name="darkreader-lock" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>TickPulse</title>
+    <script>
+      // Apply the remembered theme before first paint so light-mode visitors never see a dark flash.
+      try {
+        if (localStorage.getItem('tickpulse.theme') === 'light') document.documentElement.dataset.theme = 'light'
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

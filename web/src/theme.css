@@ -1,0 +1,186 @@
+/*
+ * Aurora Glass: the TickPulse visual system.
+ *
+ * Dark is the default. A night-sky base with two soft auroras (violet top-left, teal top-right)
+ * and translucent glass panels over it. Market colour is semantic and never decorative:
+ * teal = up, rose = down, violet = the SMA. Light mode keeps the same roles on a cool
+ * lavender-white base, with deeper hues so text stays readable.
+ *
+ * Tokens live in @theme so Tailwind generates utilities for them (bg-bg, text-up, border-glass-border,
+ * backdrop-blur-glass, font-mono, ...). The light theme only reassigns the variables.
+ */
+
+@import 'tailwindcss';
+
+@import '@fontsource/inter/latin-400.css';
+@import '@fontsource/inter/latin-500.css';
+@import '@fontsource/inter/latin-600.css';
+@import '@fontsource/inter/latin-700.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
+
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+@custom-variant light (&:where([data-theme='light'], [data-theme='light'] *));
+
+/* static: emit every token, used or not, so script (e.g. chart colours) can read them at runtime. */
+@theme static {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  /* Base and ink */
+  --color-bg: #07070d;
+  --color-ink: #ecedf7;
+  --color-ink-muted: rgb(236 237 247 / 0.64);
+  --color-ink-faint: rgb(236 237 247 / 0.42);
+
+  /* Market semantics */
+  --color-up: #5eead4;
+  --color-down: #fb7185;
+  --color-sma: #c084fc;
+  --color-up-soft: rgb(94 234 212 / 0.16);
+  --color-down-soft: rgb(251 113 133 / 0.16);
+  --color-sma-soft: rgb(192 132 252 / 0.14);
+
+  /* Glass */
+  --color-glass: rgb(255 255 255 / 0.055);
+  --color-glass-strong: rgb(255 255 255 / 0.09);
+  --color-glass-border: rgb(255 255 255 / 0.11);
+  --color-glass-highlight: rgb(255 255 255 / 0.07);
+  --blur-glass: 18px;
+  --radius-glass: 1rem;
+  --radius-control: 0.625rem;
+
+  /* Aurora glows */
+  --color-glow-violet: #3b1d6e;
+  --color-glow-teal: #0e4a5c;
+  --color-glow-plum: #2a0f45;
+
+  --shadow-glass:
+    inset 0 1px 0 0 var(--color-glass-highlight), 0 24px 48px -24px rgb(0 0 0 / 0.55);
+
+  --ease-glide: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  :root,
+  [data-theme='dark'] {
+    color-scheme: dark;
+  }
+
+  [data-theme='light'] {
+    color-scheme: light;
+
+    --color-bg: #f3f2fa;
+    --color-ink: #17152b;
+    --color-ink-muted: rgb(23 21 43 / 0.66);
+    --color-ink-faint: rgb(23 21 43 / 0.46);
+
+    /* Deeper hues so figures clear WCAG AA on the pale base. */
+    --color-up: #0f766e;
+    --color-down: #be123c;
+    --color-sma: #7e22ce;
+    --color-up-soft: rgb(15 118 110 / 0.1);
+    --color-down-soft: rgb(190 18 60 / 0.1);
+    --color-sma-soft: rgb(126 34 206 / 0.09);
+
+    --color-glass: rgb(255 255 255 / 0.62);
+    --color-glass-strong: rgb(255 255 255 / 0.82);
+    --color-glass-border: rgb(23 21 43 / 0.09);
+    --color-glass-highlight: rgb(255 255 255 / 0.9);
+
+    --color-glow-violet: #ddd0ff;
+    --color-glow-teal: #c6edf1;
+    --color-glow-plum: #ecdcff;
+
+    --shadow-glass:
+      inset 0 1px 0 0 var(--color-glass-highlight), 0 18px 40px -24px rgb(40 30 90 / 0.22);
+  }
+
+  html {
+    background-color: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 100%;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    min-height: 100dvh;
+    font-size: 0.875rem;
+    line-height: 1.55;
+    /* Inter's disambiguation set: 1/l/I and 0/O read unambiguously in ticker symbols. */
+    font-feature-settings: 'ss02', 'cv11';
+  }
+
+  /* The aurora: fixed behind everything so panels slide over it instead of scrolling it away. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(70% 45% at 8% 0%, var(--color-glow-violet) 0%, transparent 62%),
+      radial-gradient(60% 40% at 100% 6%, var(--color-glow-teal) 0%, transparent 60%),
+      radial-gradient(55% 35% at 50% 105%, var(--color-glow-plum) 0%, transparent 70%),
+      var(--color-bg);
+  }
+
+  /* Figures line up in columns and do not jitter as live prices tick. */
+  data,
+  time,
+  output,
+  td,
+  th {
+    font-variant-numeric: tabular-nums;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+    font-feature-settings: normal;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-sma);
+    outline-offset: 2px;
+    border-radius: 0.375rem;
+  }
+
+  ::selection {
+    background: var(--color-sma-soft);
+    color: var(--color-ink);
+  }
+}
+
+/* A translucent panel over the aurora. */
+@utility glass {
+  background-color: var(--color-glass);
+  border: 1px solid var(--color-glass-border);
+  border-radius: var(--radius-glass);
+  box-shadow: var(--shadow-glass);
+  /* Standard property only: Lightning CSS adds the -webkit- prefix for Safari itself. */
+  backdrop-filter: blur(var(--blur-glass)) saturate(140%);
+}
+
+/* Any element that shows a number. */
+@utility num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum', 'ss02';
+  letter-spacing: -0.01em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
