@@ -53,8 +53,9 @@ and `tests/coverlet.runsettings` (excludes generated code and migrations).
 
 CI runs `dotnet test -c Release --collect "XPlat Code Coverage"`, merges the Cobertura files with
 ReportGenerator into `coverage/report/Summary.json` and the job summary, and a bash + `jq` step
-fails the job below either threshold. The Domain gate is skipped only while
-`TickPulse.Domain` has no coverable lines. Reproduce locally with the commands in `CLAUDE.md`.
+fails the job below either threshold. It also fails if `TickPulse.Domain` is missing from the
+report or has no coverable lines, or if no coverage was collected at all. Reproduce locally with
+the commands in `CLAUDE.md`.
 
 Do not lower a threshold or widen an exclusion to get green; add the missing tests.
 

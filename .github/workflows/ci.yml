@@ -77,7 +77,8 @@ jobs:
           domain_lines=$(jq -r '[.coverage.assemblies[] | select(.name == "TickPulse.Domain") | .coverablelines] | first // 0' "$summary")
           domain=$(jq -r '[.coverage.assemblies[] | select(.name == "TickPulse.Domain") | .coverage] | first // 0' "$summary")
           if [ "$domain_lines" -eq 0 ]; then
-            echo "::notice::TickPulse.Domain has no coverable lines yet; the Domain gate is skipped."
+            echo "::error::TickPulse.Domain is missing from the coverage report or has no coverable lines."
+            fail=1
           elif below "$domain" "$DOMAIN_LINE_MIN"; then
             echo "::error::TickPulse.Domain line coverage ${domain}% is below ${DOMAIN_LINE_MIN}%."
             fail=1
@@ -91,7 +92,7 @@ jobs:
             echo "|---|---:|---:|"
             echo "| Overall | ${overall}% | ${OVERALL_LINE_MIN}% |"
             if [ "$domain_lines" -eq 0 ]; then
-              echo "| TickPulse.Domain | n/a (no coverable lines) | ${DOMAIN_LINE_MIN}% |"
+              echo "| TickPulse.Domain | missing (fails) | ${DOMAIN_LINE_MIN}% |"
             else
               echo "| TickPulse.Domain | ${domain}% | ${DOMAIN_LINE_MIN}% |"
             fi

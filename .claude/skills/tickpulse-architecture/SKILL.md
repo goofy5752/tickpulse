@@ -13,15 +13,17 @@ Domain ← Application ← Infrastructure ← Api        Contracts ← Api      
 
 | Project | May reference | Must never reference |
 |---|---|---|
-| `TickPulse.Domain` | nothing (BCL only) | anything else; no EF Core, Npgsql, ASP.NET, HTTP, I/O |
-| `TickPulse.Application` | Domain | Infrastructure, Api, Cli, EF Core, Npgsql |
+| `TickPulse.Domain` | nothing (BCL only) | every other project, EF Core, Npgsql, ASP.NET Core, `System.Net.Http`; no I/O (by convention) |
+| `TickPulse.Application` | Domain | Infrastructure, Contracts, Api, Cli, EF Core, Npgsql |
 | `TickPulse.Infrastructure` | Application, Domain | Api, Cli |
-| `TickPulse.Contracts` | nothing (BCL only) | everything else |
+| `TickPulse.Contracts` | nothing (BCL only) | every other project |
 | `TickPulse.Api` | Infrastructure, Application, Domain, Contracts | Cli |
 | `TickPulse.Cli` | Contracts | Domain, Application, Infrastructure, Api; never the DB |
 
-`tests/TickPulse.Architecture.Tests/LayeringTests.cs` enforces this with NetArchTest. When you
-add a project or a new forbidden dependency, add a rule there in the same PR.
+`tests/TickPulse.Architecture.Tests/LayeringTests.cs` enforces this table twice: NetArchTest
+checks type-level dependencies in the built assemblies, and the csproj `ProjectReference`s are
+parsed so that an unused but forbidden reference also fails. Adding a project under `src/` fails
+a test until you add its rules there, in the same PR.
 
 ## Where things go
 
@@ -88,4 +90,4 @@ Rules of thumb:
 - Higher periods aggregate from `candles_1m` in SQL with `time_bucket(width, bucket_start, origin)`
   and `last(close, bucket_start)`; week origin `2000-01-03T00:00:00Z`.
 - Compression/retention are Timescale community features; queries must not depend on them.
-- Clearing tables: `DELETE FROM`, never the T-word statement.
+- Clear tables with `DELETE FROM`.

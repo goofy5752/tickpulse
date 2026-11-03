@@ -7,7 +7,7 @@
           <Format>cobertura</Format>
           <Include>[TickPulse.*]*</Include>
           <Exclude>[TickPulse.*.Tests]*</Exclude>
-          <ExcludeByAttribute>Obsolete,GeneratedCodeAttribute,CompilerGeneratedAttribute,ExcludeFromCodeCoverageAttribute</ExcludeByAttribute>
+          <ExcludeByAttribute>GeneratedCodeAttribute,CompilerGeneratedAttribute,ExcludeFromCodeCoverageAttribute</ExcludeByAttribute>
           <ExcludeByFile>**/obj/**/*.cs,**/Migrations/*.cs</ExcludeByFile>
           <SkipAutoProps>true</SkipAutoProps>
           <DeterministicReport>false</DeterministicReport>
