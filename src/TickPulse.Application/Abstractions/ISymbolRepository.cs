@@ -11,11 +11,17 @@ public interface ISymbolRepository
 
     Task<MonitoredSymbol?> FindAsync(SymbolName name, CancellationToken ct);
 
-    Task<MonitoredSymbol> AddOrReactivateAsync(SymbolName name, CancellationToken ct);
+    /// <summary>
+    /// Creates the symbol, or reactivates it, unless that would take the number of active symbols above
+    /// <paramref name="maxActiveSymbols"/>. The limit check and the write happen atomically, so concurrent
+    /// adds cannot exceed the limit. An already active symbol is returned unchanged.
+    /// </summary>
+    Task<SymbolAddOutcome> AddOrReactivateAsync(SymbolName name, int maxActiveSymbols, CancellationToken ct);
 
     /// <summary>Marks the symbol inactive. Returns <see langword="false"/> when it does not exist.</summary>
     Task<bool> DeactivateAsync(SymbolName name, CancellationToken ct);
 
+    /// <summary>Number of active symbols, for statistics. Not used to enforce the limit.</summary>
     Task<int> CountActiveAsync(CancellationToken ct);
 
     Task SetBackfillStatusAsync(int symbolId, BackfillStatus status, DateTime? fromUtc, CancellationToken ct);

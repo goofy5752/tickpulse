@@ -10,5 +10,17 @@ public sealed record MonitoredSymbol(
     BackfillStatus BackfillStatus,
     DateTime? BackfilledFromUtc);
 
-/// <summary>The result of adding a symbol: the stored symbol and whether it was newly created (vs. reactivated or already active).</summary>
-public sealed record SymbolAddOutcome(MonitoredSymbol Symbol, bool Created);
+/// <summary>What adding a symbol did.</summary>
+public enum SymbolAddStatus
+{
+    Created,
+    Reactivated,
+    AlreadyActive,
+    LimitReached,
+}
+
+/// <summary>
+/// The result of adding a symbol. <see cref="Symbol"/> is the stored symbol, or <see langword="null"/> when
+/// <see cref="Status"/> is <see cref="SymbolAddStatus.LimitReached"/>.
+/// </summary>
+public sealed record SymbolAddOutcome(MonitoredSymbol? Symbol, SymbolAddStatus Status);
