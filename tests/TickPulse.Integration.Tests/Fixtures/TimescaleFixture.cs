@@ -32,6 +32,9 @@ public sealed class TimescaleFixture : IAsyncLifetime
 
     public string ConnectionString { get; private set; } = string.Empty;
 
+    /// <summary>The <c>symbols</c> rows exactly as the migrations left them, read before any test ran.</summary>
+    public IReadOnlyList<SymbolEntity> InitialSymbols { get; private set; } = [];
+
     public async ValueTask InitializeAsync()
     {
         await _container.StartAsync();
@@ -43,6 +46,7 @@ public sealed class TimescaleFixture : IAsyncLifetime
         await using (var context = new TickPulseDbContext(options))
         {
             await context.Database.MigrateAsync();
+            InitialSymbols = await context.Symbols.AsNoTracking().OrderBy(s => s.Id).ToListAsync();
         }
 
         // Keep the policy jobs registered but stop the background scheduler from compressing or
@@ -69,7 +73,6 @@ public sealed class TimescaleFixture : IAsyncLifetime
         {
             BatchCommands =
             {
-                new NpgsqlBatchCommand("DELETE FROM tick_staging"),
                 new NpgsqlBatchCommand("DELETE FROM price_ticks"),
                 new NpgsqlBatchCommand("DELETE FROM candles_1m"),
                 new NpgsqlBatchCommand("DELETE FROM symbols WHERE NOT (name = ANY($1))") { Parameters = { new() { Value = SeedSymbols } } },

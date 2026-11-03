@@ -1,4 +1,5 @@
 using Npgsql;
+using TickPulse.Application.Abstractions;
 using TickPulse.Integration.Tests.Fixtures;
 
 namespace TickPulse.Integration.Tests.Persistence;
@@ -15,23 +16,13 @@ public sealed class SchemaTests(TimescaleFixture db)
     }
 
     [Fact]
-    public async Task Migrations_SeedInitialSymbols()
+    public void Migrations_SeedInitialSymbols()
     {
-        await db.ResetAsync();
+        // Captured by the fixture straight after MigrateAsync, before any test or reset touched the table.
+        var seeded = db.InitialSymbols;
 
-        var symbols = new List<(string Name, bool IsActive)>();
-        await using (var connection = await OpenAsync())
-        await using (var command = new NpgsqlCommand("SELECT name, is_active FROM symbols ORDER BY name", connection))
-        await using (var reader = await command.ExecuteReaderAsync(TestContext.Current.CancellationToken))
-        {
-            while (await reader.ReadAsync(TestContext.Current.CancellationToken))
-            {
-                symbols.Add((reader.GetString(0), reader.GetBoolean(1)));
-            }
-        }
-
-        symbols.Select(s => s.Name).ShouldBe(["ADAUSDT", "BTCUSDT", "ETHUSDT"]);
-        symbols.ShouldAllBe(s => s.IsActive);
+        seeded.Select(s => s.Name).Order(StringComparer.Ordinal).ShouldBe(["ADAUSDT", "BTCUSDT", "ETHUSDT"]);
+        seeded.ShouldAllBe(s => s.IsActive && s.DeactivatedAt == null && s.BackfillStatus == BackfillStatus.NotRequested);
     }
 
     [Fact]
@@ -42,6 +33,29 @@ public sealed class SchemaTests(TimescaleFixture db)
 
         jobs.ShouldContain("policy_compression");
         jobs.ShouldContain("policy_retention");
+    }
+
+    [Fact]
+    public async Task Migrations_CompressionSettings_CoverEveryPrimaryKeyColumn()
+    {
+        // attname:segmentby_index:orderby_index
+        var settings = await QueryStringsAsync(
+            """
+            SELECT concat_ws(':', attname, coalesce(segmentby_column_index::text, ''), coalesce(orderby_column_index::text, ''))
+              FROM timescaledb_information.compression_settings
+             WHERE hypertable_name = 'price_ticks'
+            """);
+
+        settings.Order(StringComparer.Ordinal).ShouldBe(["agg_trade_id::2", "symbol_id:1:", "trade_time::1"]);
+    }
+
+    [Fact]
+    public async Task Migrations_NoPermanentStagingTable()
+    {
+        var tables = await QueryStringsAsync(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'");
+
+        tables.Order(StringComparer.Ordinal).ShouldBe(["__EFMigrationsHistory", "candles_1m", "price_ticks", "symbols"]);
     }
 
     [Fact]
@@ -57,7 +71,6 @@ public sealed class SchemaTests(TimescaleFixture db)
             INSERT INTO price_ticks VALUES (1, 10, 100.5, 0.1, '2026-01-01T00:00:00Z', now());
             INSERT INTO candles_1m (symbol_id, bucket_start, open, high, low, close, volume, quote_volume, source)
             VALUES (1, '2026-01-01T00:00:00Z', 1, 1, 1, 1, 1, 1, 2);
-            INSERT INTO tick_staging VALUES (1, 11, 100.5, 0.1, '2026-01-01T00:00:00Z', now());
             """,
             connection))
         {
@@ -71,7 +84,6 @@ public sealed class SchemaTests(TimescaleFixture db)
             SELECT concat_ws(':', id, name, is_active, deactivated_at IS NULL, backfill_status) FROM symbols
             UNION ALL SELECT 'ticks:' || count(*) FROM price_ticks
             UNION ALL SELECT 'candles:' || count(*) FROM candles_1m
-            UNION ALL SELECT 'staging:' || count(*) FROM tick_staging
             """);
         state.Order(StringComparer.Ordinal).ShouldBe(
         [
@@ -79,7 +91,6 @@ public sealed class SchemaTests(TimescaleFixture db)
             "2:ADAUSDT:t:t:0",
             "3:ETHUSDT:t:t:0",
             "candles:0",
-            "staging:0",
             "ticks:0",
         ]);
     }

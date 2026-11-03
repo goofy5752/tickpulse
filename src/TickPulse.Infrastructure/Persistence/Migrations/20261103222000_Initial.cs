@@ -68,12 +68,13 @@ public partial class Initial : Migration
             CREATE INDEX ix_price_ticks_symbol_id_trade_time ON price_ticks (symbol_id, trade_time DESC);
             """);
 
-        // Community-licensed policies. Queries never depend on them.
+        // Community-licensed policies. Queries never depend on them. Every primary-key column is in
+        // segmentby or orderby, so ON CONFLICT checks against compressed chunks stay narrow.
         migrationBuilder.Sql("""
             ALTER TABLE price_ticks SET (
                 timescaledb.compress,
                 timescaledb.compress_segmentby = 'symbol_id',
-                timescaledb.compress_orderby = 'trade_time');
+                timescaledb.compress_orderby = 'trade_time, agg_trade_id');
 
             SELECT add_compression_policy('price_ticks', INTERVAL '2 days');
             SELECT add_retention_policy('price_ticks', INTERVAL '14 days');
@@ -102,24 +103,14 @@ public partial class Initial : Migration
             );
             """);
 
-        // Per-batch staging for binary COPY. UNLOGGED and unconstrained on purpose.
-        migrationBuilder.Sql("""
-            CREATE UNLOGGED TABLE tick_staging (
-                symbol_id    integer,
-                agg_trade_id bigint,
-                price        numeric(24, 8),
-                quantity     numeric(28, 8),
-                trade_time   timestamptz,
-                ingested_at  timestamptz
-            );
-            """);
+        // No permanent staging table: each tick batch stages into a session temp table inside its
+        // own transaction, so concurrent writers never see each other's rows.
     }
 
     /// <inheritdoc />
     protected override void Down(MigrationBuilder migrationBuilder)
     {
         // Dropping the hypertable also removes its compression and retention jobs.
-        migrationBuilder.DropTable(name: "tick_staging");
         migrationBuilder.DropTable(name: "candles_1m");
         migrationBuilder.DropTable(name: "price_ticks");
         migrationBuilder.DropTable(name: "symbols");
