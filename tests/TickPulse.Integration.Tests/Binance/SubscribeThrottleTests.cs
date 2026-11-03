@@ -53,4 +53,39 @@ public sealed class SubscribeThrottleTests
     [Fact]
     public void Ctor_NonPositiveRate_Throws() =>
         Should.Throw<ArgumentOutOfRangeException>(() => new SubscribeThrottle(0, new FakeTimeProvider()));
+
+    [Fact]
+    public async Task Throttle_WallClockJumpsBack_StillReleasesAfterOneSecond()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var clock = new WallClockSkewProvider(new FakeTimeProvider(new DateTimeOffset(2026, 11, 3, 12, 0, 0, TimeSpan.Zero)));
+        var throttle = new SubscribeThrottle(4, clock);
+        for (var i = 0; i < 4; i++)
+        {
+            await throttle.WaitAsync(ct);
+        }
+
+        var fifth = throttle.WaitAsync(ct).AsTask();
+        clock.Skew = TimeSpan.FromHours(-1); // e.g. an NTP correction; elapsed time must not care
+        clock.Inner.Advance(TimeSpan.FromSeconds(1));
+
+        await fifth.WaitAsync(Timeout, ct);
+    }
+
+    /// <summary>Timers and timestamps come from the fake clock; only the wall clock can be skewed.</summary>
+    private sealed class WallClockSkewProvider(FakeTimeProvider inner) : TimeProvider
+    {
+        public FakeTimeProvider Inner { get; } = inner;
+
+        public TimeSpan Skew { get; set; }
+
+        public override DateTimeOffset GetUtcNow() => Inner.GetUtcNow() + Skew;
+
+        public override long GetTimestamp() => Inner.GetTimestamp();
+
+        public override long TimestampFrequency => Inner.TimestampFrequency;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+            Inner.CreateTimer(callback, state, dueTime, period);
+    }
 }

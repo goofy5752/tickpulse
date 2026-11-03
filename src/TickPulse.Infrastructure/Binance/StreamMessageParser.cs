@@ -88,54 +88,48 @@ public static class StreamMessageParser
 
         while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
         {
-            if (reader.ValueTextEquals("data"u8))
+            var property = TopLevelProperty(ref reader);
+            reader.Read();
+            switch (property)
             {
-                reader.Read();
-                hasData = true;
-                trade = reader.TokenType == JsonTokenType.StartObject ? ReadAggTrade(ref reader) : null;
-                if (trade is null)
-                {
-                    return StreamMessage.Unknown.Instance;
-                }
-            }
-            else if (reader.ValueTextEquals("id"u8))
-            {
-                reader.Read();
-                if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt64(out var value))
-                {
-                    id = value;
-                }
-                else if (reader.TokenType != JsonTokenType.Null)
-                {
-                    return StreamMessage.Unknown.Instance;
-                }
-            }
-            else if (reader.ValueTextEquals("result"u8))
-            {
-                hasResult = true;
-                reader.Read();
-                reader.Skip();
-            }
-            else if (reader.ValueTextEquals("code"u8))
-            {
-                reader.Read();
-                if (reader.TokenType != JsonTokenType.Number || !reader.TryGetInt32(out var value))
-                {
-                    return StreamMessage.Unknown.Instance;
-                }
+                case Top.Data:
+                    hasData = true;
+                    trade = reader.TokenType == JsonTokenType.StartObject ? ReadAggTrade(ref reader) : null;
+                    if (trade is null)
+                    {
+                        return StreamMessage.Unknown.Instance;
+                    }
 
-                code = value;
+                    break;
+                case Top.Id:
+                    if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt64(out var idValue))
+                    {
+                        id = idValue;
+                    }
+                    else if (reader.TokenType != JsonTokenType.Null)
+                    {
+                        return StreamMessage.Unknown.Instance;
+                    }
+
+                    break;
+                case Top.Result:
+                    hasResult = true;
+                    break;
+                case Top.Code:
+                    if (reader.TokenType != JsonTokenType.Number || !reader.TryGetInt32(out var codeValue))
+                    {
+                        return StreamMessage.Unknown.Instance;
+                    }
+
+                    code = codeValue;
+                    break;
+                case Top.Msg:
+                    msg = reader.TokenType == JsonTokenType.String ? reader.GetString() : null;
+                    break;
             }
-            else if (reader.ValueTextEquals("msg"u8))
-            {
-                reader.Read();
-                msg = reader.TokenType == JsonTokenType.String ? reader.GetString() : null;
-            }
-            else
-            {
-                reader.Read();
-                reader.Skip();
-            }
+
+            // Every value is consumed whole: a nested object or array is skipped, never read as siblings.
+            reader.Skip();
         }
 
         if (reader.TokenType != JsonTokenType.EndObject)
@@ -169,46 +163,34 @@ public static class StreamMessageParser
         while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
         {
             // Binance field names are case-sensitive ("e"/"E", "t"/"T").
-            if (reader.ValueTextEquals("e"u8))
+            var property = DataProperty(ref reader);
+            reader.Read();
+            switch (property)
             {
-                reader.Read();
-                isAggTrade = reader.TokenType == JsonTokenType.String && reader.ValueTextEquals("aggTrade"u8);
+                case 'e':
+                    isAggTrade = reader.TokenType == JsonTokenType.String && reader.ValueTextEquals("aggTrade"u8);
+                    break;
+                case 's':
+                    symbol = reader.TokenType == JsonTokenType.String ? ReadSymbol(ref reader) : null;
+                    break;
+                case 'a':
+                    aggTradeId = ReadInt64(ref reader);
+                    break;
+                case 'p':
+                    price = ReadDecimal(ref reader);
+                    break;
+                case 'q':
+                    quantity = ReadDecimal(ref reader);
+                    break;
+                case 'T':
+                    tradeTime = ReadInt64(ref reader);
+                    break;
+                case 'E':
+                    eventTime = ReadInt64(ref reader);
+                    break;
             }
-            else if (reader.ValueTextEquals("s"u8))
-            {
-                reader.Read();
-                symbol = reader.TokenType == JsonTokenType.String ? ReadSymbol(ref reader) : null;
-            }
-            else if (reader.ValueTextEquals("a"u8))
-            {
-                reader.Read();
-                aggTradeId = ReadInt64(ref reader);
-            }
-            else if (reader.ValueTextEquals("p"u8))
-            {
-                reader.Read();
-                price = ReadDecimal(ref reader);
-            }
-            else if (reader.ValueTextEquals("q"u8))
-            {
-                reader.Read();
-                quantity = ReadDecimal(ref reader);
-            }
-            else if (reader.ValueTextEquals("T"u8))
-            {
-                reader.Read();
-                tradeTime = ReadInt64(ref reader);
-            }
-            else if (reader.ValueTextEquals("E"u8))
-            {
-                reader.Read();
-                eventTime = ReadInt64(ref reader);
-            }
-            else
-            {
-                reader.Read();
-                reader.Skip();
-            }
+
+            reader.Skip();
         }
 
         if (reader.TokenType != JsonTokenType.EndObject
@@ -281,5 +263,35 @@ public static class StreamMessageParser
 
         utc = DateTime.UnixEpoch.AddMilliseconds(ms);
         return true;
+    }
+
+    private enum Top
+    {
+        Other,
+        Data,
+        Id,
+        Result,
+        Code,
+        Msg,
+    }
+
+    private static Top TopLevelProperty(ref Utf8JsonReader reader) =>
+        reader.ValueTextEquals("data"u8) ? Top.Data
+        : reader.ValueTextEquals("id"u8) ? Top.Id
+        : reader.ValueTextEquals("result"u8) ? Top.Result
+        : reader.ValueTextEquals("code"u8) ? Top.Code
+        : reader.ValueTextEquals("msg"u8) ? Top.Msg
+        : Top.Other;
+
+    // The aggTrade fields we read are all one ASCII character; anything else maps to '\0' and is skipped.
+    private static char DataProperty(ref Utf8JsonReader reader)
+    {
+        if (reader.ValueIsEscaped || reader.HasValueSequence || reader.ValueSpan.Length != 1)
+        {
+            return '\0';
+        }
+
+        var c = (char)reader.ValueSpan[0];
+        return c is 'e' or 's' or 'a' or 'p' or 'q' or 'T' or 'E' ? c : '\0';
     }
 }

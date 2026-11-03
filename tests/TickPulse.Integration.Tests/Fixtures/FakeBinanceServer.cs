@@ -41,6 +41,8 @@ public sealed class FakeBinanceServer : IAsyncLifetime
 
     private TaskCompletionSource _changed = NewSignal();
     private (int Code, string Msg)? _rejectNext;
+    private bool _suppressNextAck;
+    private int _rateLimitDisconnects;
     private WebApplication? _app;
 
     /// <summary>Base URL for <c>Binance:WsBaseUrl</c>, e.g. <c>ws://127.0.0.1:51234</c>.</summary>
@@ -191,6 +193,34 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         lock (_gate)
         {
             _symbolStatus.Remove(symbol.ToUpperInvariant());
+        }
+    }
+
+    /// <summary>
+    /// When set, a connection that sends more than this many messages within one (real) second is closed with
+    /// <see cref="WebSocketCloseStatus.PolicyViolation"/>, as Binance does at 5. Off (<c>null</c>) by default.
+    /// Only data frames are counted; the pings and pongs that the socket stack handles are invisible here.
+    /// </summary>
+    public int? MaxIncomingMessagesPerSecond { get; set; }
+
+    /// <summary>Connections closed so far for exceeding <see cref="MaxIncomingMessagesPerSecond"/>.</summary>
+    public int RateLimitDisconnects
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _rateLimitDisconnects;
+            }
+        }
+    }
+
+    /// <summary>The next WebSocket command is applied but gets no reply, so the client's ack wait never ends.</summary>
+    public void SuppressNextAck()
+    {
+        lock (_gate)
+        {
+            _suppressNextAck = true;
         }
     }
 
@@ -465,9 +495,11 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     {
         var chunk = new byte[4096];
         var message = new ArrayBufferWriter<byte>();
+        var closing = false;
+        using var closeDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         while (true)
         {
-            var result = await socket.ReceiveAsync(chunk.AsMemory(), ct);
+            var result = await socket.ReceiveAsync(chunk.AsMemory(), closeDeadline.Token);
             if (result.MessageType == WebSocketMessageType.Close)
             {
                 if (socket.State == WebSocketState.CloseReceived)
@@ -486,22 +518,57 @@ public sealed class FakeBinanceServer : IAsyncLifetime
 
             var text = Encoding.UTF8.GetString(message.WrittenSpan);
             message.ResetWrittenCount();
+            if (closing)
+            {
+                // Close frame sent; ignore anything else until the client answers it.
+                continue;
+            }
+
+            if (MaxIncomingMessagesPerSecond is { } limit && connection.CountIncoming() > limit)
+            {
+                // Binance drops connections that send more than 5 messages per second.
+                lock (_gate)
+                {
+                    _rateLimitDisconnects++;
+                }
+
+                closing = true;
+                closeDeadline.CancelAfter(TimeSpan.FromSeconds(2)); // Binance does not wait long for the reply
+                await connection.TryCloseAsync(WebSocketCloseStatus.PolicyViolation, "Too many messages");
+                Signal();
+                continue;
+            }
+
             var reply = HandleCommand(connection, text);
-            await connection.TrySendAsync(reply);
+            if (reply is not null)
+            {
+                await connection.TrySendAsync(reply);
+            }
+
             Signal();
         }
     }
 
-    private byte[] HandleCommand(Connection connection, string text)
+    // Null means "send nothing" (SuppressNextAck).
+    private byte[]? HandleCommand(Connection connection, string text)
     {
         (int Code, string Msg)? reject;
+        bool suppressAck;
         lock (_gate)
         {
             _commands.Add(text);
             reject = _rejectNext;
             _rejectNext = null;
+            suppressAck = _suppressNextAck;
+            _suppressNextAck = false;
         }
 
+        var reply = BuildReply(connection, text, reject);
+        return suppressAck ? null : reply;
+    }
+
+    private static byte[] BuildReply(Connection connection, string text, (int Code, string Msg)? reject)
+    {
         long? id = null;
         try
         {
@@ -691,6 +758,7 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     }
 
     // GET /api/v3/klines?symbol&interval=1m&startTime&endTime&limit (default 500, max 1000), built from the trades.
+    // A minute without trades has no kline, which is also what Binance returns for minutes with no trades.
     private async Task HandleKlinesAsync(HttpContext context)
     {
         if (!TryResolveSymbol(context, out var symbol, out var error))
@@ -723,7 +791,9 @@ public sealed class FakeBinanceServer : IAsyncLifetime
                 .GroupBy(t => UnixMs(t.TradeTimeUtc) / MinuteMs * MinuteMs)
                 .Where(g => g.Key >= (startTime ?? long.MinValue) && g.Key <= (endTime ?? long.MaxValue))
                 .OrderBy(g => g.Key);
-            buckets = startTime is null && endTime is null ? [.. all.TakeLast(take)] : [.. all.Take(take)];
+
+            // Binance: with startTime, ascending from it up to limit; otherwise the latest `limit` ending at endTime (or now).
+            buckets = startTime is not null ? [.. all.Take(take)] : [.. all.TakeLast(take)];
         }
 
         await WriteAsync(context, StatusCodes.Status200OK, Json(writer =>
@@ -757,6 +827,7 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         private readonly Lock _sendGate = new();
         private readonly HashSet<string> _streams = new(StringComparer.Ordinal);
         private readonly TaskCompletionSource _closed = NewSignal();
+        private readonly Queue<long> _incoming = new();
         private Task _sendTail = Task.CompletedTask;
 
         public Task Closed => _closed.Task;
@@ -799,12 +870,38 @@ public sealed class FakeBinanceServer : IAsyncLifetime
                 ? socket.SendAsync(payload, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None)
                 : Task.CompletedTask);
 
-        public Task TryCloseAsync() =>
+        public Task TryCloseAsync(
+            WebSocketCloseStatus status = WebSocketCloseStatus.NormalClosure,
+            string description = "closing") =>
             Enqueue(() => socket.State is WebSocketState.Open or WebSocketState.CloseReceived
-                ? socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "closing", CancellationToken.None)
+                ? socket.CloseOutputAsync(status, description, CancellationToken.None)
                 : Task.CompletedTask);
 
-        public void Abort() => context.Abort();
+        /// <summary>Records one incoming message and returns how many arrived in the last real second.</summary>
+        public int CountIncoming()
+        {
+            // Real time on purpose: the client under test may run on a fake clock, Binance does not.
+            var now = TimeProvider.System.GetTimestamp();
+            _incoming.Enqueue(now);
+            while (TimeProvider.System.GetElapsedTime(_incoming.Peek(), now) >= TimeSpan.FromSeconds(1))
+            {
+                _incoming.Dequeue();
+            }
+
+            return _incoming.Count;
+        }
+
+        public void Abort()
+        {
+            try
+            {
+                context.Abort();
+            }
+            catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or IOException)
+            {
+                // The request has already finished.
+            }
+        }
 
         public void MarkClosed() => _closed.TrySetResult();
 
@@ -824,9 +921,10 @@ public sealed class FakeBinanceServer : IAsyncLifetime
             {
                 await operation();
             }
-            catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or IOException or ObjectDisposedException)
+            catch (Exception)
             {
-                // The connection went away; the receive side notices and unregisters it.
+                // Whatever went wrong (usually the connection went away), the chain must stay usable for the
+                // next send; the receive side notices a dead socket and unregisters it.
             }
         }
     }

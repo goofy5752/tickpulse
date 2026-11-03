@@ -47,6 +47,11 @@ public sealed class BinanceCommandException : Exception
 /// <see cref="Completion"/> completes (server close handshake or <see cref="DisposeAsync"/>) or faults (anything
 /// else). The owner then creates a new connection.</para>
 /// <para>Malformed or unrecognised messages are logged and skipped.</para>
+/// <para>Cancelling a command's token abandons the wait for it but never the socket: the bytes on the wire are
+/// sent with the connection's own lifetime token, because <see cref="ClientWebSocket"/> aborts the whole socket
+/// when a send is cancelled.</para>
+/// <para>All safety timeouts (command ack, close handshake) run on the injected <see cref="TimeProvider"/>. With a
+/// frozen <c>FakeTimeProvider</c> they never fire unless the test advances the clock.</para>
 /// </remarks>
 public sealed partial class BinanceWebSocketConnection : IAsyncDisposable
 {
@@ -108,6 +113,11 @@ public sealed partial class BinanceWebSocketConnection : IAsyncDisposable
     }
 
     /// <summary>Trades in arrival order. Completes when the connection ends.</summary>
+    /// <remarks>
+    /// The channel is bounded and the receive loop waits when it is full (back-pressure, nothing is dropped).
+    /// While it waits it also reads no command acks, so a consumer that stops draining <see cref="Trades"/> makes
+    /// <see cref="SubscribeAsync"/> / <see cref="UnsubscribeAsync"/> time out.
+    /// </remarks>
     public ChannelReader<AggTradeEvent> Trades => _trades.Reader;
 
     /// <summary>Completes when the connection closes normally; faults when it breaks.</summary>
@@ -117,6 +127,7 @@ public sealed partial class BinanceWebSocketConnection : IAsyncDisposable
     public DateTime ConnectedAtUtc { get; private set; }
 
     /// <summary>Opens the socket and starts the receive loop. Call once.</summary>
+    /// <exception cref="ObjectDisposedException">The connection was disposed before or during the connect.</exception>
     public async Task ConnectAsync(CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -125,10 +136,15 @@ public sealed partial class BinanceWebSocketConnection : IAsyncDisposable
             throw new InvalidOperationException("The connection has already been opened; create a new one to reconnect.");
         }
 
+        var lifetime = _lifetime.Token;
         var socket = new ClientWebSocket();
+
+        // Binance pings every 20 s and ClientWebSocket answers each ping with a pong by itself. Unsolicited
+        // keep-alive pongs would only add messages that count toward the 5-per-second limit, so they are off.
+        socket.Options.KeepAliveInterval = TimeSpan.Zero;
         try
         {
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime);
             await socket.ConnectAsync(_streamUrl, linked.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -139,19 +155,39 @@ public sealed partial class BinanceWebSocketConnection : IAsyncDisposable
             throw;
         }
 
-        _socket = socket;
+        // Publish the socket with a full fence, then re-check disposal: either DisposeAsync sees the socket and
+        // closes it, or this sees the disposal and does. The receive loop never starts on a disposed connection.
+        Interlocked.Exchange(ref _socket, socket);
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            socket.Abort();
+            socket.Dispose();
+            _trades.Writer.TryComplete();
+            _completion.TrySetResult();
+            throw new ObjectDisposedException(nameof(BinanceWebSocketConnection));
+        }
+
         ConnectedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
         LogConnected(_streamUrl);
-        _receiveLoop = ReceiveLoopAsync(socket, _lifetime.Token);
+        _receiveLoop = ReceiveLoopAsync(socket, lifetime);
     }
 
     /// <summary>Subscribes to <c>{symbol}@aggTrade</c> for each symbol with one command, and waits for the ack.</summary>
+    /// <remarks>
+    /// A <see cref="TimeoutException"/> or a cancellation after the command was sent means the subscription state
+    /// is <b>unknown</b>: Binance may or may not have applied it (for example while a full <see cref="Trades"/>
+    /// channel stalls ack handling). Callers must reconcile, e.g. by re-sending the desired set; SUBSCRIBE and
+    /// UNSUBSCRIBE are idempotent.
+    /// </remarks>
     /// <exception cref="BinanceCommandException">Binance rejected the command.</exception>
+    /// <exception cref="TimeoutException">No ack within the command timeout.</exception>
     public Task SubscribeAsync(IReadOnlyCollection<string> symbols, CancellationToken cancellationToken) =>
         SendCommandAsync("SUBSCRIBE", symbols, cancellationToken);
 
     /// <summary>Unsubscribes from <c>{symbol}@aggTrade</c> for each symbol with one command, and waits for the ack.</summary>
+    /// <remarks>Timeouts and cancellations leave the state unknown, as for <see cref="SubscribeAsync"/>.</remarks>
     /// <exception cref="BinanceCommandException">Binance rejected the command.</exception>
+    /// <exception cref="TimeoutException">No ack within the command timeout.</exception>
     public Task UnsubscribeAsync(IReadOnlyCollection<string> symbols, CancellationToken cancellationToken) =>
         SendCommandAsync("UNSUBSCRIBE", symbols, cancellationToken);
 
@@ -162,7 +198,7 @@ public sealed partial class BinanceWebSocketConnection : IAsyncDisposable
             return;
         }
 
-        var socket = _socket;
+        var socket = Volatile.Read(ref _socket);
 
         // Best-effort close handshake, skipped while a command is mid-send; the socket is aborted below anyway.
         if (socket is { State: WebSocketState.Open } && await _sendLock.WaitAsync(TimeSpan.Zero).ConfigureAwait(false))
@@ -238,7 +274,7 @@ public sealed partial class BinanceWebSocketConnection : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(symbols);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        var socket = _socket ?? throw new InvalidOperationException("ConnectAsync must complete before sending commands.");
+        var socket = Volatile.Read(ref _socket) ?? throw new InvalidOperationException("ConnectAsync must complete before sending commands.");
         if (symbols.Count == 0)
         {
             return;
@@ -268,7 +304,9 @@ public sealed partial class BinanceWebSocketConnection : IAsyncDisposable
                 throw new InvalidOperationException("The connection has closed.");
             }
 
-            await socket.SendAsync(BuildCommand(method, streams, id), WebSocketMessageType.Text, endOfMessage: true, linked.Token)
+            // Only the lifetime token here: cancelling a ClientWebSocket send aborts the socket, and a caller
+            // giving up on one command must not take the connection down with it.
+            await socket.SendAsync(BuildCommand(method, streams, id), WebSocketMessageType.Text, endOfMessage: true, _lifetime.Token)
                 .ConfigureAwait(false);
         }
         catch
@@ -356,9 +394,10 @@ public sealed partial class BinanceWebSocketConnection : IAsyncDisposable
                 count = 0;
             }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
         {
-            // Disposed locally.
+            // Disposed locally: whatever the aborted socket threw (OperationCanceledException, WebSocketException,
+            // ObjectDisposedException), this is a clean completion.
         }
         catch (Exception ex)
         {
@@ -420,14 +459,24 @@ public sealed partial class BinanceWebSocketConnection : IAsyncDisposable
 
     private async Task TryAnswerCloseAsync(ClientWebSocket socket)
     {
-        if (socket.State != WebSocketState.CloseReceived || !await _sendLock.WaitAsync(CloseTimeout).ConfigureAwait(false))
+        if (socket.State != WebSocketState.CloseReceived)
         {
+            return;
+        }
+
+        using var timeout = new CancellationTokenSource(CloseTimeout, _timeProvider);
+        try
+        {
+            await _sendLock.WaitAsync(timeout.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // A command send is stuck; the socket is torn down without answering the close.
             return;
         }
 
         try
         {
-            using var timeout = new CancellationTokenSource(CloseTimeout, _timeProvider);
             await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, timeout.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)

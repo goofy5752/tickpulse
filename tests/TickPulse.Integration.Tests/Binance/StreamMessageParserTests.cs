@@ -75,6 +75,41 @@ public sealed class StreamMessageParserTests
         message.ShouldBe(new StreamMessage.CommandError(expectedId, expectedCode, expectedMsg));
     }
 
+    [Fact]
+    public void Parse_ErrorWithNestedMsgObject_SkipsTheNestedValue()
+    {
+        const string json = """{"code":2,"msg":{"id":99,"detail":[1,{"code":7}]},"id":5}""";
+
+        var message = StreamMessageParser.Parse(Encoding.UTF8.GetBytes(json));
+
+        message.ShouldBe(new StreamMessage.CommandError(5, 2, string.Empty));
+    }
+
+    [Fact]
+    public void Parse_AggTradeWithNestedEventObject_IsUnknown()
+    {
+        // A nested "e" must be skipped as one value, not read as if its members belonged to "data".
+        const string json =
+            """{"stream":"btcusdt@aggTrade","data":{"E":1,"s":"BTCUSDT","a":1,"p":"1","q":"1","T":1,"e":{"e":"aggTrade"}}}""";
+
+        var message = StreamMessageParser.Parse(Encoding.UTF8.GetBytes(json));
+
+        message.ShouldBeSameAs(StreamMessage.Unknown.Instance);
+    }
+
+    [Fact]
+    public void Parse_AggTradeWithNestedUnknownFields_MapsFields()
+    {
+        const string json =
+            """{"stream":"btcusdt@aggTrade","extra":{"a":[1,2]},"data":{"x":{"p":"9"},"e":"aggTrade","E":1,"s":"BTCUSDT","a":1,"p":"2","q":"3","T":1,"y":[{"q":"8"}]}}""";
+
+        var trade = StreamMessageParser.Parse(Encoding.UTF8.GetBytes(json))
+            .ShouldBeOfType<StreamMessage.AggTrade>().Trade;
+
+        trade.Price.ShouldBe(2m);
+        trade.Quantity.ShouldBe(3m);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("not json")]

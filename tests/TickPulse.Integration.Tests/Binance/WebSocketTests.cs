@@ -14,6 +14,9 @@ public sealed class WebSocketTests : IAsyncLifetime
     private readonly FakeBinanceServer _server = new();
     private readonly FakeTimeProvider _clock = new(new DateTimeOffset(2026, 11, 3, 12, 0, 0, TimeSpan.Zero));
 
+    // Like Binance: more than 5 incoming messages in a second closes the connection.
+    public WebSocketTests() => _server.MaxIncomingMessagesPerSecond = 5;
+
     public ValueTask InitializeAsync() => _server.InitializeAsync();
 
     public ValueTask DisposeAsync() => _server.DisposeAsync();
@@ -147,15 +150,82 @@ public sealed class WebSocketTests : IAsyncLifetime
         }
 
         var fifth = connection.SubscribeAsync(["XRPUSDT"], ct);
-        await _server.WaitUntilAsync(s => s.ReceivedCommands.Count == 4, Timeout, ct);
+
+        // A full server -> client round trip on the same socket. The fifth command was issued before it, so
+        // if it had gone out unthrottled it would have been on the wire by now.
+        await _server.PushTradeAsync("BTCUSDT", 11, 100m, TradeTime);
+        (await connection.Trades.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct)).AggTradeId.ShouldBe(11);
+        _server.ReceivedCommands.Count.ShouldBe(4);
         fifth.IsCompleted.ShouldBeFalse();
 
         _clock.Advance(TimeSpan.FromSeconds(1));
         await fifth.WaitAsync(Timeout, ct);
 
-        var ids = _server.ReceivedCommands.Select(c => ParseCommand(c).Id).ToArray();
-        ids.ShouldBe([1L, 2L, 3L, 4L, 5L]);
+        _server.ReceivedCommands.Select(c => ParseCommand(c).Id).ShouldBe([1L, 2L, 3L, 4L, 5L]);
         _server.SubscribedStreams.ShouldContain("xrpusdt@aggTrade");
+        connection.Completion.IsCompleted.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Subscribe_CanceledWhileThrottled_ConnectionStaysAlive()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new BinanceWebSocketConnection(_server.WsBaseUrl, _clock);
+        await connection.ConnectAsync(ct);
+        foreach (var symbol in new[] { "BTCUSDT", "ETHUSDT", "ADAUSDT", "BNBUSDT" })
+        {
+            await connection.SubscribeAsync([symbol], ct);
+        }
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var throttled = connection.SubscribeAsync(["XRPUSDT"], cts.Token);
+        throttled.IsCompleted.ShouldBeFalse();
+        await cts.CancelAsync();
+
+        await Should.ThrowAsync<OperationCanceledException>(() => throttled);
+        _clock.Advance(TimeSpan.FromSeconds(1));
+        await connection.SubscribeAsync(["SOLUSDT"], ct);
+        await _server.PushTradeAsync("BTCUSDT", 21, 100m, TradeTime);
+
+        (await connection.Trades.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct)).AggTradeId.ShouldBe(21);
+        connection.Completion.IsCompleted.ShouldBeFalse();
+        _server.ActiveConnections.ShouldBe(1);
+        _server.ReceivedCommands.Select(c => ParseCommand(c).Params.Single())
+            .ShouldBe(["btcusdt@aggTrade", "ethusdt@aggTrade", "adausdt@aggTrade", "bnbusdt@aggTrade", "solusdt@aggTrade"]);
+    }
+
+    [Fact]
+    public async Task Subscribe_CanceledWhileAwaitingAck_ConnectionStaysAlive()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new BinanceWebSocketConnection(_server.WsBaseUrl, _clock);
+        await connection.ConnectAsync(ct);
+        _server.SuppressNextAck();
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var unacked = connection.SubscribeAsync(["BTCUSDT"], cts.Token);
+        await _server.WaitUntilAsync(s => s.SubscribedStreams.Contains("btcusdt@aggTrade"), Timeout, ct);
+        unacked.IsCompleted.ShouldBeFalse();
+        await cts.CancelAsync();
+
+        await Should.ThrowAsync<OperationCanceledException>(() => unacked);
+        await connection.SubscribeAsync(["ETHUSDT"], ct);
+        await _server.PushTradeAsync("BTCUSDT", 31, 100m, TradeTime);
+
+        (await connection.Trades.ReadAsync(ct).AsTask().WaitAsync(Timeout, ct)).AggTradeId.ShouldBe(31);
+        connection.Completion.IsCompleted.ShouldBeFalse();
+        _server.ActiveConnections.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Connect_AfterDispose_ThrowsAndOpensNothing()
+    {
+        var connection = new BinanceWebSocketConnection(_server.WsBaseUrl, _clock);
+        await connection.DisposeAsync();
+
+        await Should.ThrowAsync<ObjectDisposedException>(() => connection.ConnectAsync(TestContext.Current.CancellationToken));
+        connection.Completion.IsCompletedSuccessfully.ShouldBeTrue();
+        _server.ActiveConnections.ShouldBe(0);
     }
 
     [Fact]
