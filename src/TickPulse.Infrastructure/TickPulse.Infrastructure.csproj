@@ -12,10 +12,16 @@
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Npgsql" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\TickPulse.Application\TickPulse.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Query-plan tests EXPLAIN the real SQL constants of MarketDataQueries. -->
+    <InternalsVisibleTo Include="TickPulse.Integration.Tests" />
   </ItemGroup>
 
 </Project>

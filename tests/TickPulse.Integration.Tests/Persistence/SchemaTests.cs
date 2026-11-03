@@ -59,6 +59,16 @@ public sealed class SchemaTests(TimescaleFixture db)
     }
 
     [Fact]
+    public async Task Migrations_CreatePartialStreamCandleIndex()
+    {
+        var definitions = await QueryStringsAsync(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'ix_candles_1m_stream'");
+
+        definitions.ShouldHaveSingleItem().ShouldBe(
+            "CREATE INDEX ix_candles_1m_stream ON public.candles_1m USING btree (symbol_id, bucket_start) WHERE (source = 1)");
+    }
+
+    [Fact]
     public async Task ResetAsync_AfterWrites_RestoresSeedAndClearsMarketData()
     {
         await db.ResetAsync();
