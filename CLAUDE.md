@@ -11,8 +11,6 @@ Admins add/remove monitored symbols at runtime (`X-Api-Key`). A console client (
 offers the same analytics, a React dashboard (`web/`) is served by the API, and telemetry goes over
 OTLP to Grafana. One deployable process: the API plus hosted ingestion and backfill workers.
 
-If a git-ignored `CLAUDE.local.md` exists next to this file, read it too; its rules are binding.
-
 ## Layers (enforced by `tests/TickPulse.Architecture.Tests`)
 
 ```
@@ -21,8 +19,8 @@ Domain ← Application ← Infrastructure ← Api      Contracts ← Api      Co
 
 - **Domain**: pure math and types (`Period`, bucket alignment, SMA window/calculator, averages).
   References nothing. No I/O, no EF Core, no Npgsql.
-- **Application**: use cases and ports (`ITickStore`, `ICandleStore`, `ISymbolRepository`, …).
-  References only Domain.
+- **Application**: use cases and ports (`ITickWriter`, `ICandleWriter`, `ISymbolRepository`,
+  `IMarketDataQueries`, `IExchangeMetadata`, …). References only Domain.
 - **Infrastructure**: EF Core (symbols, migrations), Npgsql raw SQL + binary `COPY`
   (ticks/candles), Binance WS/REST clients, leader lock, hosted workers.
 - **Contracts**: DTOs shared by Api and Cli (JSON + `DataContract` XML). References nothing.
@@ -75,11 +73,12 @@ npm --prefix web run dev | build | lint | typecheck
 - **Config keys** (env uses `__`): `ConnectionStrings:TickPulse`, `Admin:*`, `Binance:*`,
   `Ingestion:*`, `Backfill:*`, `Database:RunMigrationsOnStartup`, `Otel:Endpoint`.
   Defaults are listed in the plan's Global Constraints.
-- **Clearing tables** in SQL or shell: use `DELETE FROM`, never the T-word statement.
+- **Clearing tables**: in SQL and shell scripts, clear tables with `DELETE FROM`.
 - **Packages**: versions live only in `Directory.Packages.props` (Central Package Management).
   Add a `PackageReference` only to the project that needs it.
 - **Build settings** (`Directory.Build.props`): `net10.0`, `Nullable`, `ImplicitUsings`,
-  `TreatWarningsAsErrors`, `InvariantGlobalization`. Fix warnings; do not suppress them broadly.
+  `TreatWarningsAsErrors`, `InvariantGlobalization`, `AnalysisLevel=latest-recommended` (CA
+  rules such as CA1822/CA1001 are build errors). Fix them; do not suppress them broadly.
 - **Commits**: scoped Conventional Commits, e.g. `feat(domain): …`, `test(api): …`,
   `fix(ingestion): …`. Never `--no-verify`.
 
