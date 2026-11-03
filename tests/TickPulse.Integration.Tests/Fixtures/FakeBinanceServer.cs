@@ -758,7 +758,8 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     }
 
     // GET /api/v3/klines?symbol&interval=1m&startTime&endTime&limit (default 500, max 1000), built from the trades.
-    // A minute without trades has no kline, which is also what Binance returns for minutes with no trades.
+    // A minute without trades has no kline here. Binance may instead return a zero-volume kline for such a minute
+    // (OHLC = previous close), so code under test must accept both; BinanceRestClientTests covers the zero-volume row.
     private async Task HandleKlinesAsync(HttpContext context)
     {
         if (!TryResolveSymbol(context, out var symbol, out var error))

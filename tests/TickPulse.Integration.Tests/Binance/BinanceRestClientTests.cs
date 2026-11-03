@@ -1,14 +1,17 @@
 using System.Globalization;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using Polly;
 using Polly.CircuitBreaker;
 using Polly.Retry;
+using Polly.Timeout;
 using TickPulse.Application.Abstractions;
 using TickPulse.Domain;
 using TickPulse.Infrastructure.Binance;
@@ -21,8 +24,10 @@ public sealed class BinanceRestClientTests
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
     private static readonly Uri BaseUrl = new("https://binance.test/");
     private static readonly SymbolName Btc = Symbol("BTCUSDT");
+    private static readonly DateTimeOffset Noon = new(2026, 11, 3, 12, 0, 0, TimeSpan.Zero);
 
     private const string TradingInfo = """{"timezone":"UTC","symbols":[{"symbol":"BTCUSDT","status":"TRADING"}]}""";
+    private const string TooManyRequests = """{"code":-1003,"msg":"Too many requests."}""";
 
     [Fact]
     public async Task IsTrading_TradingSymbol_True()
@@ -57,7 +62,7 @@ public sealed class BinanceRestClientTests
     }
 
     [Fact]
-    public async Task IsTrading_OtherBadRequest_ThrowsApiException()
+    public async Task IsTrading_OtherBadRequest_ThrowsNonTransientApiException()
     {
         var stub = new StubHandler();
         stub.Enqueue(HttpStatusCode.BadRequest, """{"code":-1100,"msg":"Illegal characters found in a parameter."}""");
@@ -68,6 +73,68 @@ public sealed class BinanceRestClientTests
 
         ex.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
         ex.ErrorCode.ShouldBe(-1100);
+        ex.IsTransient.ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    [InlineData(HttpStatusCode.RequestTimeout)]
+    public async Task ErrorStatus_ServerSide_ThrowsTransientApiException(HttpStatusCode status)
+    {
+        var stub = new StubHandler();
+        stub.Enqueue(status, "<html>upstream error</html>");
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+
+        var ex = await Should.ThrowAsync<BinanceApiException>(
+            () => rest.GetAggTradesFromAsync(Btc, 1, 10, TestContext.Current.CancellationToken));
+
+        ex.StatusCode.ShouldBe(status);
+        ex.ErrorCode.ShouldBeNull();
+        ex.IsTransient.ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("timeout-rejected")]
+    [InlineData("broken-circuit")]
+    [InlineData("http-client-timeout")]
+    [InlineData("network")]
+    public async Task NoResponse_ThrowsTransientApiExceptionWith503(string failure)
+    {
+        Exception thrown = failure switch
+        {
+            "timeout-rejected" => new TimeoutRejectedException(),
+            "broken-circuit" => new BrokenCircuitException(),
+            "http-client-timeout" => new TaskCanceledException("The request was canceled.", new TimeoutException()),
+            _ => new HttpRequestException("Connection refused"),
+        };
+        var stub = new StubHandler();
+        stub.EnqueueThrow(_ => thrown);
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+
+        var ex = await Should.ThrowAsync<BinanceApiException>(
+            () => rest.IsTradingSymbolAsync(Btc, TestContext.Current.CancellationToken));
+
+        ex.StatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
+        ex.IsTransient.ShouldBeTrue();
+        ex.InnerException.ShouldBeSameAs(thrown);
+    }
+
+    [Fact]
+    public async Task CallerCancellation_DuringRequest_ThrowsOperationCanceled()
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var stub = new StubHandler();
+        stub.EnqueueThrow(_ =>
+        {
+            cts.Cancel();
+            return new TaskCanceledException("canceled", null, cts.Token);
+        });
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+
+        var ex = await CatchAsync(() => rest.IsTradingSymbolAsync(Btc, cts.Token));
+
+        ex.ShouldBeAssignableTo<OperationCanceledException>();
     }
 
     [Fact]
@@ -103,6 +170,21 @@ public sealed class BinanceRestClientTests
     }
 
     [Fact]
+    public async Task Klines_ZeroVolumeMinute_IsReturned()
+    {
+        var stub = new StubHandler();
+        stub.Enqueue(HttpStatusCode.OK, """
+            [[1762171200000,"65005.99000000","65005.99000000","65005.99000000","65005.99000000","0.00000000",1762171259999,"0.00000000",0,"0.00000000","0.00000000","0"]]
+            """);
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+        var from = new DateTime(2025, 11, 3, 12, 0, 0, DateTimeKind.Utc);
+
+        var klines = await rest.GetMinuteKlinesAsync(Btc, from, from, 1, TestContext.Current.CancellationToken);
+
+        klines.ShouldHaveSingleItem().ShouldBe(new Kline(from, 65005.99m, 65005.99m, 65005.99m, 65005.99m, 0m, 0m));
+    }
+
+    [Fact]
     public async Task AggTrades_FromId_ParsesTrades()
     {
         var stub = new StubHandler();
@@ -122,6 +204,38 @@ public sealed class BinanceRestClientTests
     }
 
     [Theory]
+    [InlineData("exchangeInfo", "not json")]
+    [InlineData("exchangeInfo", """{"timezone":"UTC"}""")]
+    [InlineData("exchangeInfo", """{"symbols":[{"symbol":"BTCUSDT"}]}""")]
+    [InlineData("klines", """{"code":0}""")]
+    [InlineData("klines", """[[1762171200000,"1.0","2.0","0.5"]]""")]
+    [InlineData("klines", """[[1762171200000,1.5,"2","0.5","1","1",1762171259999,"1",1,"0","0","0"]]""")]
+    [InlineData("klines", """[[1762171200000,"1,5","2","0.5","1","1",1762171259999,"1",1,"0","0","0"]]""")]
+    [InlineData("aggTrades", """[{"a":1,"q":"1.0","T":1762171200000}]""")]
+    [InlineData("aggTrades", """[{"a":"1","p":"1.0","q":"1.0","T":1762171200000}]""")]
+    [InlineData("aggTrades", """[{"a":1,"p":"1.0","q":"1.0","T":999999999999999999}]""")]
+    public async Task MalformedPayload_ThrowsNonTransientApiException(string endpoint, string body)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var stub = new StubHandler();
+        stub.Enqueue(HttpStatusCode.OK, body);
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+        var t = new DateTime(2025, 11, 3, 12, 0, 0, DateTimeKind.Utc);
+
+        Func<Task> call = endpoint switch
+        {
+            "exchangeInfo" => () => rest.IsTradingSymbolAsync(Btc, ct),
+            "klines" => () => rest.GetMinuteKlinesAsync(Btc, t, t, 1, ct),
+            _ => () => rest.GetAggTradesFromAsync(Btc, 1, 1, ct),
+        };
+        var ex = await Should.ThrowAsync<BinanceApiException>(call);
+
+        ex.Message.ShouldContain($"malformed response from {endpoint}");
+        ex.IsTransient.ShouldBeFalse();
+        ex.InnerException.ShouldNotBeNull();
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(1001)]
     public async Task AggTrades_LimitOutOfRange_Throws(int limit)
@@ -138,7 +252,7 @@ public sealed class BinanceRestClientTests
     public async Task HighUsedWeight_DelaysNextCall()
     {
         var ct = TestContext.Current.CancellationToken;
-        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 11, 3, 12, 0, 10, 500, TimeSpan.Zero));
+        var clock = new FakeTimeProvider(Noon.AddSeconds(10.5));
         var stub = new StubHandler();
         stub.Enqueue(HttpStatusCode.OK, TradingInfo, usedWeight: 4801);
         stub.Enqueue(HttpStatusCode.OK, TradingInfo, usedWeight: 3);
@@ -166,6 +280,29 @@ public sealed class BinanceRestClientTests
     }
 
     [Fact]
+    public async Task HighUsedWeight_WithDateHeader_UsesServerMinuteBoundary()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var clock = new FakeTimeProvider(Noon.AddSeconds(10.5));
+        var stub = new StubHandler();
+
+        // Binance's clock says 12:00:58, so its window resets in 2 s, whatever the local clock says.
+        stub.Enqueue(HttpStatusCode.OK, TradingInfo, usedWeight: 4801, date: Noon.AddSeconds(58));
+        stub.Enqueue(HttpStatusCode.OK, TradingInfo);
+        using var client = NewClient(stub, clock, out var rest);
+
+        (await rest.IsTradingSymbolAsync(Btc, ct)).ShouldBeTrue();
+        var second = rest.IsTradingSymbolAsync(Btc, ct);
+
+        clock.Advance(TimeSpan.FromMilliseconds(1999));
+        second.IsCompleted.ShouldBeFalse();
+        stub.Requests.Count.ShouldBe(1);
+
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        (await second.WaitAsync(Timeout, ct)).ShouldBeTrue();
+    }
+
+    [Fact]
     public async Task UsedWeightAtLimit_DoesNotDelay()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -181,12 +318,30 @@ public sealed class BinanceRestClientTests
     }
 
     [Fact]
+    public async Task Paused_CallerCancels_ThrowsOperationCanceledWithoutRequest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var stub = new StubHandler();
+        stub.Enqueue(HttpStatusCode.OK, TradingInfo, usedWeight: 5000);
+        using var client = NewClient(stub, new FakeTimeProvider(Noon), out var rest);
+        (await rest.IsTradingSymbolAsync(Btc, ct)).ShouldBeTrue();
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var paused = rest.GetAggTradesFromAsync(Btc, 1, 10, cts.Token);
+        paused.IsCompleted.ShouldBeFalse();
+        await cts.CancelAsync();
+
+        (await CatchAsync(() => paused.WaitAsync(Timeout, ct))).ShouldBeAssignableTo<OperationCanceledException>();
+        stub.Requests.Count.ShouldBe(1);
+    }
+
+    [Fact]
     public async Task Status429_RespectsRetryAfter()
     {
         var ct = TestContext.Current.CancellationToken;
-        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 11, 3, 12, 0, 10, TimeSpan.Zero));
+        var clock = new FakeTimeProvider(Noon.AddSeconds(10));
         var stub = new StubHandler();
-        stub.Enqueue((HttpStatusCode)429, """{"code":-1003,"msg":"Too many requests."}""", retryAfterSeconds: 7);
+        stub.Enqueue((HttpStatusCode)429, TooManyRequests, retryAfterSeconds: 7);
         stub.Enqueue(HttpStatusCode.OK, TradingInfo);
         stub.Enqueue(HttpStatusCode.OK, TradingInfo);
         using var client = NewClient(stub, clock, out var rest);
@@ -211,51 +366,89 @@ public sealed class BinanceRestClientTests
     }
 
     [Fact]
-    public async Task Status429_Repeatedly_ThrowsAfterRetries()
+    public async Task Status429_WithoutRetryAfter_WaitsUntilNextMinute()
     {
         var ct = TestContext.Current.CancellationToken;
-        var clock = new FakeTimeProvider();
+        var clock = new FakeTimeProvider(Noon.AddSeconds(10));
+        var stub = new StubHandler();
+        stub.Enqueue((HttpStatusCode)429, TooManyRequests);
+        stub.Enqueue(HttpStatusCode.OK, TradingInfo);
+        using var client = NewClient(stub, clock, out var rest);
+
+        var call = rest.IsTradingSymbolAsync(Btc, ct);
+
+        clock.Advance(TimeSpan.FromMilliseconds(49_999));
+        call.IsCompleted.ShouldBeFalse();
+        stub.Requests.Count.ShouldBe(1);
+
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        (await call.WaitAsync(Timeout, ct)).ShouldBeTrue();
+        stub.Requests.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task Status429_RetryAfterHttpDate_MeasuredFromResponseDate()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var clock = new FakeTimeProvider(Noon.AddSeconds(10));
+        var stub = new StubHandler();
+
+        // The server clock is 5 minutes ahead; "retry at 12:05:30" with Date 12:05:00 means "in 30 s".
+        stub.Enqueue((HttpStatusCode)429, TooManyRequests, date: Noon.AddMinutes(5), retryAfterDate: Noon.AddMinutes(5).AddSeconds(30));
+        stub.Enqueue(HttpStatusCode.OK, TradingInfo);
+        using var client = NewClient(stub, clock, out var rest);
+
+        var call = rest.IsTradingSymbolAsync(Btc, ct);
+
+        clock.Advance(TimeSpan.FromMilliseconds(29_999));
+        call.IsCompleted.ShouldBeFalse();
+        stub.Requests.Count.ShouldBe(1);
+
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        (await call.WaitAsync(Timeout, ct)).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Status429_Repeatedly_ThrowsTransientAfterRetries()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var clock = new TimerTrackingClock(Noon);
         var stub = new StubHandler();
         for (var i = 0; i < 4; i++)
         {
-            stub.Enqueue((HttpStatusCode)429, """{"code":-1003,"msg":"Too many requests."}""", retryAfterSeconds: 1);
+            stub.Enqueue((HttpStatusCode)429, TooManyRequests, retryAfterSeconds: 1);
         }
 
         using var client = NewClient(stub, clock, out var rest);
 
         var call = rest.IsTradingSymbolAsync(Btc, ct);
-        stub.Requests.Count.ShouldBe(1);
 
-        // Each retry waits on the fake clock; keep it moving until the client gives up.
-        using (var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        // Each back-off is one Task.Delay on the clock: wait until the client is parked on it, then release it.
+        for (var pause = 1; pause <= BinanceRestClient.MaxRateLimitRetries; pause++)
         {
-            timeout.CancelAfter(Timeout);
-            while (!call.IsCompleted)
-            {
-                clock.Advance(TimeSpan.FromSeconds(1));
-                await Task.Yield();
-                timeout.Token.ThrowIfCancellationRequested();
-            }
+            await clock.WaitForTimersAsync(pause, ct);
+            stub.Requests.Count.ShouldBe(pause);
+            clock.Advance(TimeSpan.FromSeconds(1));
         }
 
-        var ex = await Should.ThrowAsync<BinanceApiException>(() => call);
+        var ex = await Should.ThrowAsync<BinanceApiException>(() => call.WaitAsync(Timeout, ct));
         ex.StatusCode.ShouldBe((HttpStatusCode)429);
-        stub.Requests.Count.ShouldBe(4);
+        ex.IsTransient.ShouldBeTrue();
+        stub.Requests.Count.ShouldBe(BinanceRestClient.MaxRateLimitRetries + 1);
     }
 
     [Fact]
     public async Task Status418_ThrowsBannedAndBlocksCallsUntilBanEnds()
     {
         var ct = TestContext.Current.CancellationToken;
-        var start = new DateTimeOffset(2026, 11, 3, 12, 0, 0, TimeSpan.Zero);
-        var clock = new FakeTimeProvider(start);
+        var clock = new FakeTimeProvider(Noon);
         var stub = new StubHandler();
         stub.Enqueue((HttpStatusCode)418, """{"code":-1003,"msg":"Way too many requests; IP banned."}""", retryAfterSeconds: 120);
         stub.Enqueue(HttpStatusCode.OK, TradingInfo);
         using var client = NewClient(stub, clock, out var rest);
 
         var banned = await Should.ThrowAsync<BinanceBannedException>(() => rest.IsTradingSymbolAsync(Btc, ct));
-        banned.BannedUntilUtc.ShouldBe(start.AddMinutes(2).UtcDateTime);
+        banned.BannedUntilUtc.ShouldBe(Noon.AddMinutes(2).UtcDateTime);
 
         // While banned, calls fail fast without touching the API (requests during a ban extend it).
         clock.Advance(TimeSpan.FromSeconds(119));
@@ -268,13 +461,27 @@ public sealed class BinanceRestClientTests
     }
 
     [Fact]
+    public async Task Status418_WithoutRetryAfter_BansForTwoMinutes()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var clock = new FakeTimeProvider(Noon.AddSeconds(10));
+        var stub = new StubHandler();
+        stub.Enqueue((HttpStatusCode)418, "");
+        using var client = NewClient(stub, clock, out var rest);
+
+        var banned = await Should.ThrowAsync<BinanceBannedException>(() => rest.IsTradingSymbolAsync(Btc, ct));
+
+        banned.BannedUntilUtc.ShouldBe(Noon.AddSeconds(10).AddMinutes(2).UtcDateTime);
+    }
+
+    [Fact]
     public async Task AddBinanceRest_ResiliencePipeline_LeavesRateLimitStatusesToClient()
     {
         var services = new ServiceCollection();
         services.AddBinanceRest(Config(BaseUrl));
         await using var provider = services.BuildServiceProvider();
         var options = provider.GetRequiredService<IOptionsMonitor<HttpStandardResilienceOptions>>()
-            .Get($"{nameof(BinanceRestClient)}-standard");
+            .Get(BinanceServiceCollectionExtensions.RestResilienceOptionsName);
 
         foreach (var (status, transient) in new[]
         {
@@ -295,20 +502,67 @@ public sealed class BinanceRestClientTests
             .ShouldBe((true, true));
     }
 
-    private static async Task<(bool Retry, bool CircuitBreaker)> ShouldHandleAsync(
-        HttpStandardResilienceOptions options, Outcome<HttpResponseMessage> outcome)
+    [Fact]
+    public async Task AddBinanceRest_HandlerChain_ResilienceWrapsAttemptHandlerOverPooledSockets()
     {
-        var context = ResilienceContextPool.Shared.Get(TestContext.Current.CancellationToken);
-        try
+        var services = new ServiceCollection();
+        services.AddBinanceRest(Config(BaseUrl));
+        await using var provider = services.BuildServiceProvider();
+        var name = BinanceServiceCollectionExtensions.RestClientName;
+
+        provider.GetRequiredService<IOptionsMonitor<HttpClientFactoryOptions>>().Get(name)
+            .HandlerLifetime.ShouldBe(System.Threading.Timeout.InfiniteTimeSpan);
+
+        var chain = new List<HttpMessageHandler>();
+        for (HttpMessageHandler? h = provider.GetRequiredService<IHttpMessageHandlerFactory>().CreateHandler(name);
+            h is not null;
+            h = (h as DelegatingHandler)?.InnerHandler)
         {
-            var retry = await options.Retry.ShouldHandle(new RetryPredicateArguments<HttpResponseMessage>(context, outcome, 0));
-            var breaker = await options.CircuitBreaker.ShouldHandle(new CircuitBreakerPredicateArguments<HttpResponseMessage>(context, outcome));
-            return (retry, breaker);
+            chain.Add(h);
         }
-        finally
+
+        var names = chain.Select(h => h.GetType().Name).ToList();
+        var resilience = names.FindIndex(n => n.Contains("Resilience", StringComparison.Ordinal));
+        resilience.ShouldBeGreaterThanOrEqualTo(0, string.Join(" > ", names));
+        names.IndexOf("BinanceAttemptHandler").ShouldBeGreaterThan(resilience, string.Join(" > ", names));
+        chain[^1].ShouldBeOfType<SocketsHttpHandler>().PooledConnectionLifetime.ShouldBe(TimeSpan.FromMinutes(2));
+    }
+
+    [Fact]
+    public async Task AddBinanceRest_StalledBody_CutOffByAttemptTimeoutAndReportedTransient()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var clock = new TimerTrackingClock(Noon);
+        var stub = new StubHandler();
+        for (var i = 0; i < 5; i++)
         {
-            ResilienceContextPool.Shared.Return(context);
+            stub.EnqueueStalledBody();
         }
+
+        var services = new ServiceCollection();
+        services.AddSingleton<TimeProvider>(clock);
+        services.AddBinanceRest(Config(BaseUrl));
+        services.ConfigureBinanceRestResilience(o => o.Retry.Delay = TimeSpan.Zero);
+        services.AddHttpClient(BinanceServiceCollectionExtensions.RestClientName).ConfigurePrimaryHttpMessageHandler(() => stub);
+        await using var provider = services.BuildServiceProvider();
+        var rest = provider.GetRequiredService<BinanceRestClient>();
+
+        var call = rest.GetAggTradesFromAsync(Btc, 1, 10, ct);
+
+        // Polly's timeouts run on the DI TimeProvider: step past each 10 s attempt timeout until the 30 s total
+        // timeout gives up, waiting after each step for the next attempt's timer (or for the call to end).
+        while (!call.IsCompleted)
+        {
+            var seen = clock.TimersCreated;
+            clock.Advance(TimeSpan.FromSeconds(10));
+            await Task.WhenAny(call, clock.WaitForTimersAsync(seen + 1, ct)).WaitAsync(Timeout, ct);
+        }
+
+        var ex = await Should.ThrowAsync<BinanceApiException>(() => call);
+        ex.StatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
+        ex.IsTransient.ShouldBeTrue();
+        ex.InnerException.ShouldBeOfType<TimeoutRejectedException>();
+        stub.Requests.Count.ShouldBeGreaterThanOrEqualTo(2, "the stalled attempt was cut off and retried");
     }
 
     [Fact]
@@ -349,6 +603,35 @@ public sealed class BinanceRestClientTests
         ]);
     }
 
+    private static async Task<(bool Retry, bool CircuitBreaker)> ShouldHandleAsync(
+        HttpStandardResilienceOptions options, Outcome<HttpResponseMessage> outcome)
+    {
+        var context = ResilienceContextPool.Shared.Get(TestContext.Current.CancellationToken);
+        try
+        {
+            var retry = await options.Retry.ShouldHandle(new RetryPredicateArguments<HttpResponseMessage>(context, outcome, 0));
+            var breaker = await options.CircuitBreaker.ShouldHandle(new CircuitBreakerPredicateArguments<HttpResponseMessage>(context, outcome));
+            return (retry, breaker);
+        }
+        finally
+        {
+            ResilienceContextPool.Shared.Return(context);
+        }
+    }
+
+    private static async Task<Exception?> CatchAsync(Func<Task> action)
+    {
+        try
+        {
+            await action();
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return ex;
+        }
+    }
+
     private static SymbolName Symbol(string raw) =>
         SymbolName.TryCreate(raw, out var name) ? name : throw new ArgumentException(raw, nameof(raw));
 
@@ -375,11 +658,67 @@ public sealed class BinanceRestClientTests
         return culture;
     }
 
+    /// <summary>
+    /// A <see cref="FakeTimeProvider"/> that counts the timers created on it (every <c>Task.Delay</c> and every
+    /// timed <c>CancellationTokenSource</c>), so a test can wait until code is parked on the clock before advancing it.
+    /// </summary>
+    private sealed class TimerTrackingClock(DateTimeOffset start) : FakeTimeProvider(start)
+    {
+        private readonly Lock _gate = new();
+        private int _timers;
+        private TaskCompletionSource _created = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int TimersCreated
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _timers;
+                }
+            }
+        }
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = base.CreateTimer(callback, state, dueTime, period);
+            TaskCompletionSource created;
+            lock (_gate)
+            {
+                _timers++;
+                created = _created;
+                _created = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+
+            created.TrySetResult();
+            return timer;
+        }
+
+        public async Task WaitForTimersAsync(int count, CancellationToken ct)
+        {
+            while (true)
+            {
+                Task next;
+                lock (_gate)
+                {
+                    if (_timers >= count)
+                    {
+                        return;
+                    }
+
+                    next = _created.Task;
+                }
+
+                await next.WaitAsync(Timeout, ct);
+            }
+        }
+    }
+
     /// <summary>Answers requests from a queue of canned responses and records every request URI.</summary>
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly Lock _gate = new();
-        private readonly Queue<Func<HttpResponseMessage>> _responses = new();
+        private readonly Queue<Func<CancellationToken, HttpResponseMessage>> _responses = new();
         private readonly List<Uri> _requests = [];
 
         public IReadOnlyList<Uri> Requests
@@ -393,34 +732,48 @@ public sealed class BinanceRestClientTests
             }
         }
 
-        public void Enqueue(HttpStatusCode status, string json, int? usedWeight = null, int? retryAfterSeconds = null)
+        public void Enqueue(
+            HttpStatusCode status,
+            string body,
+            int? usedWeight = null,
+            int? retryAfterSeconds = null,
+            DateTimeOffset? date = null,
+            DateTimeOffset? retryAfterDate = null) => Add(_ =>
         {
-            lock (_gate)
+            var response = new HttpResponseMessage(status)
             {
-                _responses.Enqueue(() =>
-                {
-                    var response = new HttpResponseMessage(status)
-                    {
-                        Content = new StringContent(json, Encoding.UTF8, "application/json"),
-                    };
-                    if (usedWeight is { } weight)
-                    {
-                        response.Headers.Add("x-mbx-used-weight-1m", weight.ToString(CultureInfo.InvariantCulture));
-                    }
-
-                    if (retryAfterSeconds is { } seconds)
-                    {
-                        response.Headers.Add("Retry-After", seconds.ToString(CultureInfo.InvariantCulture));
-                    }
-
-                    return response;
-                });
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            };
+            if (usedWeight is { } weight)
+            {
+                response.Headers.Add("x-mbx-used-weight-1m", weight.ToString(CultureInfo.InvariantCulture));
             }
-        }
+
+            if (retryAfterSeconds is { } seconds)
+            {
+                response.Headers.Add("Retry-After", seconds.ToString(CultureInfo.InvariantCulture));
+            }
+
+            if (retryAfterDate is { } until)
+            {
+                response.Headers.RetryAfter = new RetryConditionHeaderValue(until);
+            }
+
+            response.Headers.Date = date;
+            return response;
+        });
+
+        public void EnqueueThrow(Func<CancellationToken, Exception> exception) => Add(ct => throw exception(ct));
+
+        /// <summary>200 with headers, then a body that never arrives (until the read is cancelled).</summary>
+        public void EnqueueStalledBody() => Add(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new StalledStream()),
+        });
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            Func<HttpResponseMessage> next;
+            Func<CancellationToken, HttpResponseMessage> next;
             lock (_gate)
             {
                 _requests.Add(request.RequestUri!);
@@ -429,9 +782,62 @@ public sealed class BinanceRestClientTests
                     : throw new InvalidOperationException($"No canned response left for {request.RequestUri}");
             }
 
-            var response = next();
-            response.RequestMessage = request;
-            return Task.FromResult(response);
+            try
+            {
+                var response = next(cancellationToken);
+                response.RequestMessage = request;
+                return Task.FromResult(response);
+            }
+            catch (Exception ex)
+            {
+                return Task.FromException<HttpResponseMessage>(ex);
+            }
         }
+
+        private void Add(Func<CancellationToken, HttpResponseMessage> response)
+        {
+            lock (_gate)
+            {
+                _responses.Enqueue(response);
+            }
+        }
+    }
+
+    private sealed class StalledStream : Stream
+    {
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(System.Threading.Timeout.Infinite, cancellationToken);
+            return 0;
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override void Flush()
+        {
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }

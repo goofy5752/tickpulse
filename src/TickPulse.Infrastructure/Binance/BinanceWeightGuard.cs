@@ -1,4 +1,6 @@
 using System.Globalization;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace TickPulse.Infrastructure.Binance;
 
@@ -11,15 +13,18 @@ namespace TickPulse.Infrastructure.Binance;
 /// <remarks>
 /// <list type="bullet">
 /// <item>A response reporting <c>X-MBX-USED-WEIGHT-1M</c> above <see cref="UsedWeightLimit"/> pauses requests
-/// until the start of the next UTC minute, when the window resets.</item>
+/// until the start of the next minute, when the window resets.</item>
 /// <item>A <c>429</c> pauses requests for its <c>Retry-After</c> (until the next minute if absent).</item>
 /// <item>A <c>418</c> marks the IP as banned for its <c>Retry-After</c> (2 minutes if absent, the shortest
 /// Binance ban). While banned, <see cref="WaitAsync"/> throws <see cref="BinanceBannedException"/> instead of
 /// waiting, because every request during a ban extends it.</item>
 /// </list>
-/// All deadlines are absolute instants on the injected <see cref="TimeProvider"/>.
+/// <para>Durations are measured on Binance's clock when the response carries a <c>Date</c> header: the minute
+/// boundary and an HTTP-date <c>Retry-After</c> are relative to that <c>Date</c>, not to the local clock, so clock
+/// skew does not shift the pause. The resulting duration is then applied to the injected
+/// <see cref="TimeProvider"/>, on which all deadlines and waits run.</para>
 /// </remarks>
-public sealed class BinanceWeightGuard
+public sealed partial class BinanceWeightGuard
 {
     /// <summary>Used weight above which requests pause until the next minute (80 % of 6000).</summary>
     public const int UsedWeightLimit = 4800;
@@ -29,23 +34,27 @@ public sealed class BinanceWeightGuard
     private static readonly TimeSpan DefaultBanDuration = TimeSpan.FromMinutes(2);
 
     private readonly Lock _gate = new();
+    private readonly ILogger _logger;
     private DateTimeOffset _resumeAt = DateTimeOffset.MinValue;
     private DateTimeOffset _bannedUntil = DateTimeOffset.MinValue;
 
-    public BinanceWeightGuard(TimeProvider timeProvider)
+    public BinanceWeightGuard(TimeProvider timeProvider, ILogger<BinanceWeightGuard>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
         TimeProvider = timeProvider;
+        _logger = (ILogger?)logger ?? NullLogger.Instance;
     }
 
     public TimeProvider TimeProvider { get; }
 
     /// <summary>Completes when a request may be sent. Completes synchronously when nothing is paused.</summary>
     /// <exception cref="BinanceBannedException">The IP is currently banned.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled while waiting.</exception>
     public async ValueTask WaitAsync(CancellationToken ct)
     {
         while (true)
         {
+            ct.ThrowIfCancellationRequested();
             DateTimeOffset resumeAt, bannedUntil;
             lock (_gate)
             {
@@ -70,45 +79,66 @@ public sealed class BinanceWeightGuard
         }
     }
 
-    /// <summary>Reads <c>X-MBX-USED-WEIGHT-1M</c>; above the limit, pauses until the next minute.</summary>
-    /// <returns>The resume instant when this response caused a pause; otherwise <see langword="null"/>.</returns>
-    internal (int UsedWeight, DateTimeOffset ResumeAt)? ObserveUsedWeight(HttpResponseMessage response)
+    /// <summary>
+    /// Reads <c>X-MBX-USED-WEIGHT-1M</c>; above the limit, pauses until the next minute. Safe to call more than
+    /// once for the same response (per attempt and per call): the deadline only moves forward and the pause is
+    /// logged once, when it begins.
+    /// </summary>
+    internal void ObserveUsedWeight(HttpResponseMessage response)
     {
         if (!response.Headers.TryGetValues(UsedWeightHeader, out var values)
             || !int.TryParse(values.FirstOrDefault(), NumberStyles.None, CultureInfo.InvariantCulture, out var used)
             || used <= UsedWeightLimit)
         {
-            return null;
+            return;
         }
 
-        var resumeAt = NextMinute(TimeProvider.GetUtcNow());
-        Extend(ref _resumeAt, resumeAt);
-        return (used, resumeAt);
-    }
-
-    /// <summary>Records a <c>429</c>: pauses for <paramref name="retryAfter"/>, or until the next minute.</summary>
-    internal DateTimeOffset RateLimited(TimeSpan? retryAfter)
-    {
         var now = TimeProvider.GetUtcNow();
-        var resumeAt = retryAfter is { } delay && delay > TimeSpan.Zero ? now + delay : NextMinute(now);
-        return Extend(ref _resumeAt, resumeAt);
+        var resumeAt = Extend(ref _resumeAt, now + UntilNextMinute(response), out var previous);
+        if (previous <= now)
+        {
+            LogWeightPause(used, UsedWeightLimit, resumeAt);
+        }
     }
 
-    /// <summary>Records a <c>418</c>: banned for <paramref name="retryAfter"/>, or 2 minutes.</summary>
-    internal DateTimeOffset Banned(TimeSpan? retryAfter)
+    /// <summary>Records a <c>429</c>: pauses for its <c>Retry-After</c>, or until the next minute.</summary>
+    /// <returns>The instant requests resume.</returns>
+    internal DateTimeOffset RateLimited(HttpResponseMessage response) =>
+        Extend(ref _resumeAt, TimeProvider.GetUtcNow() + (RetryAfter(response) ?? UntilNextMinute(response)), out _);
+
+    /// <summary>Records a <c>418</c>: banned for its <c>Retry-After</c>, or 2 minutes.</summary>
+    /// <returns>The instant the ban ends.</returns>
+    internal DateTimeOffset Banned(HttpResponseMessage response) =>
+        Extend(ref _bannedUntil, TimeProvider.GetUtcNow() + (RetryAfter(response) ?? DefaultBanDuration), out _);
+
+    // Binance's "now": the response Date header (1 s resolution, so the wait errs long, never short), else ours.
+    private DateTimeOffset ServerNow(HttpResponseMessage response) => response.Headers.Date ?? TimeProvider.GetUtcNow();
+
+    private TimeSpan UntilNextMinute(HttpResponseMessage response)
     {
-        var duration = retryAfter is { } delay && delay > TimeSpan.Zero ? delay : DefaultBanDuration;
-        return Extend(ref _bannedUntil, TimeProvider.GetUtcNow() + duration);
+        var now = ServerNow(response);
+        var minuteStart = now.UtcTicks - (now.UtcTicks % TimeSpan.TicksPerMinute);
+        return TimeSpan.FromTicks(minuteStart + TimeSpan.TicksPerMinute - now.UtcTicks);
     }
 
-    private static DateTimeOffset NextMinute(DateTimeOffset now) =>
-        new(now.UtcTicks - (now.UtcTicks % TimeSpan.TicksPerMinute) + TimeSpan.TicksPerMinute, TimeSpan.Zero);
+    // Retry-After as delta-seconds (what Binance sends) or as an HTTP-date relative to the response Date.
+    private TimeSpan? RetryAfter(HttpResponseMessage response)
+    {
+        var delay = response.Headers.RetryAfter switch
+        {
+            { Delta: { } delta } => delta,
+            { Date: { } date } => date - ServerNow(response),
+            _ => (TimeSpan?)null,
+        };
+        return delay > TimeSpan.Zero ? delay : null;
+    }
 
     // Deadlines only move forward: a shorter Retry-After never cuts an existing pause short.
-    private DateTimeOffset Extend(ref DateTimeOffset deadline, DateTimeOffset proposed)
+    private DateTimeOffset Extend(ref DateTimeOffset deadline, DateTimeOffset proposed, out DateTimeOffset previous)
     {
         lock (_gate)
         {
+            previous = deadline;
             if (proposed > deadline)
             {
                 deadline = proposed;
@@ -117,4 +147,7 @@ public sealed class BinanceWeightGuard
             return deadline;
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Binance used weight {UsedWeight} is above {Limit}; pausing REST calls until {ResumeAt:O}")]
+    private partial void LogWeightPause(int usedWeight, int limit, DateTimeOffset resumeAt);
 }
