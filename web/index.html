@@ -12,7 +12,10 @@
     <script>
       // Apply the remembered theme before first paint so light-mode visitors never see a dark flash.
       try {
-        if (localStorage.getItem('tickpulse.theme') === 'light') document.documentElement.dataset.theme = 'light'
+        if (localStorage.getItem('tickpulse.theme') === 'light') {
+          document.documentElement.dataset.theme = 'light'
+          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#f3f2fa')
+        }
       } catch {}
     </script>
   </head>

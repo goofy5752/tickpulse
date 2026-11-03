@@ -40,6 +40,15 @@ export default tseslint.config(
     },
   },
   {
+    // Plain JavaScript (today only this file): core rules, no type information.
+    files: ['**/*.js'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+    },
+  },
+  {
     files: ['*.config.{js,ts}'],
     languageOptions: { globals: globals.node },
   },

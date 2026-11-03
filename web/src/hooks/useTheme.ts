@@ -5,6 +5,9 @@ export type Theme = 'dark' | 'light'
 /** Shared with the pre-paint script in index.html, which applies the stored theme before React loads. */
 export const THEME_STORAGE_KEY = 'tickpulse.theme'
 
+/** Browser chrome colour per theme; matches `--color-bg` in theme.css and the script in index.html. */
+export const THEME_COLORS: Record<Theme, string> = { dark: '#07070d', light: '#f3f2fa' }
+
 function initialTheme(): Theme {
   if (document.documentElement.dataset.theme === 'light') return 'light'
   try {
@@ -20,6 +23,7 @@ export function useTheme() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', THEME_COLORS[theme])
     try {
       localStorage.setItem(THEME_STORAGE_KEY, theme)
     } catch {

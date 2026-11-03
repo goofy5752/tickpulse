@@ -93,8 +93,10 @@ export interface ProblemResponse {
   type: string
   title: string
   status: number
-  detail: string | null
-  traceId: string | null
+  detail?: string | null
+  traceId?: string | null
+  /** Field-level messages on `validation` problems, keyed by parameter name. */
+  errors?: Record<string, string[]>
 }
 
 /** The hub's `price` message: the latest trade for one subscribed symbol. */

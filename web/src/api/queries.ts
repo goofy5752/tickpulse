@@ -1,4 +1,4 @@
-import { keepPreviousData, QueryClient, useQuery } from '@tanstack/react-query'
+import { QueryClient, useQuery } from '@tanstack/react-query'
 import { ApiError, apiPaths, getJson } from './client'
 import type {
   AveragePriceResponse,
@@ -43,6 +43,16 @@ export function createQueryClient(): QueryClient {
   })
 }
 
+/**
+ * Keeps showing the previous result while a new one loads, but only for the same symbol
+ * (index 1 of every symbol-scoped query key). Switching symbols shows a loading state instead
+ * of another symbol's numbers.
+ */
+function keepPreviousForSymbol(symbol: string) {
+  return <T>(previous: T | undefined, previousQuery?: { queryKey: readonly unknown[] }): T | undefined =>
+    previousQuery?.queryKey[1] === symbol ? previous : undefined
+}
+
 function normalise(symbol: string | undefined): string {
   return (symbol ?? '').trim().toUpperCase()
 }
@@ -78,7 +88,7 @@ export function useSma(symbol: string | undefined, n: number, p: Period, s?: str
     queryKey: queryKeys.sma(sym, n, p, start || undefined),
     queryFn: ({ signal }) => getJson<SmaResponse>(apiPaths.sma(sym, n, p, start || undefined), { signal }),
     enabled: sym.length > 0 && isValidSmaN(n),
-    placeholderData: keepPreviousData,
+    placeholderData: keepPreviousForSymbol(sym),
     // A fixed start describes a closed window; only "up to now" moves.
     refetchInterval: start ? false : 30_000,
   })
@@ -91,17 +101,20 @@ export function useCandles(symbol: string | undefined, p: Period, limit: number 
     queryKey: queryKeys.candles(s, p, limit),
     queryFn: ({ signal }) => getJson<CandleResponse[]>(apiPaths.candles(s, p, limit), { signal }),
     enabled: s.length > 0,
-    placeholderData: keepPreviousData,
+    placeholderData: keepPreviousForSymbol(s),
     refetchInterval: p === '1m' || p === '5m' ? 15_000 : 60_000,
   })
 }
 
-/** Ingestion stats over HTTP; the hub pushes the same shape, so this is the fallback. */
+/**
+ * Ingestion stats over HTTP. The hub pushes the same shape every 2 s, so this is only a fallback:
+ * it is off unless the caller enables it (e.g. while the hub is not connected).
+ */
 export function useStats(options: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: queryKeys.stats(),
     queryFn: ({ signal }) => getJson<SystemStatsResponse>(apiPaths.stats(), { signal }),
-    enabled: options.enabled ?? true,
+    enabled: options.enabled ?? false,
     refetchInterval: 10_000,
   })
 }

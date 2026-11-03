@@ -5,7 +5,7 @@ import {
   type IRetryPolicy,
   LogLevel,
 } from '@microsoft/signalr'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { apiUrl } from '@/api/client'
 import type { LivePrice, SystemStatsResponse } from '@/api/types'
 
@@ -53,11 +53,19 @@ export function useMarketHub(symbols: readonly string[]): MarketHubState {
   const [prices, setPrices] = useState<Record<string, LivePrice>>({})
   const [stats, setStats] = useState<SystemStatsResponse | null>(null)
 
-  const connectionRef = useRef<HubConnection | null>(null)
+  // When the symbol list changes, drop the prices of removed symbols right away (during render,
+  // React's pattern for state derived from props), so re-adding one never shows a stale price.
+  const [pricesKey, setPricesKey] = useState(symbolsKey)
+  if (pricesKey !== symbolsKey) {
+    setPricesKey(symbolsKey)
+    const wanted = new Set(symbolsKey.split(','))
+    setPrices((previous) => Object.fromEntries(Object.entries(previous).filter(([symbol]) => wanted.has(symbol))))
+  }
+
+  /** The live connection and the symbols joined on it; each connection gets its own set. */
+  const hubRef = useRef<{ connection: HubConnection; joined: Set<string> } | null>(null)
   /** Symbols the caller wants. */
   const wantedRef = useRef(new Set<string>())
-  /** Symbols joined on the current server-side connection. */
-  const joinedRef = useRef(new Set<string>())
 
   // Owns the connection: build, start (retrying), and stop on unmount.
   useEffect(() => {
@@ -65,14 +73,14 @@ export function useMarketHub(symbols: readonly string[]): MarketHubState {
     // A function, not a flag: callbacks and awaits must see the value at the time they run.
     const disposed = () => lifetime.signal.aborted
     let retryTimer: ReturnType<typeof setTimeout> | undefined
-    const joined = joinedRef.current
+    const joined = new Set<string>()
 
     const connection = new HubConnectionBuilder()
       .withUrl(apiUrl(MARKET_HUB_PATH))
       .withAutomaticReconnect(retryForever)
       .configureLogging(import.meta.env.DEV ? LogLevel.Warning : LogLevel.None)
       .build()
-    connectionRef.current = connection
+    hubRef.current = { connection, joined }
 
     connection.on('price', (update: LivePrice) => {
       const symbol = update.symbol.toUpperCase()
@@ -125,8 +133,7 @@ export function useMarketHub(symbols: readonly string[]): MarketHubState {
     return () => {
       lifetime.abort()
       clearTimeout(retryTimer)
-      connectionRef.current = null
-      joined.clear()
+      if (hubRef.current?.connection === connection) hubRef.current = null
       void connection.stop().catch(() => undefined)
     }
   }, [])
@@ -134,17 +141,11 @@ export function useMarketHub(symbols: readonly string[]): MarketHubState {
   // Follows the wanted symbols on whatever connection is currently up.
   useEffect(() => {
     wantedRef.current = new Set(symbolsKey.length > 0 ? symbolsKey.split(',') : [])
-    const connection = connectionRef.current
-    if (connection) syncSubscriptions(connection, wantedRef.current, joinedRef.current)
+    const hub = hubRef.current
+    if (hub) syncSubscriptions(hub.connection, wantedRef.current, hub.joined)
   }, [symbolsKey])
 
-  // Prices for symbols that were dropped are hidden immediately, not when the next tick arrives.
-  const visiblePrices = useMemo(() => {
-    const wanted = new Set(symbolsKey.split(','))
-    return Object.fromEntries(Object.entries(prices).filter(([symbol]) => wanted.has(symbol)))
-  }, [prices, symbolsKey])
-
-  return { status, prices: visiblePrices, stats }
+  return { status, prices, stats }
 }
 
 /**

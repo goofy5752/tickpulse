@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { adminRequest, ApiError, apiPaths, getJson, getRaw } from './client'
+import { adminRequest, ApiError, apiPaths, apiUrl, getJson, getRaw, MissingApiKeyError } from './client'
 
 function stubFetch(response: Response) {
   const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(response)
@@ -33,7 +33,23 @@ describe('getRaw', () => {
     expect(result.status).toBe(200)
     expect(result.contentType).toBe('application/xml; charset=utf-8')
     expect(result.body).toBe(xml)
-    expect(result.durationMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('getRaw_MeasuresDurationAcrossTheWholeResponse', async () => {
+    stubFetch(new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.spyOn(performance, 'now').mockReturnValueOnce(100).mockReturnValueOnce(142)
+
+    const result = await getRaw('/api/symbols', 'application/json')
+
+    expect(result.durationMs).toBe(42)
+  })
+
+  it('getRaw_NeverSendsApiKey', async () => {
+    const fetchMock = stubFetch(new Response('{}', { status: 200 }))
+
+    await getRaw('/api/symbols', 'application/json')
+
+    expect(headersOf(fetchMock).has('X-Api-Key')).toBe(false)
   })
 
   it('getRaw_ReturnsProblemBodyWithoutThrowing', async () => {
@@ -61,6 +77,7 @@ describe('getJson', () => {
 
     expect(body).toEqual([{ symbol: 'BTCUSDT', isActive: true }])
     expect(headersOf(fetchMock).get('Accept')).toBe('application/json')
+    expect(headersOf(fetchMock).has('X-Api-Key')).toBe(false)
   })
 
   it('getJson_ProblemResponse_ThrowsApiErrorWithProblem', async () => {
@@ -120,6 +137,75 @@ describe('adminRequest', () => {
     const result = await adminRequest('DELETE', '/api/admin/symbols/SOLUSDT', 'secret-key')
 
     expect(result).toEqual({ status: 204, data: undefined })
+  })
+
+  it.each([
+    [401, 'unauthorized', 'The X-Api-Key header is missing or wrong.'],
+    [403, 'admin-disabled', 'Admin endpoints are disabled because no API key is configured.'],
+    [409, 'symbol-limit', 'At most 20 symbols can be active.'],
+  ])('adminRequest_Problem%i_ThrowsApiErrorWithDetail', async (status, slug, detail) => {
+    stubFetch(
+      new Response(
+        JSON.stringify({ type: `https://tickpulse.dev/problems/${slug}`, title: 'Rejected', status, detail }),
+        { status, headers: { 'Content-Type': 'application/problem+json' } },
+      ),
+    )
+
+    const error = await adminRequest('POST', '/api/admin/symbols', 'secret-key', { symbol: 'SOLUSDT' }).catch(
+      (e: unknown) => e,
+    )
+
+    expect(error).toBeInstanceOf(ApiError)
+    const apiError = error as ApiError
+    expect(apiError.status).toBe(status)
+    expect(apiError.problemSlug).toBe(slug)
+    expect(apiError.message).toBe(detail)
+  })
+
+  it('adminRequest_ProblemWithTitleOnly_UsesTitleAsMessage', async () => {
+    stubFetch(
+      new Response(
+        JSON.stringify({ type: 'https://tickpulse.dev/problems/invalid-symbol', title: 'Invalid symbol', status: 422 }),
+        { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+      ),
+    )
+
+    const error = await adminRequest('POST', '/api/admin/symbols', 'secret-key', { symbol: 'x' }).catch(
+      (e: unknown) => e,
+    )
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).message).toBe('Invalid symbol')
+    expect((error as ApiError).problem?.detail).toBeUndefined()
+  })
+
+  it.each(['', '   '])('adminRequest_BlankApiKey_ThrowsWithoutFetching (%j)', async (apiKey) => {
+    const fetchMock = stubFetch(new Response(null, { status: 204 }))
+
+    await expect(adminRequest('DELETE', '/api/admin/symbols/SOLUSDT', apiKey)).rejects.toBeInstanceOf(
+      MissingApiKeyError,
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('apiUrl', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.resetModules()
+  })
+
+  it('apiUrl_BaseWithTrailingSlash_DoesNotDoubleTheSlash', async () => {
+    vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.test/')
+    vi.resetModules()
+
+    const { apiUrl: freshApiUrl } = await import('./client')
+
+    expect(freshApiUrl('/api/symbols')).toBe('https://api.example.test/api/symbols')
+  })
+
+  it('apiUrl_NoBase_IsSameOrigin', () => {
+    expect(apiUrl('/hubs/market')).toBe('/hubs/market')
   })
 })
 

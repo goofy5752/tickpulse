@@ -31,7 +31,8 @@
   --color-bg: #07070d;
   --color-ink: #ecedf7;
   --color-ink-muted: rgb(236 237 247 / 0.64);
-  --color-ink-faint: rgb(236 237 247 / 0.42);
+  /* Faint is the quietest text tone and still clears 4.5:1, even over the violet glow. */
+  --color-ink-faint: rgb(236 237 247 / 0.58);
 
   /* Market semantics */
   --color-up: #5eead4;
@@ -73,13 +74,13 @@
     --color-bg: #f3f2fa;
     --color-ink: #17152b;
     --color-ink-muted: rgb(23 21 43 / 0.66);
-    --color-ink-faint: rgb(23 21 43 / 0.46);
+    --color-ink-faint: rgb(23 21 43 / 0.62);
 
-    /* Deeper hues so figures clear WCAG AA on the pale base. */
-    --color-up: #0f766e;
+    /* Deeper hues so figures clear WCAG AA (≥ 4.5:1) on the pale base and on their soft pills. */
+    --color-up: #0d6b63;
     --color-down: #be123c;
     --color-sma: #7e22ce;
-    --color-up-soft: rgb(15 118 110 / 0.1);
+    --color-up-soft: rgb(13 107 99 / 0.1);
     --color-down-soft: rgb(190 18 60 / 0.1);
     --color-sma-soft: rgb(126 34 206 / 0.09);
 

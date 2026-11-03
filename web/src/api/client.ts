@@ -1,7 +1,8 @@
 import type { Period, ProblemResponse } from './types'
 
 // Same-origin by default: the API serves the built dashboard, and Vite proxies in development.
-const API_BASE: string = import.meta.env.VITE_API_BASE_URL ?? ''
+// Paths always start with "/", so a trailing slash on the origin would double it.
+const API_BASE: string = (import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '')
 
 /** Resolves an API path (`/api/...`, `/hubs/...`) against the configured origin. */
 export function apiUrl(path: string): string {
@@ -23,6 +24,14 @@ export class ApiError extends Error {
   /** The problem slug, e.g. `no-data` for `https://tickpulse.dev/problems/no-data`. */
   get problemSlug(): string | undefined {
     return this.problem?.type.split('/').pop()
+  }
+}
+
+/** Raised before any request is sent when an admin call has no API key to send. */
+export class MissingApiKeyError extends Error {
+  constructor() {
+    super('Enter the admin API key first.')
+    this.name = 'MissingApiKeyError'
   }
 }
 
@@ -125,13 +134,17 @@ export async function getRaw(path: string, accept: string, options: RequestOptio
   }
 }
 
-/** Calls an admin endpoint with the `X-Api-Key` header; throws {@link ApiError} for any non-2xx status. */
+/**
+ * Calls an admin endpoint with the `X-Api-Key` header. Throws {@link MissingApiKeyError} without
+ * sending anything when the key is blank, and {@link ApiError} for any non-2xx status.
+ */
 export async function adminRequest<T = unknown>(
   method: HttpMethod,
   path: string,
   apiKey: string,
   body?: unknown,
 ): Promise<AdminResponse<T>> {
+  if (apiKey.trim().length === 0) throw new MissingApiKeyError()
   const headers: Record<string, string> = { Accept: 'application/json', 'X-Api-Key': apiKey }
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   const response = await fetch(apiUrl(path), {
