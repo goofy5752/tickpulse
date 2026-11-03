@@ -62,8 +62,10 @@ Rules of thumb:
 1. **Idempotent ticks.** `price_ticks` PK is `(symbol_id, agg_trade_id, trade_time)`. Every insert
    is `ON CONFLICT DO NOTHING`. Replays after reconnect, rotation overlap and gap-fill must be
    harmless.
-2. **Single-statement candle upsert.** Per batch, in one transaction: `DELETE FROM tick_staging`,
-   binary `COPY` into `tick_staging`, then **one** statement:
+2. **Single-statement candle upsert.** Per batch, in one transaction:
+   `CREATE TEMP TABLE IF NOT EXISTS tick_staging (LIKE price_ticks INCLUDING DEFAULTS) ON COMMIT DELETE ROWS`
+   (a session table, so concurrent writers never see each other's rows; there is no permanent
+   staging table), binary `COPY` into `tick_staging`, then **one** statement:
    `WITH ins AS (INSERT INTO price_ticks … ON CONFLICT DO NOTHING RETURNING …), agg AS (…)
    INSERT INTO candles_1m … ON CONFLICT (symbol_id, bucket_start) DO UPDATE …`.
    Candles aggregate only the rows actually inserted (`RETURNING`), so `price_sum`/`tick_count`
