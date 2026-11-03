@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="NetArchTest.Rules" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\TickPulse.Domain\TickPulse.Domain.csproj" />
+    <ProjectReference Include="..\..\src\TickPulse.Application\TickPulse.Application.csproj" />
+    <ProjectReference Include="..\..\src\TickPulse.Infrastructure\TickPulse.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\TickPulse.Contracts\TickPulse.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\TickPulse.Api\TickPulse.Api.csproj" />
+    <ProjectReference Include="..\..\src\TickPulse.Cli\TickPulse.Cli.csproj" />
+  </ItemGroup>
+
+</Project>

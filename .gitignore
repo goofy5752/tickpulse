@@ -1,0 +1,21 @@
+# Local-only
+.superpowers/
+CLAUDE.local.md
+.claude/worktrees/
+.claude/settings.local.json
+.env
+
+# Build output
+bin/
+obj/
+coverage/
+TestResults/
+node_modules/
+web/dist/
+src/TickPulse.Api/wwwroot/
+
+# IDE
+*.user
+.vs/
+.idea/
+.vscode/

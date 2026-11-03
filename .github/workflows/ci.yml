@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DOMAIN_LINE_MIN: 95
+      OVERALL_LINE_MIN: 80
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: |
+          dotnet restore TickPulse.slnx
+          dotnet tool restore
+
+      - name: Format
+        run: dotnet format TickPulse.slnx --verify-no-changes --no-restore
+
+      - name: Build
+        run: dotnet build TickPulse.slnx -c Release --no-restore
+
+      - name: Test
+        run: dotnet test TickPulse.slnx -c Release --no-build --collect "XPlat Code Coverage" --results-directory coverage
+
+      - name: Coverage report
+        run: |
+          dotnet tool run reportgenerator \
+            -reports:"coverage/**/coverage.cobertura.xml" \
+            -targetdir:coverage/report \
+            -reporttypes:"MarkdownSummaryGithub;JsonSummary"
+          cat coverage/report/SummaryGithub.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Coverage gate
+        run: |
+          set -euo pipefail
+          summary=coverage/report/Summary.json
+          below() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a < b) }'; }
+          fail=0
+
+          overall_lines=$(jq -r '.summary.coverablelines // 0' "$summary")
+          overall=$(jq -r '.summary.linecoverage // 0' "$summary")
+          if [ "$overall_lines" -eq 0 ]; then
+            echo "::error::No coverable lines were reported; coverage collection is broken."
+            exit 1
+          fi
+          if below "$overall" "$OVERALL_LINE_MIN"; then
+            echo "::error::Overall line coverage ${overall}% is below ${OVERALL_LINE_MIN}%."
+            fail=1
+          else
+            echo "Overall line coverage ${overall}% (gate ${OVERALL_LINE_MIN}%)."
+          fi
+
+          domain_lines=$(jq -r '[.coverage.assemblies[] | select(.name == "TickPulse.Domain") | .coverablelines] | first // 0' "$summary")
+          domain=$(jq -r '[.coverage.assemblies[] | select(.name == "TickPulse.Domain") | .coverage] | first // 0' "$summary")
+          if [ "$domain_lines" -eq 0 ]; then
+            echo "::notice::TickPulse.Domain has no coverable lines yet; the Domain gate is skipped."
+          elif below "$domain" "$DOMAIN_LINE_MIN"; then
+            echo "::error::TickPulse.Domain line coverage ${domain}% is below ${DOMAIN_LINE_MIN}%."
+            fail=1
+          else
+            echo "TickPulse.Domain line coverage ${domain}% (gate ${DOMAIN_LINE_MIN}%)."
+          fi
+
+          {
+            echo "### Coverage gate"
+            echo "| Scope | Line coverage | Gate |"
+            echo "|---|---:|---:|"
+            echo "| Overall | ${overall}% | ${OVERALL_LINE_MIN}% |"
+            if [ "$domain_lines" -eq 0 ]; then
+              echo "| TickPulse.Domain | n/a (no coverable lines) | ${DOMAIN_LINE_MIN}% |"
+            else
+              echo "| TickPulse.Domain | ${domain}% | ${DOMAIN_LINE_MIN}% |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit "$fail"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage/report
+          if-no-files-found: ignore
+          retention-days: 14

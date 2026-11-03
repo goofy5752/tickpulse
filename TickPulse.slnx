@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TickPulse.Api/TickPulse.Api.csproj" />
+    <Project Path="src/TickPulse.Application/TickPulse.Application.csproj" />
+    <Project Path="src/TickPulse.Cli/TickPulse.Cli.csproj" />
+    <Project Path="src/TickPulse.Contracts/TickPulse.Contracts.csproj" />
+    <Project Path="src/TickPulse.Domain/TickPulse.Domain.csproj" />
+    <Project Path="src/TickPulse.Infrastructure/TickPulse.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TickPulse.Application.Tests/TickPulse.Application.Tests.csproj" />
+    <Project Path="tests/TickPulse.Architecture.Tests/TickPulse.Architecture.Tests.csproj" />
+    <Project Path="tests/TickPulse.Cli.Tests/TickPulse.Cli.Tests.csproj" />
+    <Project Path="tests/TickPulse.Domain.Tests/TickPulse.Domain.Tests.csproj" />
+    <Project Path="tests/TickPulse.Integration.Tests/TickPulse.Integration.Tests.csproj" />
+  </Folder>
+</Solution>
