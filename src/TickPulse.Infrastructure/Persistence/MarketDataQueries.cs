@@ -12,20 +12,22 @@ namespace TickPulse.Infrastructure.Persistence;
 /// </summary>
 public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketDataQueries
 {
+    /// <summary>The largest <c>limit</c> that <see cref="GetCandlesAsync"/> accepts; it bounds the scanned time range.</summary>
+    public const int MaxCandleLimit = 1000;
+
     // $1 symbol, $2 from, $3 full-minute start, $4 full-minute end (exclusive), $5 to (inclusive).
     // Whole minutes come from the stream candles, whose price_sum/tick_count are exact (see TickWriter);
-    // backfill candles (source 2) carry no sums and are excluded. The partial minutes at either edge come from
-    // the raw ticks. The sub-ranges [$2,$3), [$3,$4) and [$4,$5] are disjoint and together cover [$2,$5].
-    // First/last tick times always come from the raw ticks of the whole window.
-    private const string AverageSql = """
-        SELECT (SELECT sum(price_sum) FROM candles_1m
-                 WHERE symbol_id = $1 AND source = 1 AND bucket_start >= $3 AND bucket_start < $4),
-               (SELECT sum(tick_count)::bigint FROM candles_1m
-                 WHERE symbol_id = $1 AND source = 1 AND bucket_start >= $3 AND bucket_start < $4),
-               lead.s, lead.c, trail.s, trail.c,
+    // backfill candles (source 2) carry no sums and are excluded, and the partial index ix_candles_1m_stream
+    // covers exactly the stream rows. The partial minutes at either edge come from the raw ticks. The sub-ranges
+    // [$2,$3), [$3,$4) and [$4,$5] are disjoint and together cover [$2,$5]. First/last tick times always come
+    // from the raw ticks of the whole window.
+    internal const string AverageSql = """
+        SELECT whole.s, whole.c, lead.s, lead.c, trail.s, trail.c,
                (SELECT min(trade_time) FROM price_ticks WHERE symbol_id = $1 AND trade_time >= $2 AND trade_time <= $5),
                (SELECT max(trade_time) FROM price_ticks WHERE symbol_id = $1 AND trade_time >= $2 AND trade_time <= $5)
-          FROM (SELECT sum(price) AS s, count(*) AS c FROM price_ticks
+          FROM (SELECT sum(price_sum) AS s, sum(tick_count)::bigint AS c FROM candles_1m
+                 WHERE symbol_id = $1 AND source = 1 AND bucket_start >= $3 AND bucket_start < $4) AS whole,
+               (SELECT sum(price) AS s, count(*) AS c FROM price_ticks
                  WHERE symbol_id = $1 AND trade_time >= $2 AND trade_time < $3) AS lead,
                (SELECT sum(price) AS s, count(*) AS c FROM price_ticks
                  WHERE symbol_id = $1 AND trade_time >= $4 AND trade_time <= $5) AS trail
@@ -33,7 +35,7 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
 
     // $1 symbol, $2 bucket width, $3 origin, $4 window start, $5 window end (exclusive). Both sources count;
     // the close of a bucket is the close of its latest minute. Buckets without candles produce no row.
-    private const string ClosesSql = """
+    internal const string ClosesSql = """
         SELECT time_bucket($2, bucket_start, $3) AS b, last(close, bucket_start)
           FROM candles_1m
          WHERE symbol_id = $1 AND bucket_start >= $4 AND bucket_start < $5
@@ -41,30 +43,31 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
          ORDER BY b
         """;
 
-    // $1 symbol, $2 bucket width, $3 origin, $4 limit. The window is the $4 periods that end with the period of
-    // the latest candle, so the scan stays bounded however much history is kept; periods without candles are
-    // absent. Both sources count.
-    private const string CandlesSql = """
-        WITH latest AS (
-            SELECT time_bucket($2, max(bucket_start), $3) AS anchor FROM candles_1m WHERE symbol_id = $1)
-        SELECT time_bucket($2, k.bucket_start, $3) AS b,
-               first(k.open, k.bucket_start), max(k.high), min(k.low), last(k.close, k.bucket_start), sum(k.volume)
-          FROM candles_1m k, latest
-         WHERE k.symbol_id = $1 AND k.bucket_start >= latest.anchor - $2 * ($4 - 1)
+    // $1 symbol, $2 bucket width, $3 origin, $4 lookback (width * (limit - 1)). The anchor, the start of the
+    // period holding the latest candle, is an uncorrelated scalar subquery: it runs once as an InitPlan, so the
+    // outer scan is a plain primary-key range scan from anchor - lookback. With limit capped at MaxCandleLimit
+    // the range is bounded for every period. Periods without candles are absent. Both sources count.
+    internal const string CandlesSql = """
+        SELECT time_bucket($2, bucket_start, $3) AS b,
+               first(open, bucket_start), max(high), min(low), last(close, bucket_start), sum(volume)
+          FROM candles_1m
+         WHERE symbol_id = $1
+           AND bucket_start >= (SELECT time_bucket($2, max(bucket_start), $3) FROM candles_1m WHERE symbol_id = $1) - $4
          GROUP BY b
          ORDER BY b
         """;
 
-    private const string CloseAtOrBeforeSql = """
+    internal const string CloseAtOrBeforeSql = """
         SELECT close FROM candles_1m
          WHERE symbol_id = $1 AND bucket_start <= $2
          ORDER BY bucket_start DESC
          LIMIT 1
         """;
 
-    private const string ApproximateTickCountSql = "SELECT approximate_row_count('price_ticks')";
+    internal const string ApproximateTickCountSql = "SELECT approximate_row_count('price_ticks')";
 
-    private const string FirstStreamMinuteSql = "SELECT min(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 1";
+    // Reads the partial index ix_candles_1m_stream.
+    internal const string FirstStreamMinuteSql = "SELECT min(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 1";
 
     /// <inheritdoc />
     /// <remarks>
@@ -144,18 +147,20 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     /// <remarks>
     /// Covers the <paramref name="limit"/> periods that end with the period of the latest candle (the current,
     /// possibly incomplete one included), oldest first. Periods without candles are absent, so fewer rows may
-    /// come back.
+    /// come back. <paramref name="limit"/> must be in <c>[1, MaxCandleLimit]</c>, so the scanned range never
+    /// exceeds <c>MaxCandleLimit</c> periods.
     /// </remarks>
     public async Task<IReadOnlyList<CandleRow>> GetCandlesAsync(int symbolId, Period p, int limit, CancellationToken ct)
     {
         RequirePeriod(p);
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, MaxCandleLimit);
 
         await using var command = dataSource.CreateCommand(CandlesSql);
         command.Parameters.Add(Integer(symbolId));
         command.Parameters.Add(Interval(p.Length));
         command.Parameters.Add(TimestampTz(Period.Origin));
-        command.Parameters.Add(Integer(limit));
+        command.Parameters.Add(Interval(p.Length * (limit - 1)));
 
         var candles = new List<CandleRow>();
         await using var reader = await command.ExecuteReaderAsync(ct);

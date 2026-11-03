@@ -104,6 +104,12 @@ public partial class Initial : Migration
             );
             """);
 
+        // Stream minutes only: the exact 24 h average sums and the first stream minute read just these rows,
+        // without filtering out the (much more numerous) backfill minutes.
+        migrationBuilder.Sql("""
+            CREATE INDEX ix_candles_1m_stream ON candles_1m (symbol_id, bucket_start) WHERE source = 1;
+            """);
+
         // No permanent staging table: each tick batch stages into a session temp table inside its
         // own transaction, so concurrent writers never see each other's rows.
     }
@@ -112,6 +118,7 @@ public partial class Initial : Migration
     protected override void Down(MigrationBuilder migrationBuilder)
     {
         // Dropping the hypertable also removes its compression and retention jobs.
+        migrationBuilder.Sql("DROP INDEX IF EXISTS ix_candles_1m_stream;");
         migrationBuilder.DropTable(name: "candles_1m");
         migrationBuilder.DropTable(name: "price_ticks");
         migrationBuilder.DropTable(name: "symbols");

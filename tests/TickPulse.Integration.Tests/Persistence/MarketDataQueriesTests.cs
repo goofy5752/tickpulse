@@ -11,6 +11,7 @@ namespace TickPulse.Integration.Tests.Persistence;
 public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
 {
     private const int Btc = 1;
+    private const int Ada = 2;
     private const int Eth = 3;
 
     // Monday 2026-03-02 10:00 UTC. "Now" is a day later, so every tick is well inside the replay window.
@@ -148,6 +149,71 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
 
         result.ShouldBe(new AverageWindow(15m, Start.AddMinutes(6), Start.AddMinutes(7), 2));
         backfillOnly.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Average_InteriorMinutesFromStreamCandles_EdgeMinutesFromRawTicks()
+    {
+        // Ticks at :10 and :40 of minutes 10:00..10:04; the window [10:00:30, 10:04:30] holds 8 of them.
+        var ticks = new List<Tick>();
+        for (var m = 0; m < 5; m++)
+        {
+            ticks.Add(NewTick(Btc, (m * 2) + 1, 100m + m, 1m, Start.AddMinutes(m).AddSeconds(10)));
+            ticks.Add(NewTick(Btc, (m * 2) + 2, 200m + m, 1m, Start.AddMinutes(m).AddSeconds(40)));
+        }
+
+        await Writer().WriteBatchAsync(ticks, Ct);
+        var from = Start.AddSeconds(30);
+        var to = Start.AddMinutes(4).AddSeconds(30);
+        var inWindow = ticks.Where(t => t.TradeTimeUtc >= from && t.TradeTimeUtc <= to).ToList();
+        inWindow.Count.ShouldBe(8);
+        var rawSum = inWindow.Sum(t => t.Price);
+        var queries = Queries();
+
+        (await queries.GetAverageAsync(Btc, from, to, Ct))!.Average.ShouldBe(Math.Round(rawSum / 8, 8, MidpointRounding.ToEven));
+
+        // An interior minute is read from its stream candle: inflating its price_sum moves the average.
+        await BumpPriceSumAsync(Start.AddMinutes(2), 3m);
+        (await queries.GetAverageAsync(Btc, from, to, Ct))!.Average.ShouldBe(Math.Round((rawSum + 3m) / 8, 8, MidpointRounding.ToEven));
+        await BumpPriceSumAsync(Start.AddMinutes(2), -3m);
+
+        // The edge minutes are read from the raw ticks: their candles do not matter.
+        await BumpPriceSumAsync(Start, 1_000m);
+        await BumpPriceSumAsync(Start.AddMinutes(4), 1_000m);
+        var result = await queries.GetAverageAsync(Btc, from, to, Ct);
+        result.ShouldBe(new AverageWindow(Math.Round(rawSum / 8, 8, MidpointRounding.ToEven), inWindow[0].TradeTimeUtc, inWindow[^1].TradeTimeUtc, 8));
+    }
+
+    [Fact]
+    public async Task StreamQueries_UsePartialStreamIndex()
+    {
+        await SeedMixedSourcesAsync();
+        var now = Start.AddDays(1);
+
+        var firstStream = await ExplainAsync(MarketDataQueries.FirstStreamMinuteSql, Int(Btc));
+        var average = await ExplainAsync(
+            MarketDataQueries.AverageSql, Int(Btc), Ts(now.AddDays(-1)), Ts(now.AddDays(-1)), Ts(now), Ts(now));
+
+        firstStream.ShouldContain("ix_candles_1m_stream");
+        average.ShouldContain("ix_candles_1m_stream");
+    }
+
+    [Fact]
+    public async Task CandlesQuery_AnchorsOnceThenRangeScansPrimaryKey()
+    {
+        await SeedMixedSourcesAsync();
+
+        var plan = await ExplainAsync(
+            MarketDataQueries.CandlesSql,
+            Int(Btc),
+            new NpgsqlParameter<TimeSpan> { TypedValue = Period.OneDay.Length },
+            Ts(Period.Origin),
+            new NpgsqlParameter<TimeSpan> { TypedValue = Period.OneDay.Length * 299 });
+
+        // The anchor is an InitPlan (evaluated once); the outer scan is a primary-key range scan bounded by it.
+        plan.ShouldContain("InitPlan");
+        plan.ShouldMatch(@"Index (Only )?Scan using pk_candles_1m on candles_1m\b[\s\S]*Index Cond: \(\(symbol_id = [^)]+\) AND \(bucket_start >= \(\(InitPlan \d+\)");
+        plan.ShouldNotContain("Seq Scan");
     }
 
     [Fact]
@@ -289,6 +355,27 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
             new CandleRow(Start.AddMinutes(20), 20m, 24.5m, 19.5m, 24.25m, 5m),
         ]);
         candles.ShouldAllBe(c => c.BucketStart.Kind == DateTimeKind.Utc);
+
+        // 1w: weeks start Monday 00:00 UTC, so Sunday 23:59 and Monday 00:00 land in different candles.
+        var monday = Start.Date; // 2026-03-02
+        (await CandleWriter().InsertBackfillAsync(
+            Ada,
+            [
+                Candle(monday.AddDays(-14), close: 1m),                 // two weeks back, outside limit 2
+                Candle(monday.AddDays(-7).AddHours(6), close: 2m),
+                Candle(monday.AddMinutes(-1), close: 3m),               // Sunday 23:59
+                Candle(monday, close: 4m),                              // Monday 00:00
+                Candle(monday.AddDays(2).AddHours(12), close: 5m),
+            ],
+            Ct)).ShouldBe(5);
+
+        var weeks = await Queries().GetCandlesAsync(Ada, Period.OneWeek, 2, Ct);
+
+        weeks.ShouldBe(
+        [
+            new CandleRow(monday.AddDays(-7), 2m, 4m, 1m, 3m, 2m),
+            new CandleRow(monday, 4m, 6m, 3m, 5m, 2m),
+        ]);
     }
 
     [Fact]
@@ -332,9 +419,28 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Candles_NonPositiveLimit_Throws()
+    public async Task Candles_LimitOutOfRange_Throws()
     {
-        await Should.ThrowAsync<ArgumentOutOfRangeException>(() => Queries().GetCandlesAsync(Btc, Period.OneMinute, 0, Ct));
+        var queries = Queries();
+        await Should.ThrowAsync<ArgumentOutOfRangeException>(() => queries.GetCandlesAsync(Btc, Period.OneMinute, 0, Ct));
+        await Should.ThrowAsync<ArgumentOutOfRangeException>(
+            () => queries.GetCandlesAsync(Btc, Period.OneWeek, MarketDataQueries.MaxCandleLimit + 1, Ct));
+    }
+
+    [Fact]
+    public async Task Candles_MaxLimit_ReachesBackExactlyThatManyPeriods()
+    {
+        var monday = Start.Date;
+        var limit = MarketDataQueries.MaxCandleLimit;
+        var oldest = monday.AddDays(-7 * (limit - 1));
+        (await CandleWriter().InsertBackfillAsync(
+            Btc,
+            [Candle(oldest.AddDays(-7), close: 1m), Candle(oldest, close: 2m), Candle(monday, close: 3m)],
+            Ct)).ShouldBe(3);
+
+        var weeks = await Queries().GetCandlesAsync(Btc, Period.OneWeek, limit, Ct);
+
+        weeks.Select(c => (c.BucketStart, c.Close)).ShouldBe([(oldest, 2m), (monday, 3m)]);
     }
 
     [Fact]
@@ -396,6 +502,59 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
     private TickWriter Writer() => new(_writerDataSource, _clock);
 
     private CandleWriter CandleWriter() => new(_dataSource);
+
+    private static NpgsqlParameter<int> Int(int value) => new() { TypedValue = value };
+
+    private static NpgsqlParameter<DateTime> Ts(DateTime value) => new() { TypedValue = value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz };
+
+    private async Task BumpPriceSumAsync(DateTime bucketStart, decimal delta)
+    {
+        await using var command = _dataSource.CreateCommand(
+            "UPDATE candles_1m SET price_sum = price_sum + $3 WHERE symbol_id = $1 AND bucket_start = $2 AND source = 1");
+        command.Parameters.Add(Int(Btc));
+        command.Parameters.Add(Ts(bucketStart));
+        command.Parameters.Add(new NpgsqlParameter<decimal> { TypedValue = delta });
+        (await command.ExecuteNonQueryAsync(Ct)).ShouldBe(1);
+    }
+
+    /// <summary>Several days of backfill minutes for two symbols plus a stretch of stream minutes, then fresh statistics.</summary>
+    private async Task SeedMixedSourcesAsync()
+    {
+        var backfillStart = Start.AddDays(-5);
+        Kline[] backfill = [.. Enumerable.Range(0, 3_000).Select(i => Candle(backfillStart.AddMinutes(i), close: 10m + (i % 7)))];
+        await CandleWriter().InsertBackfillAsync(Btc, backfill, Ct);
+        await CandleWriter().InsertBackfillAsync(Eth, backfill, Ct);
+        await Writer().WriteBatchAsync([.. Enumerable.Range(1, 200).Select(i => NewTick(Btc, i, 10m, 1m, Start.AddSeconds(i * 15)))], Ct);
+        await ExecuteAsync("ANALYZE candles_1m");
+    }
+
+    /// <summary>
+    /// The plan of <paramref name="sql"/> with sequential scans disabled, so the test data can stay small and the
+    /// assertion pins which index a query is able to use rather than a data-size-dependent cost choice.
+    /// </summary>
+    private async Task<string> ExplainAsync(string sql, params NpgsqlParameter[] parameters)
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(Ct);
+        await using var transaction = await connection.BeginTransactionAsync(Ct);
+        await using (var off = new NpgsqlCommand("SET LOCAL enable_seqscan = off", connection, transaction))
+        {
+            await off.ExecuteNonQueryAsync(Ct);
+        }
+
+        await using var command = new NpgsqlCommand("EXPLAIN " + sql, connection, transaction);
+        command.Parameters.AddRange(parameters);
+        var lines = new List<string>();
+        await using (var reader = await command.ExecuteReaderAsync(Ct))
+        {
+            while (await reader.ReadAsync(Ct))
+            {
+                lines.Add(reader.GetString(0));
+            }
+        }
+
+        await transaction.RollbackAsync(Ct);
+        return string.Join('\n', lines);
+    }
 
     private async Task ExecuteAsync(string sql)
     {
