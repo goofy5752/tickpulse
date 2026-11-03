@@ -3,8 +3,13 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using TickPulse.Application.Abstractions;
+using TickPulse.Application.Ingestion;
+using TickPulse.Infrastructure.Binance;
+using TickPulse.Infrastructure.Ingestion;
 using TickPulse.Infrastructure.Persistence;
 
 namespace TickPulse.Infrastructure;
@@ -46,7 +51,67 @@ public static class DependencyInjection
         services.AddSingleton<ISymbolRepository, SymbolRepository>();
         services.AddSingleton<IMarketDataQueries, MarketDataQueries>();
 
+        services.AddBinanceRest(configuration);
+
+        // Shared between the API (admin use case, health, statistics) and the ingestion worker.
+        services.TryAddSingleton<IngestionState>();
+        services.TryAddSingleton<ISymbolChangeSignal, SymbolChangeSignal>();
+
         return services;
+    }
+
+    /// <summary>
+    /// Registers the leader-elected ingestion worker (a hosted service) and its parts. Call it after
+    /// <see cref="AddTickPulseInfrastructure"/>, whose ports it uses. Settings come from the <c>Ingestion</c> section
+    /// and <c>Binance:WsBaseUrl</c>; invalid settings fail at startup.
+    /// </summary>
+    public static IServiceCollection AddTickPulseIngestion(this IServiceCollection services, IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        services.AddOptions<IngestionOptions>()
+            .Bind(configuration.GetSection(IngestionOptions.SectionName))
+            .ValidateOnStart();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<IngestionOptions>, IngestionOptionsValidator>());
+
+        services.TryAddSingleton<SymbolIdCache>();
+        services.TryAddSingleton<IStreamConnectionFactory>(sp => new StreamConnectionFactory(
+            WsBaseUrl(configuration),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetService<ILoggerFactory>() ?? NullLoggerFactory.Instance));
+        services.TryAddSingleton(sp => new PostgresLeaderLock(
+            RequiredConnectionString(configuration),
+            sp.GetService<ILogger<PostgresLeaderLock>>()));
+        services.TryAddSingleton<TickBatchWriter>();
+        services.TryAddSingleton(sp => new GapFiller(
+            sp.GetRequiredService<IAggTradeSource>(),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetService<ILogger<GapFiller>>() ?? NullLogger<GapFiller>.Instance));
+        services.TryAddSingleton(sp => new SymbolReconciler(
+            sp.GetRequiredService<ISymbolRepository>(),
+            sp.GetRequiredService<SymbolIdCache>(),
+            sp.GetService<ILogger<SymbolReconciler>>() ?? NullLogger<SymbolReconciler>.Instance));
+        services.AddHostedService(sp => new IngestionWorker(
+            sp.GetRequiredService<PostgresLeaderLock>(),
+            sp.GetRequiredService<IStreamConnectionFactory>(),
+            sp.GetRequiredService<SymbolReconciler>(),
+            sp.GetRequiredService<TickBatchWriter>(),
+            sp.GetRequiredService<GapFiller>(),
+            sp.GetRequiredService<SymbolIdCache>(),
+            sp.GetRequiredService<ISymbolChangeSignal>(),
+            sp.GetRequiredService<IngestionState>(),
+            sp.GetRequiredService<IOptions<IngestionOptions>>(),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetService<ILoggerFactory>() ?? NullLoggerFactory.Instance));
+
+        return services;
+    }
+
+    private static Uri WsBaseUrl(IConfiguration configuration)
+    {
+        var raw = configuration[StreamConnectionFactory.WsBaseUrlKey];
+        return new Uri(string.IsNullOrWhiteSpace(raw) ? StreamConnectionFactory.DefaultWsBaseUrl : raw.Trim(), UriKind.Absolute);
     }
 
     /// <summary>The shared data source used by every component except the tick writer.</summary>

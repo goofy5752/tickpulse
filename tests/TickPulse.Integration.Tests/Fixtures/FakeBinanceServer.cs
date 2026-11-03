@@ -43,6 +43,9 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     private (int Code, string Msg)? _rejectNext;
     private bool _suppressNextAck;
     private int _rateLimitDisconnects;
+    private int _acceptedConnections;
+    private int _peakConnections;
+    private volatile bool _refuseConnections;
     private WebApplication? _app;
 
     /// <summary>Base URL for <c>Binance:WsBaseUrl</c>, e.g. <c>ws://127.0.0.1:51234</c>.</summary>
@@ -84,6 +87,44 @@ public sealed class FakeBinanceServer : IAsyncLifetime
             {
                 return _connections.Count;
             }
+        }
+    }
+
+    /// <summary>WebSocket connections accepted since the server started, including closed ones.</summary>
+    public int AcceptedConnections
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _acceptedConnections;
+            }
+        }
+    }
+
+    /// <summary>The largest number of WebSocket connections that were open at the same time.</summary>
+    public int PeakConnections
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _peakConnections;
+            }
+        }
+    }
+
+    /// <summary>
+    /// While set, <c>/stream</c> answers <c>503</c> instead of accepting the WebSocket, as if Binance were
+    /// unreachable. Open connections are not affected.
+    /// </summary>
+    public bool RefuseConnections
+    {
+        get => _refuseConnections;
+        set
+        {
+            _refuseConnections = value;
+            Signal();
         }
     }
 
@@ -463,11 +504,20 @@ public sealed class FakeBinanceServer : IAsyncLifetime
             return;
         }
 
+        if (_refuseConnections)
+        {
+            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            Signal();
+            return;
+        }
+
         using var socket = await context.WebSockets.AcceptWebSocketAsync();
         var connection = new Connection(socket, context);
         lock (_gate)
         {
             _connections.Add(connection);
+            _acceptedConnections++;
+            _peakConnections = Math.Max(_peakConnections, _connections.Count);
         }
 
         Signal();
