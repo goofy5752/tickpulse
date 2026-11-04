@@ -82,6 +82,7 @@ app.UseVaryByAcceptOnApi();
 app.UseAcceptHeaderNormalization();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
+app.UseDashboardRouteTag();
 app.UseDashboardAssetCaching();
 app.UseRouting();
 
@@ -107,7 +108,7 @@ app.MapScalarApiReference(SecurityHeaders.DocsPath.Value!, o => o
     .DisableTelemetry()
     .DisableAgent());
 app.MapDashboardAssets();
-app.MapFallbackToFile(DashboardRouteConstraint.FallbackPattern, "index.html");
+app.MapDashboardFallback();
 
 await app.RunAsync();
 
