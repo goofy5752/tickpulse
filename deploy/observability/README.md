@@ -103,6 +103,7 @@ Tear the stack down and delete its data with `down -v`.
 | `GRAFANA_COOKIE_SECURE` | `false` | `true` behind HTTPS |
 | `GRAFANA_BIND`, `GRAFANA_PORT` | `127.0.0.1`, `3000` | Where Grafana is published (the reverse proxy targets it) |
 | `OTEL_COLLECTOR_BIND`, `OTEL_GRPC_PORT`, `OTEL_HTTP_PORT` | `127.0.0.1`, `4317`, `4318` | Host ports of the collector |
+| `TICKPULSE_SUBNET` | `172.30.0.0/24` | Subnet of the `tickpulse` network; the API trusts `CF-Connecting-IP` only from peers inside it |
 | `ALERT_EMAIL` | `alerts@example.com` | Alert recipient(s), comma-separated |
 | `GF_SMTP_ENABLED`, `GF_SMTP_HOST`, `GF_SMTP_USER`, `GF_SMTP_PASSWORD`, `GF_SMTP_FROM_ADDRESS`, `GF_SMTP_STARTTLS_POLICY` | disabled | SMTP for alert email |
 

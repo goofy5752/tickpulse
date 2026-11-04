@@ -1,0 +1,30 @@
+# The images need only global.json, the props files, .editorconfig, src/ and web/.
+.git
+.gitignore
+.gitattributes
+.github
+.claude
+.superpowers
+.vs
+.idea
+.vscode
+.env
+.env.*
+CLAUDE*.md
+README.md
+docs
+deploy
+tests
+coverage
+TestResults
+Dockerfile
+docker-compose*.yml
+compose*.yml
+
+# Build output and dependencies are produced inside the image.
+**/bin
+**/obj
+**/node_modules
+web/dist
+src/TickPulse.Api/wwwroot
+*.user
