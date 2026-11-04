@@ -22,7 +22,8 @@ namespace TickPulse.Infrastructure.Backfill;
 /// <see cref="Enqueue"/> ignores requests.</para>
 /// <para>Works only while <see cref="IngestionState.IsLeader"/> is true, and never touches the leader lock itself.
 /// Each time this instance becomes leader (including at start-up) it queues every active symbol whose status is not
-/// <see cref="BackfillStatus.Completed"/>. Symbols are processed one at a time, in queue order; a symbol that is
+/// <see cref="BackfillStatus.Completed"/> and marks it <see cref="BackfillStatus.Pending"/>, so the seeded symbols do
+/// not report <see cref="BackfillStatus.NotRequested"/> while they wait their turn. Symbols are processed one at a time, in queue order; a symbol that is
 /// already queued or running is not queued again.</para>
 /// <para>A symbol is fetched from <c>AlignDown(now − Depth, 1m)</c> up to, but excluding, its first streamed minute
 /// (or the current minute when nothing was streamed yet), in ascending pages of <see cref="PageSize"/> by
@@ -230,13 +231,20 @@ internal sealed partial class BackfillWorker(
         }
     }
 
-    // Queues the active symbols that have not completed, in id order. False when the database could not be read.
+    // Queues the active symbols that have not completed, in id order, and marks each one Pending (the seeded symbols
+    // start as NotRequested, a failed or interrupted one says Failed or Running), so the status says what is about to
+    // happen while it waits its turn. False when the database could not be read or written; the next turn scans again.
     private async Task<bool> TryQueuePendingAsync(CancellationToken ct)
     {
-        IReadOnlyList<MonitoredSymbol> active;
+        MonitoredSymbol[] unfinished;
         try
         {
-            active = await symbols.ListActiveAsync(ct).ConfigureAwait(false);
+            var active = await symbols.ListActiveAsync(ct).ConfigureAwait(false);
+            unfinished = [.. active.Where(s => s.BackfillStatus != BackfillStatus.Completed)];
+            foreach (var symbol in unfinished.Where(s => s.BackfillStatus != BackfillStatus.Pending))
+            {
+                await symbols.SetBackfillStatusAsync(symbol.Id, BackfillStatus.Pending, symbol.BackfilledFromUtc, ct).ConfigureAwait(false);
+            }
         }
         catch (DbException ex)
         {
@@ -245,7 +253,6 @@ internal sealed partial class BackfillWorker(
         }
 
         _scanNeeded = false;
-        var unfinished = active.Where(s => s.BackfillStatus != BackfillStatus.Completed).ToArray();
         foreach (var symbol in unfinished)
         {
             Enqueue(symbol.Id);

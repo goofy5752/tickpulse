@@ -138,6 +138,31 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task StartupScan_MarksEveryQueuedSymbolPending()
+    {
+        // The seeded symbols start as NotRequested ("no history was requested"), which is wrong once they are queued.
+        SeedTrades("BTCUSDT", From, 10);
+        SeedTrades("ADAUSDT", From, 10);
+        SeedTrades("ETHUSDT", From, 10);
+        var run = CreateRun();
+        await run.Symbols.SetBackfillStatusAsync(Eth, BackfillStatus.Failed, From, Ct); // a failed one is queued again too
+        _server.PauseKlines();
+
+        await run.StartAsync();
+
+        await WaitForStatusAsync(run, Btc, BackfillStatus.Running);
+        (await FindAsync(run, Ada)).BackfillStatus.ShouldBe(BackfillStatus.Pending);
+        var eth = await FindAsync(run, Eth);
+        eth.BackfillStatus.ShouldBe(BackfillStatus.Pending);
+        eth.BackfilledFromUtc.ShouldBe(From); // kept, as the admin use case keeps it
+
+        _server.ResumeKlines();
+        await WaitForStatusAsync(run, Ada, BackfillStatus.Completed);
+        await WaitForStatusAsync(run, Eth, BackfillStatus.Completed);
+        (await FindAsync(run, Btc)).BackfillStatus.ShouldBe(BackfillStatus.Completed);
+    }
+
+    [Fact]
     public async Task StopsAtFirstStreamMinute()
     {
         var prices = SeedTrades("BTCUSDT", From, DepthMinutes);
@@ -364,9 +389,9 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         await run.StartAsync();
         await WaitForAsync(() => _logs.Count("LogBanWait") == 1, "the worker waiting out the ban");
 
-        // BTC failed; ETH is still queued, untouched: no request is sent during the ban.
+        // BTC failed; ETH is still queued (Pending), untouched: no request is sent during the ban.
         (await FindAsync(run, Btc)).BackfillStatus.ShouldBe(BackfillStatus.Failed);
-        (await FindAsync(run, Eth)).BackfillStatus.ShouldBe(BackfillStatus.NotRequested);
+        (await FindAsync(run, Eth)).BackfillStatus.ShouldBe(BackfillStatus.Pending);
         _server.KlineRequests.Count.ShouldBe(1);
 
         _clock.Advance(TimeSpan.FromSeconds(120));
