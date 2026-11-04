@@ -678,6 +678,19 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
             var lines = plan.Split('\n');
             compressed.ShouldAllBe(chunk => lines.Where(l => Regex.IsMatch(l, $@"\b{chunk}\b")).All(l => l.Contains("never executed")));
             (await Queries().GetLatestTradeIdsAsync(Start.AddDays(-13), Ct)).ShouldBe(new Dictionary<string, long> { ["BTCUSDT"] = 3 });
+
+            // After an outage of more than two days the newest chunk with trades is compressed too: the lookup reads
+            // the newest batch of it through the batch metadata, and the older chunks are still never executed.
+            await ExecuteAsync("SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('price_ticks') AS c");
+            await ExecuteAsync("ANALYZE price_ticks");
+            var newest = await ExplainAsync(
+                MarketDataQueries.LatestTradeIdsSql, analyze: true, settings: MarketDataQueries.LatestTradeIdsSettingsSql, Ts(Start.AddDays(-13)));
+            newest.ShouldContain("Order: price_ticks.trade_time DESC", customMessage: newest);
+            newest.ShouldNotContain("Sort Key", customMessage: newest);
+            newest.ShouldMatch(@"ColumnarScan\) on _hyper_\d+_\d+_chunk \(actual rows=1 loops=1\)", customMessage: newest);
+            var newestLines = newest.Split('\n');
+            compressed.ShouldAllBe(chunk => newestLines.Where(l => Regex.IsMatch(l, $@"\b{chunk}\b")).All(l => l.Contains("never executed")));
+            (await Queries().GetLatestTradeIdsAsync(Start.AddDays(-13), Ct)).ShouldBe(new Dictionary<string, long> { ["BTCUSDT"] = 3 });
         }
         finally
         {
