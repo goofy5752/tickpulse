@@ -81,9 +81,12 @@ export const HELP = {
   },
 
   chartPeriod: {
-    title: 'Candle period',
-    summary: 'The width of one candle. It also sets the SMA period p in the panel beside the chart.',
-    details: ['Buckets are aligned to UTC, so every client sees the same candles.'],
+    title: 'Period',
+    summary: 'The width of one candle, or of one point in the line view. It also sets the SMA period p beside the chart.',
+    details: [
+      'Candles show the first, highest, lowest and last price of each bucket; the line joins the last prices (closes). Switch between them with the icons on the left.',
+      'Buckets are aligned to UTC, so every client sees the same candles.',
+    ],
     items: [
       { term: '1m', mono: true, text: 'One minute, starting on the minute.' },
       { term: '5m', mono: true, text: 'Five minutes, starting at :00, :05, :10 …' },
@@ -93,6 +96,20 @@ export const HELP = {
     ],
   },
 
+
+  chartPrice: {
+    title: 'Candles and line',
+    summary: 'The price per bucket, drawn as candles or as a line of closes. Switch with the icons next to the periods.',
+    items: [
+      { term: 'Candle', text: 'One per bucket. The body runs from the first to the last trade price; the thin wicks reach the highest and lowest.' },
+      { term: 'Teal / rose', text: 'Teal when the bucket closed above its open, rose when it closed below.' },
+      { term: 'Line', text: 'Joins the closes, the last price of each bucket, with a soft fill. Teal when the range shown rose overall, rose when it fell.' },
+    ],
+    details: [
+      'The newest bucket is still open: its candle, or the end of the line, moves with live trades. A gap is a bucket without trades. History from before collection began comes from 1-minute klines loaded from Binance.',
+    ],
+    example: '1d: one candle (or one point) per day, 00:00 to 00:00 UTC',
+  },
 
   chartSma: {
     title: 'SMA line',
