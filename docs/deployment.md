@@ -238,7 +238,7 @@ own files, and nginx is only ever reloaded gracefully after `nginx -t` passes.
    ```dotenv
    # Required
    POSTGRES_PASSWORD=<long random, letters and digits only>
-   ADMIN_API_KEY=<long random>
+   ADMIN_API_KEY=<long random, at least 32 characters; a shorter key fails startup>
    GRAFANA_ADMIN_PASSWORD=<long random; applied on Grafana's first start only>
    # Optional
    OTEL_IP_SALT=<random; keeps the daily client-IP hashes stable across restarts>

@@ -96,15 +96,15 @@ the three on first start.
 ```bash
 curl -s localhost:8080/api/BTCUSDT/24hAvgPrice
 curl -s -H "Accept: application/xml" "localhost:8080/api/BTCUSDT/SimpleMovingAverage?n=20&p=1d"
-curl -s -H "X-Api-Key: local-dev-key" localhost:8080/api/admin/symbols
+curl -s -H "X-Api-Key: local-dev-admin-key-not-for-production" localhost:8080/api/admin/symbols
 
 docker compose run --rm cli avg BTCUSDT          # console client, against the api container
 docker compose --profile observability up -d     # plus OTel Collector, Prometheus, Loki, Tempo, Grafana on :3000
 docker compose --profile observability down -v   # stop everything and delete the data
 ```
 
-`local-dev-key` is a local default. Copy `.env.example` to `.env` to change it, or any other port or
-setting. The observability stack is described in
+`local-dev-admin-key-not-for-production` is a local default. Copy `.env.example` to `.env` to change it,
+or any other port or setting. The observability stack is described in
 [deploy/observability/README.md](deploy/observability/README.md), and the production deployment in
 [docs/deployment.md](docs/deployment.md).
 
@@ -120,7 +120,7 @@ becomes `__` (`Admin:ApiKey` → `Admin__ApiKey`). Invalid values fail at startu
 | `Database:MaxPoolSize` | `20` | Size of the shared Npgsql pool, unless the connection string sets `Maximum Pool Size`. The tick writer and the leader lock add 5 connections; the total is checked against `max_connections` at startup. |
 | `Database:AllowGssEncryption` | `false` | TickPulse forces GSS encryption off on every connection, because the native Kerberos probe crashed the API under load. `true` keeps an explicit mode from the connection string and needs a custom image with krb5 installed. |
 | **Admin** | | |
-| `Admin:ApiKey` | *(empty)* | Key for `X-Api-Key`. Empty or unset disables the admin endpoints (403). Surrounding whitespace fails startup; fewer than 32 characters logs a warning. |
+| `Admin:ApiKey` | *(empty)* | Key for `X-Api-Key`. Empty or unset disables the admin endpoints (403). Surrounding whitespace fails startup. Fewer than 32 characters fails startup in the Production environment (the container images) and logs a warning elsewhere. |
 | `Admin:MaxActiveSymbols` | `20` | Most symbols active at once, 1–1000. |
 | **Binance** | | |
 | `Binance:WsBaseUrl` | `wss://stream.binance.com:9443` | WebSocket base URL; `/stream` is appended. |
@@ -278,7 +278,7 @@ new symbol's backfill is still running.
 ### Admin
 
 ```bash
-K="X-Api-Key: local-dev-key"
+K="X-Api-Key: local-dev-admin-key-not-for-production"
 curl -s -i -H "$K" -H "Content-Type: application/json" -d '{"symbol":"solusdt"}' localhost:8080/api/admin/symbols
 curl -s -H "$K" localhost:8080/api/admin/symbols/SOLUSDT
 curl -s -i -X DELETE -H "$K" localhost:8080/api/admin/symbols/SOLUSDT
