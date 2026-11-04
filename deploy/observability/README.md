@@ -280,6 +280,14 @@ Conventions the dashboards rely on:
 - **`tickpulse.ingest.ticks.received`** counts trades from the WebSocket stream only;
   `tickpulse.gapfill.trades` counts the REST recovery. **`ticks.persisted`** counts newly stored ticks
   (replays are not counted). **`backfill.candles`** counts newly stored klines.
+- **Counters have no zero sample.** Each process exports its own cumulative series
+  (`service_instance_id`), and its first sample already holds everything counted before the first
+  export; a backfill stores thousands of klines in that time. `increase()` cannot see that first jump, so
+  totals over the dashboard range, such as **Candles backfilled**, use
+  `(max_over_time(c[$__range]) - c offset $__range) or max_over_time(c[$__range])` per series: a series
+  that started inside the range counts in full, an older one from its value at the range start.
+  `tests/TickPulse.Integration.Tests/Telemetry/DashboardQueryTests.cs` checks that panel against a real
+  Prometheus.
 - **Export interval 15 s** (the metric reader's export interval).
   The SDK default is 60 s, which is too coarse for 1-minute rate windows, the 45 s liveness windows
   and the 60 s WebSocket alert.
