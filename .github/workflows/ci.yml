@@ -30,13 +30,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The scripts deploy.sh runs on the server, and the masker that keeps .env values out of this log.
+      # ShellCheck is pinned (version and digest) rather than the runner's preinstalled one, whose version follows
+      # the runner image; raise both together.
+      - name: Deploy scripts
+        env:
+          SHELLCHECK_IMAGE: koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
+        run: |
+          docker run --rm -v "$PWD:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" --version
+          docker run --rm -v "$PWD:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE" deploy/*.sh deploy/tests/*.sh
+          bash deploy/tests/mask-env.test.sh
+
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           global-json-file: global.json
 
+      # Locked: fails when a packages.lock.json no longer matches its project (restore locally and commit the file).
       - name: Restore
         run: |
-          dotnet restore TickPulse.slnx
+          dotnet restore TickPulse.slnx --locked-mode
           dotnet tool restore
 
       - name: Format
@@ -219,7 +231,7 @@ jobs:
       cancel-in-progress: false
     env:
       REMOTE_DIR: /srv/tickpulse
-      # How long to wait for deploy.sh on the server: pull, start, ready (90 s) and smoke (120 s), and the same
+      # How long to wait for deploy.sh on the server: pull, start, ready (180 s) and smoke (120 s), and the same
       # again for a rollback, fit with room to spare.
       DEPLOY_WAIT_SECONDS: 1200
     steps:

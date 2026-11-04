@@ -23,9 +23,6 @@ public sealed class AnalyticsService(
     public const int MinCandleLimit = 1;
     public const int DefaultCandleLimit = 300;
 
-    /// <summary>The largest candle <c>limit</c>; it matches the infrastructure query's bound.</summary>
-    public const int MaxCandleLimit = 1000;
-
     /// <summary>
     /// How far before the minute of <c>now − 24 h</c> the reference close of the 24 h change may lie while the
     /// symbol's backfill is not <see cref="BackfillStatus.Completed"/>. Until then, an older reference can be the
@@ -173,9 +170,9 @@ public sealed class AnalyticsService(
             return invalidPeriod;
         }
 
-        if (limit is < MinCandleLimit or > MaxCandleLimit)
+        if (limit is < MinCandleLimit or > IMarketDataQueries.MaxCandleLimit)
         {
-            return AppResult<IReadOnlyList<CandleRow>>.Invalid(nameof(limit), $"limit must be between {MinCandleLimit} and {MaxCandleLimit}.");
+            return AppResult<IReadOnlyList<CandleRow>>.Invalid(nameof(limit), $"limit must be between {MinCandleLimit} and {IMarketDataQueries.MaxCandleLimit}.");
         }
 
         var found = await FindAsync(symbol, ct);

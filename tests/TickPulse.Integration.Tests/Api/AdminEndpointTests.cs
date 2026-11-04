@@ -60,10 +60,10 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
 
     [Theory]
     [InlineData("wrong-key")]
-    [InlineData("test-key ")]
-    [InlineData("TEST-KEY")]
-    [InlineData("test-ke")]
-    [InlineData("test-key-and-more")]
+    [InlineData(ApiFactory.AdminApiKey + " ")]
+    [InlineData("TEST-ADMIN-KEY-0123456789ABCDEF-0123")]
+    [InlineData("test-admin-key-0123456789abcdef-012")]
+    [InlineData(ApiFactory.AdminApiKey + "-and-more")]
     public async Task WrongKey_Returns401Problem(string key)
     {
         using var response = await SendAsync(api, HttpMethod.Delete, Path + "/BTCUSDT", key);
@@ -161,12 +161,18 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
     }
 
     [Theory]
-    [InlineData("test-key", 1)]
-    [InlineData("0123456789abcdef0123456789abcdef", 0)]
-    public async Task ShortKey_LogsWarningAtStartup(string key, int warnings)
+    [InlineData("Development", "short-key", 1)]
+    [InlineData("Development", "0123456789abcdef0123456789abcde", 1)]
+    [InlineData("Development", "0123456789abcdef0123456789abcdef", 0)]
+    [InlineData("Staging", "short-key", 1)]
+    [InlineData("Production", "0123456789abcdef0123456789abcdef", 0)]
+    public async Task ShortKey_OutsideProduction_LogsWarningAtStartup(string environment, string key, int warnings)
     {
         var logs = new IngestionTestHost.LogCapture();
-        await using var host = new ApiFactory(api.Database).WithSetting("Admin:ApiKey", key).WithLogging(logs);
+        await using var host = new ApiFactory(api.Database)
+            .WithEnvironment(environment)
+            .WithSetting("Admin:ApiKey", key)
+            .WithLogging(logs);
         await host.InitializeAsync();
 
         _ = host.Services; // starts the host
@@ -174,6 +180,34 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         var entries = logs.Entries.Where(e => e.EventName == "LogShortApiKey").ToList();
         entries.Count.ShouldBe(warnings);
         entries.ShouldAllBe(e => e.Level == LogLevel.Warning && !e.Message.Contains(key, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("short-key")]
+    [InlineData("0123456789abcdef0123456789abcde")]
+    public async Task ShortKey_InProduction_FailsStartup(string key)
+    {
+        await using var host = new ApiFactory(api.Database).WithEnvironment("Production").WithSetting("Admin:ApiKey", key);
+        await host.InitializeAsync();
+
+        var ex = Should.Throw<Exception>(() => host.Services);
+
+        StartupMessages(ex).ShouldContain(m => m.Contains("Admin:ApiKey", StringComparison.Ordinal) && m.Contains("32", StringComparison.Ordinal));
+        StartupMessages(ex).ShouldNotContain(m => m.Contains(key, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task NoKey_InProduction_StartsWithTheAdminApiDisabled(string configured)
+    {
+        await using var host = new ApiFactory(api.Database).WithEnvironment("Production").WithSetting("Admin:ApiKey", configured);
+        await host.InitializeAsync();
+
+        using var response = await SendAsync(host, HttpMethod.Get, Path, key: null);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Forbidden);
+        (await ReadAsync(response)).Type.ShouldBe(TypeBase + "admin-disabled");
     }
 
     [Theory]
@@ -186,20 +220,20 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
 
         var ex = Should.Throw<Exception>(() => host.Services);
 
-        Messages(ex).ShouldContain(m => m.Contains("Admin:ApiKey", StringComparison.Ordinal) && m.Contains("whitespace", StringComparison.Ordinal));
-        Messages(ex).ShouldNotContain(m => m.Contains("padded-key", StringComparison.Ordinal));
+        StartupMessages(ex).ShouldContain(m => m.Contains("Admin:ApiKey", StringComparison.Ordinal) && m.Contains("whitespace", StringComparison.Ordinal));
+        StartupMessages(ex).ShouldNotContain(m => m.Contains("padded-key", StringComparison.Ordinal));
+    }
 
-        static IEnumerable<string> Messages(Exception? e)
+    private static IEnumerable<string> StartupMessages(Exception? e)
+    {
+        for (; e is not null; e = e.InnerException)
         {
-            for (; e is not null; e = e.InnerException)
+            yield return e.Message;
+            if (e is AggregateException aggregate)
             {
-                yield return e.Message;
-                if (e is AggregateException aggregate)
+                foreach (var inner in aggregate.InnerExceptions.SelectMany(StartupMessages))
                 {
-                    foreach (var inner in aggregate.InnerExceptions.SelectMany(Messages))
-                    {
-                        yield return inner;
-                    }
+                    yield return inner;
                 }
             }
         }

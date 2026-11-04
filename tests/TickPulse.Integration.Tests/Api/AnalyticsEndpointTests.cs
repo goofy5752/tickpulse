@@ -3,10 +3,8 @@ using System.Text.Json;
 using System.Xml.Linq;
 using Microsoft.Extensions.DependencyInjection;
 using TickPulse.Application.Abstractions;
-using TickPulse.Application.Analytics;
 using TickPulse.Application.Ingestion;
 using TickPulse.Domain;
-using TickPulse.Infrastructure.Persistence;
 using TickPulse.Integration.Tests.Fixtures;
 using static TickPulse.Integration.Tests.Api.ProblemReader;
 
@@ -613,10 +611,6 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
 
         await ShouldBeValidationAsync(response, parameter, detail);
     }
-
-    [Fact]
-    public void Candles_LimitBound_MatchesTheQuery() =>
-        AnalyticsService.MaxCandleLimit.ShouldBe(MarketDataQueries.MaxCandleLimit);
 
     [Theory]
     [InlineData("NOPEUSDT", "unknown-symbol")]

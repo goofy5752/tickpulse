@@ -14,9 +14,6 @@ namespace TickPulse.Infrastructure.Persistence;
 /// </summary>
 public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketDataQueries
 {
-    /// <summary>The largest <c>limit</c> that <see cref="GetCandlesAsync"/> accepts; it bounds the scanned time range.</summary>
-    public const int MaxCandleLimit = 1000;
-
     // $1 symbol, $2 from, $3 full-minute start, $4 full-minute end (exclusive), $5 to (inclusive).
     // Whole minutes come from the stream candles, whose price_sum/tick_count are exact (see TickWriter);
     // backfill candles (source 2) carry no sums and are excluded, and the partial index ix_candles_1m_stream
@@ -80,13 +77,6 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
            AND bucket_start >= (SELECT time_bucket($2, max(bucket_start), $3) FROM candles_1d WHERE symbol_id = $1) - $4
          GROUP BY b
          ORDER BY b
-        """;
-
-    internal const string CloseAtOrBeforeSql = """
-        SELECT close FROM candles_1m
-         WHERE symbol_id = $1 AND bucket_start <= $2
-         ORDER BY bucket_start DESC
-         LIMIT 1
         """;
 
     // $1 symbol ids, $2 instant. One backward primary-key probe per id (LIMIT 1 inside the lateral join); ids
@@ -225,7 +215,7 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     {
         RequirePeriod(p);
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, MaxCandleLimit);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, IMarketDataQueries.MaxCandleLimit);
 
         await using var command = dataSource.CreateCommand(IsWholeDays(p.Length) ? DailyCandlesSql : CandlesSql);
         command.Parameters.Add(Integer(symbolId));
@@ -250,19 +240,7 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     }
 
     /// <inheritdoc />
-    /// <remarks>The close of the latest 1-minute candle (any source) whose bucket starts at or before <paramref name="utc"/>.</remarks>
-    public async Task<decimal?> GetCloseAtOrBeforeAsync(int symbolId, DateTime utc, CancellationToken ct)
-    {
-        RequireUtc(utc, nameof(utc));
-
-        await using var command = dataSource.CreateCommand(CloseAtOrBeforeSql);
-        command.Parameters.Add(Integer(symbolId));
-        command.Parameters.Add(TimestampTz(utc));
-        return await command.ExecuteScalarAsync(ct) is decimal close ? close : null;
-    }
-
-    /// <inheritdoc />
-    /// <remarks>Any source counts, as in <see cref="GetCloseAtOrBeforeAsync"/>. An empty <paramref name="symbolIds"/> runs no query.</remarks>
+    /// <remarks>Any source counts (stream or backfill). An empty <paramref name="symbolIds"/> runs no query.</remarks>
     public async Task<IReadOnlyDictionary<int, PricePoint>> GetClosesAtOrBeforeAsync(IReadOnlyCollection<int> symbolIds, DateTime utc, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(symbolIds);

@@ -8,6 +8,9 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <Deterministic>true</Deterministic>
+    <!-- Every project commits a packages.lock.json; CI and the image build restore with locked mode, so a restore
+         never resolves a package version (or content hash) other than the reviewed one. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">

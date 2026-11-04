@@ -380,7 +380,7 @@ public sealed class CandleRollupTests(TimescaleFixture db) : IAsyncLifetime
         {
             foreach (var symbolId in symbols)
             {
-                foreach (var limit in new[] { 1, 2, 3, 5, 8, 20, 60, 300, MarketDataQueries.MaxCandleLimit })
+                foreach (var limit in new[] { 1, 2, 3, 5, 8, 20, 60, 300, IMarketDataQueries.MaxCandleLimit })
                 {
                     var actual = await queries.GetCandlesAsync(symbolId, period, limit, Ct);
                     var expected = await OracleCandlesAsync(symbolId, period, limit);

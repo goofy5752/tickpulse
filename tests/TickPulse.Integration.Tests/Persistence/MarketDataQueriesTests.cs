@@ -435,14 +435,14 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         var queries = Queries();
         await Should.ThrowAsync<ArgumentOutOfRangeException>(() => queries.GetCandlesAsync(Btc, Period.OneMinute, 0, Ct));
         await Should.ThrowAsync<ArgumentOutOfRangeException>(
-            () => queries.GetCandlesAsync(Btc, Period.OneWeek, MarketDataQueries.MaxCandleLimit + 1, Ct));
+            () => queries.GetCandlesAsync(Btc, Period.OneWeek, IMarketDataQueries.MaxCandleLimit + 1, Ct));
     }
 
     [Fact]
     public async Task Candles_MaxLimit_ReachesBackExactlyThatManyPeriods()
     {
         var monday = Start.Date;
-        var limit = MarketDataQueries.MaxCandleLimit;
+        var limit = IMarketDataQueries.MaxCandleLimit;
         var oldest = monday.AddDays(-7 * (limit - 1));
         (await CandleWriter().InsertBackfillAsync(
             Btc,
@@ -452,21 +452,6 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         var weeks = await Queries().GetCandlesAsync(Btc, Period.OneWeek, limit, Ct);
 
         weeks.Select(c => (c.BucketStart, c.Close)).ShouldBe([(oldest, 2m), (monday, 3m)]);
-    }
-
-    [Fact]
-    public async Task CloseAtOrBefore_ReturnsLatestNotAfter()
-    {
-        await CandleWriter().InsertBackfillAsync(Btc, [Candle(Start, close: 1m), Candle(Start.AddMinutes(10), close: 3m)], Ct);
-        await CandleWriter().InsertBackfillAsync(Eth, [Candle(Start.AddMinutes(6), close: 50m)], Ct);
-        await Writer().WriteBatchAsync([NewTick(Btc, 1, 2m, 1m, Start.AddMinutes(5).AddSeconds(30))], Ct);
-        var queries = Queries();
-
-        (await queries.GetCloseAtOrBeforeAsync(Btc, Start.AddMinutes(-1), Ct)).ShouldBeNull();
-        (await queries.GetCloseAtOrBeforeAsync(Btc, Start, Ct)).ShouldBe(1m);
-        (await queries.GetCloseAtOrBeforeAsync(Btc, Start.AddMinutes(9).AddSeconds(59), Ct)).ShouldBe(2m);
-        (await queries.GetCloseAtOrBeforeAsync(Btc, Start.AddMinutes(10), Ct)).ShouldBe(3m);
-        (await queries.GetCloseAtOrBeforeAsync(Btc, Start.AddDays(1), Ct)).ShouldBe(3m);
     }
 
     [Fact]

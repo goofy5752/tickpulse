@@ -77,8 +77,8 @@ npm --prefix web run dev | build | lint | typecheck
   neither JSON nor XML). `HEAD` works wherever `GET` does.
 - **Config keys** (env uses `__`): `ConnectionStrings:TickPulse`, `Database:*` (`MaxPoolSize` 20; `AllowGssEncryption` false, needs a krb5 image), `Admin:*`,
   `Binance:*`, `Ingestion:*`, `Backfill:*`, `RateLimiting:*`, `MarketHub:*`, `SystemStats:*`,
-  `ForwardedHeaders:*`, `Otel:*`, `Serilog:*`. Defaults: the README configuration table, which lists
-  every key; keep it in step when adding one. `ForwardedHeaders:KnownNetworks` takes CIDRs (the
+  `ForwardedHeaders:*`, `Otel:*` (`Endpoint`, `IpSalt`, sampling), `Serilog:*`. Defaults: the README
+  configuration table, which lists every key; keep it in step when adding one. `ForwardedHeaders:KnownNetworks` takes CIDRs (the
   compose network is `172.30.0.0/24`). Only peers in those ranges, in `KnownProxies`, or on loopback
   may set `CF-Connecting-IP`, and `X-Forwarded-For` is never read.
 - **Telemetry**: the `TickPulse` meter and activity source live in
@@ -105,7 +105,9 @@ npm --prefix web run dev | build | lint | typecheck
   total); beyond that startup fails and the container restart policy takes over.
 - **Clearing tables**: in SQL and shell scripts, clear tables with `DELETE FROM`.
 - **Packages**: versions live only in `Directory.Packages.props` (Central Package Management).
-  Add a `PackageReference` only to the project that needs it.
+  Add a `PackageReference` only to the project that needs it. Every project commits its
+  `packages.lock.json`; after a package change run `dotnet restore` and commit the updated lock files
+  (CI and the image build restore with `--locked-mode`).
 - **Build settings** (`Directory.Build.props`): `net10.0`, `Nullable`, `ImplicitUsings`,
   `TreatWarningsAsErrors`, `InvariantGlobalization`, `AnalysisLevel=latest-recommended` (CA
   rules such as CA1822/CA1001 are build errors). Fix them; do not suppress them broadly.
