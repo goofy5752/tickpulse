@@ -18,17 +18,20 @@ groups:
             datasourceUid: prom
             model:
               refId: A
-              # Seconds since any instance last reported Connected (WsState 2), using the sample's
-              # own timestamp. Remote-written series get no staleness markers, so a plain instant
-              # query would keep returning the last value for 5 minutes after the API dies; this
-              # measures the age of the last Connected sample instead, so it covers both a live
-              # disconnect and the API no longer exporting.
-              # Cold start: if no Connected sample exists in the last hour, the age is counted from
-              # the API's first ws_state sample minus 60 s, so a fresh start gets 2 minutes to
-              # connect before the condition is true. No ws_state sample at all in the last hour
-              # is NoData, which alerts.
+              # How long the API has been reporting without any instance reporting Connected
+              # (WsState 2): the timestamp of the newest tickpulse_ws_state sample minus the timestamp
+              # of the newest Connected one. Both come from the samples themselves, so the rule
+              # measures what the API reported, not how late the report arrived: when the telemetry
+              # pipeline is slow or stalled under load, both timestamps stop together and the
+              # difference stays at 0, so the rule stays quiet. Missing or delayed metrics are the
+              # "Telemetry pipeline down" rule's business, and an API that is down entirely is caught
+              # by the external uptime check on /health/ready.
+              # Cold start: with no Connected sample in the last hour, the newest Connected time is
+              # taken as the API's first ws_state sample plus 60 s, so a fresh start gets 2 minutes to
+              # connect before the condition is true.
               expr: >-
-                time() - (
+                max(max_over_time(timestamp(tickpulse_ws_state{service_name="tickpulse-api"})[1h:15s]))
+                - (
                 max(max_over_time((timestamp(tickpulse_ws_state{service_name="tickpulse-api"}) and tickpulse_ws_state{service_name="tickpulse-api"} == 2)[1h:15s]))
                 or
                 (min(min_over_time(timestamp(tickpulse_ws_state{service_name="tickpulse-api"})[1h:15s])) + 60)
@@ -45,18 +48,59 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: gt, params: [60] }
-        # 30 s pending period: rides out a short deploy or failover gap. Detection takes about 90-110 s.
+        # 30 s pending period: rides out a short reconnect. Detection takes about 90-110 s.
         for: 30s
-        noDataState: Alerting
-        execErrState: Error
+        # No ws_state sample in the last hour, or Prometheus failing to answer, is a telemetry
+        # problem, not evidence of a disconnect: stay quiet and let "Telemetry pipeline down" report it.
+        noDataState: OK
+        execErrState: KeepLast
         labels:
           severity: critical
           component: ingestion
         annotations:
           summary: The Binance WebSocket has not been connected for more than 90 seconds.
-          description: No TickPulse instance reports a Connected stream, so no trades are being ingested. Check the API logs for connection errors.
+          description: The API keeps reporting, but no TickPulse instance reports a Connected stream, so no trades are being ingested. Check the API logs for connection errors.
           __dashboardUid__: tp-ingestion
           __panelId__: "19"
+
+      - uid: tp-telemetry-stale
+        title: Telemetry pipeline down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prom
+            model:
+              refId: A
+              # Seconds since the newest API metric sample (tickpulse_ws_state, exported every 15 s).
+              # It grows when the API stops exporting, or when the collector, Prometheus or the
+              # network between them refuses or delays the data.
+              expr: time() - max(timestamp(tickpulse_ws_state{service_name="tickpulse-api"}))
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [120] }
+        for: 1m
+        # No API metric within Prometheus' 5-minute lookback, or Prometheus failing to answer, is
+        # exactly what this rule reports.
+        noDataState: Alerting
+        execErrState: Alerting
+        labels:
+          severity: warning
+          component: telemetry
+        annotations:
+          summary: 'The newest API metric is {{ with .Values.A }}{{ humanizeDuration .Value }}{{ else }}more than 5 minutes{{ end }} old.'
+          description: Metrics from the API are not reaching Prometheus, so the dashboards are stale and the ingestion alerts cannot see a problem. Check that the API is up, then the collector's health and the Telemetry pipeline row of the Runtime/DB dashboard (refused or failed data).
+          __dashboardUid__: tp-runtime
+          __panelId__: "26"
 
       - uid: tp-ingest-lag-p95
         title: Ingest lag p95 above 5 s
@@ -153,13 +197,15 @@ groups:
             model:
               refId: A
               # Only with real traffic (> 0.1 req/s): a single 500 among a handful of requests is not an outage.
+              # The SignalR hub (long-lived connections) and the health probes (503 while ingestion
+              # connects, which is expected) are not API traffic and are left out.
               expr: >-
                 (
-                sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api", http_response_status_code=~"5.."}[5m]))
-                / sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api"}[5m]))
+                sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api", http_route!~"/?(hubs|health)/.*", http_response_status_code=~"5.."}[5m]))
+                / sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api", http_route!~"/?(hubs|health)/.*"}[5m]))
                 )
                 and
-                sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api"}[5m])) > 0.1
+                sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api", http_route!~"/?(hubs|health)/.*"}[5m])) > 0.1
               instant: true
               range: false
               intervalMs: 15000
