@@ -55,7 +55,7 @@ services.AddSingleton<IProblemDetailsWriter, XmlProblemDetailsWriter>();
 services.AddSingleton<IProblemDetailsWriter, JsonProblemDetailsWriter>();
 
 services.AddTickPulseForwardedHeaders();
-services.AddTickPulseCompressionAndCaching();
+services.AddTickPulseDashboardAssets();
 services.AddTickPulseRateLimiting();
 services.AddTickPulseHealthChecks();
 services.AddTickPulseMarketHub();
@@ -72,14 +72,17 @@ var app = builder.Build();
 app.UseForwardedHeaders();
 app.UseTickPulseTelemetry(); // request log and API metrics: after the forwarded headers, before everything else
 app.UseHeadWithoutBody();
-app.UseTickPulseCompression(); // everything below may write a body: problems, static files, the dashboard
 app.UseSecurityHeaders();
 app.UseVaryByAcceptOnApi();
 app.UseAcceptHeaderNormalization();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
-app.UseStaticFiles();
+app.UseDashboardAssetCaching();
 app.UseRouting();
+
+// After routing, so a file in the static assets manifest is served by its MapStaticAssets endpoint (precompressed,
+// per-encoding ETag); UseStaticFiles only serves files no endpoint matched, such as a web root filled after the build.
+app.UseStaticFiles();
 app.UseRateLimiter();
 
 // After the rate limiter, so failed key guesses are throttled like any other request.
@@ -91,6 +94,7 @@ app.MapTickPulseHealthChecks();
 app.MapTickPulseMarketHub(); // before the dashboard fallback
 app.MapOpenApi();
 app.MapScalarApiReference("/docs", o => o.WithTitle("TickPulse API"));
+app.MapDashboardAssets();
 app.MapFallbackToFile(DashboardRouteConstraint.FallbackPattern, "index.html");
 
 await app.RunAsync();
