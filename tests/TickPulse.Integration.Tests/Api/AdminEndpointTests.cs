@@ -39,6 +39,7 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
     [InlineData("GET", Path)]
     [InlineData("POST", Path)]
     [InlineData("DELETE", Path + "/BTCUSDT")]
+    [InlineData("GET", Path + "/BTCUSDT")]
     public async Task NoKey_Returns401Problem(string method, string path)
     {
         using var response = await SendAsync(api, new HttpMethod(method), path, key: null, body: method == "POST" ? "BNBUSDT" : null);
@@ -131,7 +132,7 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
             .ToList();
 
         endpoints.Select(e => e.DisplayName).ShouldNotBeEmpty();
-        endpoints.Count.ShouldBe(3, "GET and POST api/admin/symbols, DELETE api/admin/symbols/{symbol}");
+        endpoints.Count.ShouldBe(4, "GET and POST api/admin/symbols, GET and DELETE api/admin/symbols/{symbol}");
         foreach (var endpoint in endpoints)
         {
             endpoint.Metadata.GetOrderedMetadata<IAuthorizeData>().ShouldContain(a => a.Policy == "Admin", endpoint.DisplayName);
@@ -292,15 +293,119 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         response.StatusCode.ShouldBe(HttpStatusCode.Created);
         using var json = await JsonAsync(response);
         json.RootElement.GetProperty("isActive").GetBoolean().ShouldBeTrue();
-        json.RootElement.GetProperty("deactivatedAt").GetString().ShouldNotBeNull().ShouldEndWith("Z"); // the last deactivation is kept
-        (await FindAsync(api, "ADAUSDT")).ShouldNotBeNull().IsActive.ShouldBeTrue();
+        json.RootElement.GetProperty("deactivatedAt").ValueKind.ShouldBe(JsonValueKind.Null); // an active symbol is not deactivated
+
+        // The repository keeps the last deactivation: the backfill needs it to find the stretch the symbol was inactive.
+        var stored = (await FindAsync(api, "ADAUSDT")).ShouldNotBeNull();
+        stored.IsActive.ShouldBeTrue();
+        stored.DeactivatedAtUtc.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task List_AfterReactivation_ShowsNoDeactivation()
+    {
+        (await SendAsync(api, HttpMethod.Delete, Path + "/ADAUSDT", ApiFactory.AdminApiKey)).Dispose();
+        (await SendAsync(api, HttpMethod.Delete, Path + "/ETHUSDT", ApiFactory.AdminApiKey)).Dispose();
+        (await SendAsync(api, HttpMethod.Post, Path, ApiFactory.AdminApiKey, body: "ADAUSDT")).Dispose();
+
+        using var response = await SendAsync(api, HttpMethod.Get, Path, ApiFactory.AdminApiKey);
+        using var json = await JsonAsync(response);
+        var items = json.RootElement.EnumerateArray().ToDictionary(i => i.GetProperty("symbol").GetString()!);
+
+        items["ADAUSDT"].GetProperty("isActive").GetBoolean().ShouldBeTrue();
+        items["ADAUSDT"].GetProperty("deactivatedAt").ValueKind.ShouldBe(JsonValueKind.Null);
+        items["ETHUSDT"].GetProperty("isActive").GetBoolean().ShouldBeFalse();
+        items["ETHUSDT"].GetProperty("deactivatedAt").GetString().ShouldNotBeNull().ShouldEndWith("Z");
+
+        using var xml = await SendAsync(api, HttpMethod.Get, Path, ApiFactory.AdminApiKey, accept: "application/xml");
+        var ada = (await XmlAsync(xml)).Elements(Schema + "adminSymbol").Single(e => e.Element(Schema + "symbol")!.Value == "ADAUSDT");
+        var deactivated = ada.Element(Schema + "deactivatedAt").ShouldNotBeNull();
+        deactivated.Value.ShouldBeEmpty();
+        deactivated.Attribute(XNamespace.Get("http://www.w3.org/2001/XMLSchema-instance") + "nil").ShouldNotBeNull().Value.ShouldBe("true");
+    }
+
+    [Fact]
+    public async Task Add_Created_HasTheLocationOfTheSymbol_WhichServesIt()
+    {
+        api.Binance.SetSymbolStatus("SOLUSDT", "TRADING");
+
+        using var created = await SendAsync(api, HttpMethod.Post, Path, ApiFactory.AdminApiKey, body: "solusdt");
+
+        created.StatusCode.ShouldBe(HttpStatusCode.Created);
+        var location = created.Headers.Location.ShouldNotBeNull();
+        location.OriginalString.ShouldBe("/api/admin/symbols/SOLUSDT");
+        var body = await created.Content.ReadAsStringAsync(Ct);
+
+        using var fetched = await SendAsync(api, HttpMethod.Get, location.OriginalString, ApiFactory.AdminApiKey);
+
+        fetched.StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await fetched.Content.ReadAsStringAsync(Ct)).ShouldBe(body);
+    }
+
+    [Fact]
+    public async Task Add_Reactivated_HasALocation_AlreadyActive_HasNone()
+    {
+        (await SendAsync(api, HttpMethod.Delete, Path + "/ADAUSDT", ApiFactory.AdminApiKey)).Dispose();
+
+        using var reactivated = await SendAsync(api, HttpMethod.Post, Path, ApiFactory.AdminApiKey, body: "ADAUSDT");
+        using var unchanged = await SendAsync(api, HttpMethod.Post, Path, ApiFactory.AdminApiKey, body: "BTCUSDT");
+
+        reactivated.StatusCode.ShouldBe(HttpStatusCode.Created);
+        reactivated.Headers.Location.ShouldNotBeNull().OriginalString.ShouldBe("/api/admin/symbols/ADAUSDT");
+        unchanged.StatusCode.ShouldBe(HttpStatusCode.OK);
+        unchanged.Headers.Location.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("""{"symbol":null}""")]
+    [InlineData("""{"symbol":""}""")]
+    [InlineData("""{"symbol":"   "}""")]
+    public async Task Add_MissingSymbol_Returns400Validation(string json)
+    {
+        var requestsBefore = api.Binance.ReceivedRequests.Count;
+        using var client = api.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(Path, UriKind.Relative))
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Add(ApiKeyHeader, ApiFactory.AdminApiKey);
+
+        using var response = await client.SendAsync(request, Ct);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        var problem = await ReadAsync(response);
+        problem.Type.ShouldBe(TypeBase + "validation");
+        problem.Status.ShouldBe(400);
+        problem.Detail.ShouldBe("symbol is required.");
+        ShouldOnlyRequireSymbol(problem);
+        api.Binance.ReceivedRequests.Count.ShouldBe(requestsBefore);
+    }
+
+    [Fact]
+    public async Task Add_MissingSymbol_Xml_Returns400Validation()
+    {
+        using var client = api.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(Path, UriKind.Relative))
+        {
+            Content = new StringContent("""<addSymbolRequest xmlns="https://tickpulse.dev/schema/v1" />""", Encoding.UTF8, "application/xml"),
+        };
+        request.Headers.Add(ApiKeyHeader, ApiFactory.AdminApiKey);
+        request.Headers.Add("Accept", "application/xml");
+
+        using var response = await client.SendAsync(request, Ct);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        MediaType(response).ShouldBe(XmlMediaType);
+        var problem = await ReadAsync(response);
+        problem.Type.ShouldBe(TypeBase + "validation");
+        problem.Detail.ShouldBe("symbol is required.");
+        ShouldOnlyRequireSymbol(problem);
     }
 
     [Theory]
     [InlineData("BTC-USDT")]
     [InlineData("ABC")]
-    [InlineData("")]
-    [InlineData(null)]
     public async Task Add_InvalidFormat_Returns422(string? symbol)
     {
         var requestsBefore = api.Binance.ReceivedRequests.Count;
@@ -372,19 +477,27 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
     }
 
     [Fact]
-    public async Task Add_MissingBody_Returns400Validation()
+    public async Task Add_MissingBody_Returns400Validation_AboutSymbol()
     {
-        using var client = api.CreateClient();
-        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(Path, UriKind.Relative))
+        foreach (var (contentType, problemType) in new[] { ("application/json", JsonMediaType), ("application/xml", XmlMediaType) })
         {
-            Content = new StringContent(string.Empty, Encoding.UTF8, "application/json"),
-        };
-        request.Headers.Add(ApiKeyHeader, ApiFactory.AdminApiKey);
+            using var client = api.CreateClient();
+            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(Path, UriKind.Relative))
+            {
+                Content = new StringContent(string.Empty, Encoding.UTF8, contentType),
+            };
+            request.Headers.Add(ApiKeyHeader, ApiFactory.AdminApiKey);
+            request.Headers.Add("Accept", contentType);
 
-        using var response = await client.SendAsync(request, Ct);
+            using var response = await client.SendAsync(request, Ct);
 
-        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
-        (await ReadAsync(response)).Type.ShouldBe(TypeBase + "validation");
+            response.StatusCode.ShouldBe(HttpStatusCode.BadRequest, contentType);
+            MediaType(response).ShouldBe(problemType);
+            var problem = await ReadAsync(response);
+            problem.Type.ShouldBe(TypeBase + "validation");
+            problem.Detail.ShouldBe("symbol is required.");
+            ShouldOnlyRequireSymbol(problem);
+        }
     }
 
     [Fact]
@@ -484,6 +597,43 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         eth.GetProperty("deactivatedAt").GetString().ShouldNotBeNull().ShouldEndWith("Z");
         eth.GetProperty("backfillStatus").GetString().ShouldBe("NotRequested");
         eth.GetProperty("backfilledFrom").ValueKind.ShouldBe(JsonValueKind.Null);
+    }
+
+    [Fact]
+    public async Task Get_ReturnsOneSymbol_ActiveOrNot_CaseInsensitive()
+    {
+        (await SendAsync(api, HttpMethod.Delete, Path + "/ETHUSDT", ApiFactory.AdminApiKey)).Dispose();
+
+        using var btc = await SendAsync(api, HttpMethod.Get, Path + "/btcusdt", ApiFactory.AdminApiKey);
+        using var eth = await SendAsync(api, HttpMethod.Get, Path + "/ETHUSDT", ApiFactory.AdminApiKey, accept: "application/xml");
+
+        btc.StatusCode.ShouldBe(HttpStatusCode.OK);
+        using (var json = await JsonAsync(btc))
+        {
+            json.RootElement.EnumerateObject().Select(p => p.Name)
+                .ShouldBe(["symbol", "isActive", "createdAt", "deactivatedAt", "backfillStatus", "backfilledFrom"]);
+            json.RootElement.GetProperty("symbol").GetString().ShouldBe("BTCUSDT");
+            json.RootElement.GetProperty("isActive").GetBoolean().ShouldBeTrue();
+        }
+
+        eth.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var root = await XmlAsync(eth);
+        root.Name.ShouldBe(Schema + "adminSymbol");
+        root.Element(Schema + "isActive")!.Value.ShouldBe("false");
+        root.Element(Schema + "deactivatedAt")!.Value.ShouldEndWith("Z");
+    }
+
+    [Theory]
+    [InlineData("NOPEUSDT")]
+    [InlineData("BTC-USDT")]
+    public async Task Get_Unknown_Returns404(string symbol)
+    {
+        using var response = await SendAsync(api, HttpMethod.Get, Path + "/" + symbol, ApiFactory.AdminApiKey);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        var problem = await ReadAsync(response);
+        problem.Type.ShouldBe(TypeBase + "unknown-symbol");
+        problem.Status.ShouldBe(404);
     }
 
     [Fact]
@@ -589,6 +739,30 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         factory.Services.GetRequiredService<ISymbolRepository>().FindAsync(
             SymbolName.TryCreate(symbol, out var name) ? name : throw new ArgumentException(symbol, nameof(symbol)),
             Ct);
+
+    /// <summary>The problem's <c>errors</c> hold exactly one entry: <c>symbol: ["symbol is required."]</c>.</summary>
+    private static void ShouldOnlyRequireSymbol(Problem problem)
+    {
+        var errors = Errors(problem);
+        errors.Keys.ShouldBe(["symbol"]);
+        errors["symbol"].ShouldBe(["symbol is required."]);
+    }
+
+    /// <summary>The <c>errors</c> member of a validation problem, from JSON or XML (one element per message).</summary>
+    private static Dictionary<string, string[]> Errors(Problem problem)
+    {
+        if (problem.Raw.TrimStart().StartsWith('<'))
+        {
+            XNamespace rfc7807 = "urn:ietf:rfc:7807";
+            return XDocument.Parse(problem.Raw).Root!.Element(rfc7807 + "errors").ShouldNotBeNull().Elements()
+                .GroupBy(e => e.Name.LocalName)
+                .ToDictionary(g => g.Key, g => g.Select(e => e.Value).ToArray());
+        }
+
+        using var json = JsonDocument.Parse(problem.Raw);
+        return json.RootElement.GetProperty("errors").EnumerateObject()
+            .ToDictionary(p => p.Name, p => p.Value.EnumerateArray().Select(v => v.GetString()!).ToArray());
+    }
 
     private static async Task<JsonDocument> JsonAsync(HttpResponseMessage response) =>
         JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));

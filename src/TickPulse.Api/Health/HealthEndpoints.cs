@@ -10,6 +10,11 @@ namespace TickPulse.Api.Health;
 /// <c>/health/live</c> (the process answers) and <c>/health/ready</c> (the database answers, and ingestion is either
 /// streaming or standing by for another leader). Both reply with a small JSON report; not ready is a 503.
 /// </summary>
+/// <remarks>
+/// Ingestion that is still connecting or waiting to reconnect is <see cref="HealthStatus.Degraded"/>: not ready (503),
+/// but an expected, self-healing state, so the health check log reports it at Warning. Only a failure nobody expects
+/// (the database does not answer) is Unhealthy and logged at Error.
+/// </remarks>
 internal static class HealthEndpoints
 {
     public const string PathPrefix = "/health";
@@ -29,7 +34,17 @@ internal static class HealthEndpoints
     public static IEndpointRouteBuilder MapTickPulseHealthChecks(this IEndpointRouteBuilder endpoints)
     {
         endpoints.MapHealthChecks(LivePath, new HealthCheckOptions { Predicate = _ => false, ResponseWriter = WriteAsync });
-        endpoints.MapHealthChecks(ReadyPath, new HealthCheckOptions { Predicate = r => r.Tags.Contains(ReadyTag), ResponseWriter = WriteAsync });
+        endpoints.MapHealthChecks(ReadyPath, new HealthCheckOptions
+        {
+            Predicate = r => r.Tags.Contains(ReadyTag),
+            ResponseWriter = WriteAsync,
+            ResultStatusCodes =
+            {
+                [HealthStatus.Healthy] = StatusCodes.Status200OK,
+                [HealthStatus.Degraded] = StatusCodes.Status503ServiceUnavailable,
+                [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable,
+            },
+        });
         return endpoints;
     }
 
@@ -81,7 +96,11 @@ internal sealed class DatabaseHealthCheck(NpgsqlDataSource dataSource) : IHealth
     }
 }
 
-/// <summary>Healthy while this instance streams (<see cref="WsState.Connected"/>) or stands by for another leader.</summary>
+/// <summary>
+/// Healthy while this instance streams (<see cref="WsState.Connected"/>) or stands by for another leader; Degraded
+/// while it connects or waits to reconnect. The stream supervisor retries on its own, and the WebSocket alert covers
+/// an outage that lasts.
+/// </summary>
 internal sealed class IngestionHealthCheck(IngestionState state) : IHealthCheck
 {
     public Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken cancellationToken = default)
@@ -90,6 +109,6 @@ internal sealed class IngestionHealthCheck(IngestionState state) : IHealthCheck
         var description = $"Ingestion is {status}.";
         return Task.FromResult(status is WsState.Connected or WsState.Standby
             ? HealthCheckResult.Healthy(description)
-            : new HealthCheckResult(context.Registration.FailureStatus, description));
+            : HealthCheckResult.Degraded(description));
     }
 }

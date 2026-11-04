@@ -187,6 +187,8 @@ jobs:
         with:
           context: .
           target: api
+          build-args: |
+            VITE_GRAFANA_URL=https://grafana.tickpulse.dev
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           labels: |

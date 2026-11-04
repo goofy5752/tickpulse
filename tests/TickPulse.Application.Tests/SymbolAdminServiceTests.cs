@@ -36,6 +36,19 @@ public sealed class SymbolAdminServiceTests
     [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
+    public async Task Add_MissingSymbol_ReturnsValidation_WithoutTouchingPorts(string? raw)
+    {
+        var result = await Service().AddAsync(raw, Ct);
+
+        result.Error.ShouldBe(AppError.Validation);
+        result.Parameter.ShouldBe("symbol");
+        result.Detail.ShouldBe("symbol is required.");
+        _symbols.ReceivedCalls().ShouldBeEmpty();
+        _exchange.ReceivedCalls().ShouldBeEmpty();
+        _changes.ReceivedCalls().ShouldBeEmpty();
+    }
+
+    [Theory]
     [InlineData("BTC-USDT")]
     [InlineData("ABC")]
     [InlineData("ABCDEFGHIJKLMNOPQRSTU")]
@@ -251,6 +264,30 @@ public sealed class SymbolAdminServiceTests
 
         result.Error.ShouldBe(AppError.UnknownSymbol);
         _changes.DidNotReceive().Notify();
+    }
+
+    // ---- get --------------------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData("ADAUSDT")]
+    [InlineData(" adausdt ")]
+    public async Task Get_KnownSymbol_ReturnsIt_ActiveOrNot(string raw)
+    {
+        var result = await Service().GetAsync(raw, Ct);
+
+        result.Value.ShouldBe(Ada);
+    }
+
+    [Theory]
+    [InlineData("NOPEUSDT", "Symbol 'NOPEUSDT' is not monitored.")]
+    [InlineData("btc-usdt", "Symbol 'btc-usdt' is not monitored.")]
+    [InlineData(null, "Symbol '' is not monitored.")]
+    public async Task Get_UnknownOrMalformed_ReturnsUnknownSymbol(string? raw, string detail)
+    {
+        var result = await Service().GetAsync(raw, Ct);
+
+        result.Error.ShouldBe(AppError.UnknownSymbol);
+        result.Detail.ShouldBe(detail);
     }
 
     // ---- list -------------------------------------------------------------------------------------------------

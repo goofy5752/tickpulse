@@ -6,9 +6,12 @@ import {
   BACKFILL_POLL_MS,
   createQueryClient,
   symbolsRefetchInterval,
+  useAverage,
+  useCandles,
   SYMBOLS_REFRESH_MS,
   useSma,
   useStats,
+  useSymbols,
 } from './queries'
 import type { BackfillStatus, Period, SmaResponse, SymbolResponse } from './types'
 
@@ -168,5 +171,111 @@ describe('symbolsRefetchInterval', () => {
     expect(symbolsRefetchInterval([row('Completed'), row('Failed'), row('NotRequested')], true)).toBe(SYMBOLS_REFRESH_MS)
     expect(symbolsRefetchInterval([row('Running', false)], true)).toBe(SYMBOLS_REFRESH_MS)
     expect(symbolsRefetchInterval(undefined, true)).toBe(SYMBOLS_REFRESH_MS)
+  })
+})
+
+/**
+ * Superseded and unmounted reads must never be aborted. Browser extensions commonly wrap
+ * `window.fetch` and watch the returned promise without a rejection handler; every abort then
+ * surfaces in the console as an uncaught `AbortError`, whatever the app does with its own copy.
+ */
+describe('in-flight requests', () => {
+  let signals: AbortSignal[]
+  /** What a fetch wrapper without a rejection handler would leak as uncaught errors. */
+  let unhandled: unknown[]
+
+  beforeEach(() => {
+    client = createQueryClient()
+    signals = []
+    unhandled = []
+    // Behaves like the browser's fetch (rejects with the signal's reason on abort), seen through
+    // a wrapper that observes the response the way such extensions do. The wrapper's own promise
+    // records its rejections here instead of leaking them, so the assertions can see them.
+    fetchMock = vi.fn<typeof fetch>((input, init) => {
+      const signal = init?.signal ?? undefined
+      if (signal) signals.push(signal)
+      const promise = new Promise<Response>((resolve, reject) => {
+        pending.push({ url: urlOf(input), resolve })
+        signal?.addEventListener('abort', () => {
+          reject(signal.reason as Error)
+        })
+      })
+      promise
+        .then((response) => response.clone().text())
+        .catch((error: unknown) => {
+          unhandled.push(error)
+        })
+      return promise
+    })
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  /** Lets every rejection settle before the assertions. */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+  it('useSma_NTypedWhileTheLastDigitsRequestIsInFlight_DoesNotAbortIt', async () => {
+    const { result, rerender } = renderHook(({ n }: { n: number }) => useSma('BTCUSDT', n, '1d'), {
+      wrapper,
+      initialProps: { n: 2 },
+    })
+    await waitFor(() => {
+      expect(pending).toHaveLength(1)
+    })
+
+    rerender({ n: 25 })
+    await waitFor(() => {
+      expect(pending).toHaveLength(2)
+    })
+    await settle()
+
+    expect(signals.filter((s) => s.aborted)).toHaveLength(0)
+    expect(unhandled).toEqual([])
+
+    answer(1, sma('BTCUSDT', 25))
+    answer(0, sma('BTCUSDT', 2))
+    await waitFor(() => {
+      expect(result.current.data?.requestedDataPoints).toBe(25)
+    })
+    expect(result.current.isError).toBe(false)
+    // The superseded answer still lands in the cache, ready if the user types 2 again.
+    expect(client.getQueryData(['sma', 'BTCUSDT', 2, '1d', null])).toMatchObject({ requestedDataPoints: 2 })
+  })
+
+  it('useCandles_PeriodSwitchedWhileLoading_DoesNotAbortTheRequest', async () => {
+    const { rerender } = renderHook(({ p }: { p: Period }) => useCandles('BTCUSDT', p, 300), {
+      wrapper,
+      initialProps: { p: '1w' },
+    })
+    await waitFor(() => {
+      expect(pending).toHaveLength(1)
+    })
+
+    rerender({ p: '1m' })
+    await waitFor(() => {
+      expect(pending).toHaveLength(2)
+    })
+    await settle()
+
+    expect(signals.filter((s) => s.aborted)).toHaveLength(0)
+    expect(unhandled).toEqual([])
+  })
+
+  it.each<[string, () => unknown]>([
+    ['useSymbols', () => useSymbols()],
+    ['useAverage', () => useAverage('BTCUSDT')],
+    ['useSma', () => useSma('BTCUSDT', 20, '1d')],
+    ['useCandles', () => useCandles('BTCUSDT', '1d')],
+    ['useStats', () => useStats({ enabled: true })],
+  ])('%s_UnmountedWhileLoading_DoesNotAbortTheRequest', async (_name, hook) => {
+    const { unmount } = renderHook(hook, { wrapper })
+    await waitFor(() => {
+      expect(pending).toHaveLength(1)
+    })
+
+    unmount()
+    await settle()
+
+    expect(signals.filter((s) => s.aborted)).toHaveLength(0)
+    expect(unhandled).toEqual([])
   })
 })
