@@ -43,3 +43,25 @@ internal sealed class SpanCapture : IDisposable
 
     public void Dispose() => _listener.Dispose();
 }
+
+/// <summary>
+/// Records, for every request, whether its server span ends up sampled (exported), as seen from outside the whole
+/// pipeline, after the request log has made its decision.
+/// </summary>
+internal sealed class RequestTraceRecorder : IStartupFilter
+{
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(string Path, int Status, bool Sampled)> _requests = new();
+
+    public IReadOnlyList<(string Path, int Status, bool Sampled)> Requests => [.. _requests];
+
+    public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+    {
+        app.Use(async (HttpContext context, Func<Task> nextMiddleware) =>
+        {
+            await nextMiddleware();
+            var activity = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpActivityFeature>()?.Activity;
+            _requests.Enqueue((context.Request.Path.Value ?? string.Empty, context.Response.StatusCode, activity?.Recorded == true));
+        });
+        next(app);
+    };
+}

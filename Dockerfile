@@ -15,6 +15,9 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
+# Where the dashboard's Grafana links point. Compose passes the local stack's GRAFANA_ROOT_URL; the default is
+# the public Grafana that the production image links to.
+ARG VITE_GRAFANA_URL=https://grafana.tickpulse.dev
 RUN npm run build
 
 # ---------- build: restore once, publish both apps ----------

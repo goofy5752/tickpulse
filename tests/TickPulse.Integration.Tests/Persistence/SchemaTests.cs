@@ -55,7 +55,21 @@ public sealed class SchemaTests(TimescaleFixture db)
         var tables = await QueryStringsAsync(
             "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'");
 
-        tables.Order(StringComparer.Ordinal).ShouldBe(["__EFMigrationsHistory", "candles_1m", "price_ticks", "symbols"]);
+        tables.Order(StringComparer.Ordinal).ShouldBe(["__EFMigrationsHistory", "candles_1d", "candles_1h", "candles_1m", "price_ticks", "symbols"]);
+    }
+
+    [Fact]
+    public async Task Migrations_MaintainRollupsWithStatementTriggers()
+    {
+        var triggers = await QueryStringsAsync(
+            """
+            SELECT tgname || ':' || (pg_get_triggerdef(oid) LIKE '%FOR EACH STATEMENT%')::text
+              FROM pg_trigger
+             WHERE tgrelid = 'candles_1m'::regclass AND NOT tgisinternal
+            """);
+
+        triggers.Order(StringComparer.Ordinal).ShouldBe(
+            ["candles_1m_rollups_delete:true", "candles_1m_rollups_insert:true", "candles_1m_rollups_update:true"]);
     }
 
     [Fact]
@@ -94,6 +108,7 @@ public sealed class SchemaTests(TimescaleFixture db)
             SELECT concat_ws(':', id, name, is_active, deactivated_at IS NULL, backfill_status) FROM symbols
             UNION ALL SELECT 'ticks:' || count(*) FROM price_ticks
             UNION ALL SELECT 'candles:' || count(*) FROM candles_1m
+            UNION ALL SELECT 'rollups:' || (SELECT count(*) FROM candles_1h) + (SELECT count(*) FROM candles_1d)
             """);
         state.Order(StringComparer.Ordinal).ShouldBe(
         [
@@ -101,6 +116,7 @@ public sealed class SchemaTests(TimescaleFixture db)
             "2:ADAUSDT:t:t:0",
             "3:ETHUSDT:t:t:0",
             "candles:0",
+            "rollups:0",
             "ticks:0",
         ]);
     }

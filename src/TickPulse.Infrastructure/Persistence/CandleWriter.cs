@@ -8,7 +8,8 @@ namespace TickPulse.Infrastructure.Persistence;
 /// <summary>
 /// Inserts historical exchange candles as <c>source = 2</c>. They carry no trade ids and no sums, so they
 /// never feed the 24 h average, and <c>ON CONFLICT DO NOTHING</c> means they never overwrite a minute that
-/// already exists (streamed or backfilled earlier). A later stream write replaces them.
+/// already exists (streamed or backfilled earlier). A later stream write replaces them. Triggers on
+/// <c>candles_1m</c> roll the inserted minutes into <c>candles_1h</c>/<c>candles_1d</c> within the same statement.
 /// </summary>
 public sealed class CandleWriter(NpgsqlDataSource dataSource) : ICandleWriter
 {
