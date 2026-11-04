@@ -16,7 +16,7 @@ namespace TickPulse.Integration.Tests.Fixtures;
 
 /// <summary>
 /// The real API host (<c>Program</c>) on a <see cref="TestServer"/>, wired to the shared TimescaleDB, a
-/// <see cref="FakeBinanceServer"/>, <c>Admin:ApiKey=test-key</c> and a <see cref="FakeTimeProvider"/>
+/// <see cref="FakeBinanceServer"/>, <see cref="AdminApiKey"/> and a <see cref="FakeTimeProvider"/>
 /// (<see cref="Clock"/>). Use it as a class fixture, or create one per test when it needs its own settings:
 /// <c>await using var api = new ApiFactory(db).WithSetting(...); await api.InitializeAsync();</c>.
 /// </summary>
@@ -36,7 +36,8 @@ namespace TickPulse.Integration.Tests.Fixtures;
 /// </remarks>
 public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Program>, IAsyncLifetime
 {
-    public const string AdminApiKey = "test-key";
+    /// <summary>The fixture's admin key: 36 characters, so the host also starts in the Production environment.</summary>
+    public const string AdminApiKey = "test-admin-key-0123456789abcdef-0123";
 
     private readonly Dictionary<string, string?> _settings = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<Action<IServiceCollection>> _services = [];

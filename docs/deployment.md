@@ -238,7 +238,7 @@ own files, and nginx is only ever reloaded gracefully after `nginx -t` passes.
    ```dotenv
    # Required
    POSTGRES_PASSWORD=<long random, letters and digits only>
-   ADMIN_API_KEY=<long random>
+   ADMIN_API_KEY=<long random, at least 32 characters; a shorter key fails startup>
    GRAFANA_ADMIN_PASSWORD=<long random; applied on Grafana's first start only>
    # Optional
    OTEL_IP_SALT=<random; keeps the daily client-IP hashes stable across restarts>
@@ -388,6 +388,9 @@ dc start api
 - **nginx vhosts.** The CD job does not copy them. After changing one, install it the way step 6 does.
 - **Secrets.**
   - To rotate `ADMIN_API_KEY`, edit `.env`, then run `dc up -d api`.
+  - Since #23, Production refuses admin keys under 32 characters. Check with
+    `awk '/^ADMIN_API_KEY=/{print length(substr($0, 15))}' .env` before deploying; rotate if under 32.
+    `deploy.sh` runs the same check before it pulls and refuses the deploy (exit 2, nothing changed).
   - `POSTGRES_PASSWORD` applies only when the volume is first created. To change it later, run
     `ALTER USER tickpulse PASSWORD '…'` in psql first, then update `.env` and run `dc up -d api`.
   - The Grafana admin password works the same way; reset it with the command in the table above.

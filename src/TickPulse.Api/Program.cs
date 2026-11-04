@@ -98,7 +98,14 @@ app.MapControllers().RequireRateLimiting(ApiRateLimiting.PublicPolicy).WithHeadF
 app.MapTickPulseHealthChecks();
 app.MapTickPulseMarketHub(); // before the dashboard fallback
 app.MapOpenApi();
-app.MapScalarApiReference("/docs", o => o.WithTitle("TickPulse API"));
+// Self-hosted: no CDN fonts, telemetry or AI agent, and no eval probe, so the page stays inside its
+// Content-Security-Policy (SecurityHeaders).
+app.MapScalarApiReference(SecurityHeaders.DocsPath.Value!, o => o
+    .WithTitle("TickPulse API")
+    .AddHeadContent(SecurityHeaders.DocsHeadContent)
+    .DisableDefaultFonts()
+    .DisableTelemetry()
+    .DisableAgent());
 app.MapDashboardAssets();
 app.MapFallbackToFile(DashboardRouteConstraint.FallbackPattern, "index.html");
 

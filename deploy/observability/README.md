@@ -187,6 +187,12 @@ following from every span and log record before export:
 
 The API logs IPs only as `client_ip_hash`.
 
+**Log lines are public.** Anonymous Viewers can read the raw log lines in Loki, through the **Logs**
+dashboard or their own queries, including exception messages and stack traces. The scrub above removes
+addresses and headers, and TickPulse never logs secrets: not the admin key (a failed attempt logs only
+"wrong key" or "missing key"), the database password or the IP-hash salt. Anything added to a log
+message is therefore published; keep it free of secrets and personal data.
+
 **Rate limiting.** In production, the host nginx in front of `grafana.tickpulse.dev` rate-limits
 `/api/ds/query` and the datasource proxy and resource paths per visitor (`CF-Connecting-IP`): 5 requests
 per second with a burst of 40, then 429 (`deploy/nginx/grafana.tickpulse.conf`). This bounds how fast
