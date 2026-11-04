@@ -27,25 +27,28 @@ public sealed partial class DatabaseMigrator(
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        if (!configuration.GetValue(EnabledKey, defaultValue: true))
+        if (configuration.GetValue(EnabledKey, defaultValue: true))
+        {
+            await RunWithRetryAsync(MigrateOnceAsync, MigrationRetryOptions.Default, clock, logger, cancellationToken);
+        }
+        else
         {
             LogSkipped(logger);
-            return;
         }
 
-        await RunWithRetryAsync(MigrateOnceAsync, MigrationRetryOptions.Default, clock, logger, cancellationToken);
         await CheckConnectionBudgetAsync(cancellationToken);
     }
 
-    // The database is reachable now. A pool that does not fit the server's max_connections only shows under load, as
-    // refused connections; say so at startup instead.
+    // A pool that does not fit the server's max_connections only shows under load, as refused connections; say so at
+    // startup instead. Runs with migrations off as well. It is advisory: an unreachable database costs at most
+    // NpgsqlConnectionPolicy.BudgetCheckTimeout and is logged at Information.
     private async Task CheckConnectionBudgetAsync(CancellationToken cancellationToken)
     {
         await using var scope = scopes.CreateAsyncScope();
         var shared = scope.ServiceProvider.GetRequiredService<NpgsqlDataSource>();
         var writer = scope.ServiceProvider.GetRequiredKeyedService<NpgsqlDataSource>(DependencyInjection.TickWriterDataSourceKey);
         var budget = NpgsqlConnectionPolicy.ConnectionBudget(MaxPoolSize(shared), MaxPoolSize(writer));
-        await NpgsqlConnectionPolicy.CheckBudgetAsync(shared, budget, logger, cancellationToken);
+        await NpgsqlConnectionPolicy.CheckBudgetAsync(shared, budget, logger, clock, cancellationToken);
     }
 
     private static int MaxPoolSize(NpgsqlDataSource dataSource) =>

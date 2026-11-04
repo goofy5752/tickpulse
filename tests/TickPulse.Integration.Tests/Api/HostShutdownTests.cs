@@ -8,10 +8,14 @@ using TickPulse.Integration.Tests.Fixtures;
 
 namespace TickPulse.Integration.Tests.Api;
 
-/// <summary>A stop fits the containers' <c>stop_grace_period: 30s</c> (asserted on the compose files elsewhere).</summary>
+/// <summary>
+/// The host's stop budget fits the grace period that each compose file gives the api: if either side changes (a longer
+/// flush deadline, a shorter <c>stop_grace_period</c>), Docker would kill a stop that is still within its own deadlines.
+/// </summary>
 public sealed class HostShutdownTests(ApiFactory api) : IClassFixture<ApiFactory>
 {
-    private static readonly TimeSpan StopGracePeriod = TimeSpan.FromSeconds(30);
+    // The ingestion worker's slowest stop besides the flush: two stream closes (2 s each, during a rotation).
+    private static readonly TimeSpan StreamCloses = TimeSpan.FromSeconds(4);
 
     [Fact]
     public void Host_UsesTheShutdownTimeout()
@@ -20,21 +24,21 @@ public sealed class HostShutdownTests(ApiFactory api) : IClassFixture<ApiFactory
     }
 
     [Fact]
-    public void WorstCaseStop_FitsTheGracePeriod()
+    public void IngestionWorstCase_FitsTheHostsShutdownTimeout()
     {
-        // The ingestion worker's worst case: two stream closes (2 s each, during a rotation) and the flush deadline.
-        (IngestionWorker.FlushDeadline + TimeSpan.FromSeconds(4)).ShouldBeLessThan(HostShutdown.Timeout);
-
-        // After the hosted services: the trace and metric pipelines (in parallel), then the log sink.
-        var telemetry = TelemetrySetup.ShutdownFlushTimeout + TelemetrySetup.LogFlushTimeout;
-        (HostShutdown.Timeout + telemetry).ShouldBeLessThan(StopGracePeriod);
+        (IngestionWorker.FlushDeadline + StreamCloses).ShouldBeLessThan(HostShutdown.Timeout);
     }
 
-    [Fact]
-    public void NormalStop_FitsDockersDefaultTimeout_EvenWithTheCollectorDown()
+    [Theory]
+    [InlineData(ComposeFile.Local)]
+    [InlineData(ComposeFile.Production)]
+    public void WorstCaseStop_FitsTheApisStopGracePeriod(string file)
     {
-        // A normal stop of the hosted services takes about 2 s (measured); telemetry then waits at most this long.
-        var telemetry = TelemetrySetup.ShutdownFlushTimeout + TelemetrySetup.LogFlushTimeout;
-        (TimeSpan.FromSeconds(2) + telemetry).ShouldBeLessThan(TimeSpan.FromSeconds(10));
+        var grace = ComposeFile.Load(file).StopGracePeriod("api");
+        grace.ShouldNotBeNull($"{file}: the api has no stop_grace_period (Compose then kills it after 1 s)");
+
+        // The hosted services, then the trace and metric pipelines (in parallel), then the log sink.
+        var stop = HostShutdown.Timeout + TelemetrySetup.ShutdownFlushTimeout + TelemetrySetup.LogFlushTimeout;
+        stop.ShouldBeLessThan(grace.Value);
     }
 }

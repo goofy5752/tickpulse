@@ -3,8 +3,10 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Logging.Testing;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using Npgsql;
 using TickPulse.Application.Abstractions;
 using TickPulse.Application.Ingestion;
@@ -23,7 +25,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
     public async Task AddTickPulseInfrastructure_RegistersPortsAndDataSources()
     {
         var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:TickPulse"] = db.ConnectionString })
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:TickPulse"] = db.RawConnectionString })
             .Build();
         await using var provider = new ServiceCollection()
             .AddLogging()
@@ -58,7 +60,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
     public async Task AddTickPulseIngestion_RegistersWorkerAndSharedState()
     {
         var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:TickPulse"] = db.ConnectionString })
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:TickPulse"] = db.RawConnectionString })
             .Build();
         await using var provider = new ServiceCollection()
             .AddLogging()
@@ -103,7 +105,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:TickPulse"] = db.ConnectionString,
+                ["ConnectionStrings:TickPulse"] = db.RawConnectionString,
                 [key] = value,
             })
             .Build();
@@ -125,7 +127,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:TickPulse"] = db.ConnectionString,
+                ["ConnectionStrings:TickPulse"] = db.RawConnectionString,
                 ["Backfill:Depth"] = value,
             })
             .Build();
@@ -146,7 +148,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
     public async Task AddTickPulseInfrastructure_EveryDataSourceAndTheDbContext_HaveGssEncryptionDisabled(string setting)
     {
         var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:TickPulse"] = db.ConnectionString + setting })
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:TickPulse"] = db.RawConnectionString + setting })
             .Build();
         await using var provider = new ServiceCollection()
             .AddLogging()
@@ -185,7 +187,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
     {
         using var logs = new FakeLoggerProvider();
         var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:TickPulse"] = db.ConnectionString + setting })
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:TickPulse"] = db.RawConnectionString + setting })
             .Build();
         using var provider = new ServiceCollection()
             .AddLogging(b => b.AddProvider(logs))
@@ -209,7 +211,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:TickPulse"] = db.ConnectionString + ";GSS Encryption Mode=Require",
+                ["ConnectionStrings:TickPulse"] = db.RawConnectionString + ";GSS Encryption Mode=Require",
                 [NpgsqlConnectionPolicy.AllowGssEncryptionKey] = "true",
             })
             .Build();
@@ -227,7 +229,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
     [InlineData(";GSS Encryption Mode=Require")]
     public async Task PostgresLeaderLock_HasGssEncryptionDisabled_AndAcquires(string setting)
     {
-        await using var leaderLock = new PostgresLeaderLock(db.ConnectionString + setting);
+        await using var leaderLock = new PostgresLeaderLock(db.RawConnectionString + setting);
 
         GssMode(leaderLock.ConnectionString).ShouldBe(GssEncryptionMode.Disable);
         (await leaderLock.TryAcquireAsync(TestContext.Current.CancellationToken)).ShouldBeTrue();
@@ -237,7 +239,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
     [Fact]
     public async Task PostgresLeaderLock_WithTheOptIn_KeepsAnExplicitGssEncryptionMode()
     {
-        await using var leaderLock = new PostgresLeaderLock(db.ConnectionString + ";GSS Encryption Mode=Require", settings: new NpgsqlPolicySettings(AllowGssEncryption: true));
+        await using var leaderLock = new PostgresLeaderLock(db.RawConnectionString + ";GSS Encryption Mode=Require", settings: new NpgsqlPolicySettings(AllowGssEncryption: true));
 
         GssMode(leaderLock.ConnectionString).ShouldBe(GssEncryptionMode.Require);
     }
@@ -245,7 +247,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
     [Fact]
     public void BuildDataSources_ForceGssEncryptionOff_ForDirectCallersToo()
     {
-        var connectionString = db.ConnectionString + ";GSS Encryption Mode=Require";
+        var connectionString = db.RawConnectionString + ";GSS Encryption Mode=Require";
 
         using var shared = DependencyInjection.BuildDataSource(connectionString, null);
         using var writer = DependencyInjection.BuildTickWriterDataSource(connectionString, null);
@@ -263,7 +265,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:TickPulse"] = db.ConnectionString + setting,
+                ["ConnectionStrings:TickPulse"] = db.RawConnectionString + setting,
                 [NpgsqlConnectionPolicy.MaxPoolSizeKey] = configured,
             })
             .Build();
@@ -282,7 +284,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:TickPulse"] = db.ConnectionString,
+                ["ConnectionStrings:TickPulse"] = db.RawConnectionString,
                 [NpgsqlConnectionPolicy.MaxPoolSizeKey] = "0",
             })
             .Build();
@@ -301,9 +303,10 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
     {
         using var logs = new FakeLoggerProvider();
         using var factory = LoggerFactory.Create(b => b.AddProvider(logs));
-        await using var dataSource = DependencyInjection.BuildDataSource(db.ConnectionString, null);
+        await using var dataSource = DependencyInjection.BuildDataSource(db.RawConnectionString, null);
 
-        var available = await NpgsqlConnectionPolicy.CheckBudgetAsync(dataSource, budget, factory.CreateLogger("test"), TestContext.Current.CancellationToken);
+        var available = await NpgsqlConnectionPolicy.CheckBudgetAsync(
+            dataSource, budget, factory.CreateLogger("test"), TimeProvider.System, TestContext.Current.CancellationToken);
 
         available.ShouldBe(97);
         var warnings = logs.Collector.GetSnapshot().Where(r => r.Level == LogLevel.Warning).ToList();
@@ -314,6 +317,93 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
                 "The API may open 95 database connections, but PostgreSQL allows 97 for ordinary roles and 10 should stay free; "
                 + "lower Database:MaxPoolSize (or Maximum Pool Size) or raise max_connections");
         }
+    }
+
+    [Fact]
+    public async Task CheckBudgetAsync_UnreachableServer_LogsThatItCouldNotRun_AtInformation()
+    {
+        using var logs = new FakeLoggerProvider();
+        using var factory = LoggerFactory.Create(b => b.AddProvider(logs));
+        // Port 1 refuses at once; a non-Npgsql failure (the refused socket) must not escape either.
+        await using var dataSource = DependencyInjection.BuildDataSource("Host=127.0.0.1;Port=1;Username=x;Password=x;Timeout=2", null);
+
+        var available = await NpgsqlConnectionPolicy.CheckBudgetAsync(
+            dataSource, 25, factory.CreateLogger("test"), TimeProvider.System, TestContext.Current.CancellationToken);
+
+        available.ShouldBeNull();
+        var record = logs.Collector.GetSnapshot().Single();
+        record.Level.ShouldBe(LogLevel.Information);
+        record.Message.ShouldStartWith("The connection budget check could not run");
+    }
+
+    [Fact]
+    public async Task CheckBudgetAsync_ServerThatDoesNotAnswer_GivesUpAfterItsTimeout()
+    {
+        using var silent = new SilentTcpServer();
+        using var logs = new FakeLoggerProvider();
+        using var factory = LoggerFactory.Create(b => b.AddProvider(logs));
+        var clock = new FakeTimeProvider();
+        // Npgsql's own timeouts are far away; only the check's deadline (on the fake clock) can end the wait.
+        await using var dataSource = DependencyInjection.BuildDataSource(
+            $"Host=127.0.0.1;Port={silent.Port};Username=x;Password=x;Timeout=20;Command Timeout=20", null);
+
+        var check = NpgsqlConnectionPolicy.CheckBudgetAsync(dataSource, 25, factory.CreateLogger("test"), clock, TestContext.Current.CancellationToken);
+        clock.Advance(NpgsqlConnectionPolicy.BudgetCheckTimeout);
+
+        (await check.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken)).ShouldBeNull();
+        logs.Collector.GetSnapshot().Single().Level.ShouldBe(LogLevel.Information);
+    }
+
+    [Fact]
+    public async Task CheckBudgetAsync_CallersCancellation_Propagates()
+    {
+        using var silent = new SilentTcpServer();
+        await using var dataSource = DependencyInjection.BuildDataSource(
+            $"Host=127.0.0.1;Port={silent.Port};Username=x;Password=x;Timeout=20", null);
+        using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+
+        await Should.ThrowAsync<OperationCanceledException>(() =>
+            NpgsqlConnectionPolicy.CheckBudgetAsync(dataSource, 25, NullLogger.Instance, TimeProvider.System, cancel.Token));
+    }
+
+    [Fact]
+    public async Task TickWriterDataSource_ClampsAMinimumPoolSizeAboveItsMaximum()
+    {
+        await using var writer = DependencyInjection.BuildTickWriterDataSource(db.RawConnectionString + ";Minimum Pool Size=10", null);
+
+        var settings = new NpgsqlConnectionStringBuilder(writer.ConnectionString);
+        settings.MaxPoolSize.ShouldBe(DependencyInjection.TickWriterMaxPoolSize);
+        settings.MinPoolSize.ShouldBe(DependencyInjection.TickWriterMaxPoolSize);
+        await using var command = writer.CreateCommand("SELECT 1");
+        (await command.ExecuteScalarAsync(TestContext.Current.CancellationToken)).ShouldBe(1);
+    }
+
+    [Fact]
+    public void Fixture_HelperConnections_FollowThePolicy_TheRawStringDoesNot()
+    {
+        var applied = new NpgsqlConnectionStringBuilder(db.ConnectionString);
+        applied.GssEncryptionMode.ShouldBe(GssEncryptionMode.Disable);
+        applied.MaxPoolSize.ShouldBe(NpgsqlConnectionPolicy.DefaultMaxPoolSize);
+
+        var raw = new NpgsqlConnectionStringBuilder(db.RawConnectionString);
+        raw.Keys.Cast<string>().ShouldNotContain("GSS Encryption Mode");
+        raw.Keys.Cast<string>().ShouldNotContain("Maximum Pool Size");
+    }
+
+    [Fact]
+    public async Task Startup_WithMigrationsOff_StillChecksTheConnectionBudget()
+    {
+        using var logs = new FakeLoggerProvider();
+        await using var api = new ApiFactory(db)
+            .WithSetting("ConnectionStrings:TickPulse", db.RawConnectionString)
+            .WithSetting("Database:RunMigrationsOnStartup", "false")
+            .WithSetting(NpgsqlConnectionPolicy.MaxPoolSizeKey, "95")
+            .WithLogging(logs);
+        await api.InitializeAsync();
+        using var client = api.CreateClient();
+
+        logs.Collector.GetSnapshot().ShouldContain(r =>
+            r.Level == LogLevel.Warning && r.Message.StartsWith("The API may open 100 database connections", StringComparison.Ordinal));
     }
 
     [Fact]

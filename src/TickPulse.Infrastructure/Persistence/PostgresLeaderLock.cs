@@ -58,7 +58,7 @@ public sealed partial class PostgresLeaderLock : ILeaderLock
     /// <summary>The effective settings of the lock's connection.</summary>
     internal string ConnectionString => _connectionString;
 
-    /// <summary>Whether the lock is held:it was acquired and its connection has not broken or been closed since.</summary>
+    /// <summary>Whether the lock is held: it was acquired and its connection has not broken or been closed since.</summary>
     /// <remarks>A silently dead connection is only discovered by the next <see cref="CheckAsync"/>.</remarks>
     public bool IsHeld => Volatile.Read(ref _connection) is { FullState: ConnectionState.Open };
 

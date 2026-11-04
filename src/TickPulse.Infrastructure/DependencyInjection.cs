@@ -199,6 +199,8 @@ public static class DependencyInjection
         NpgsqlConnectionPolicy.Apply(builder.ConnectionStringBuilder, settings ?? NpgsqlPolicySettings.Default);
         builder.ConnectionStringBuilder.NoResetOnClose = true;
         builder.ConnectionStringBuilder.MaxPoolSize = TickWriterMaxPoolSize;
+        // A Minimum Pool Size meant for the shared pool would exceed the writer's maximum, and Npgsql would refuse it.
+        builder.ConnectionStringBuilder.MinPoolSize = Math.Min(builder.ConnectionStringBuilder.MinPoolSize, TickWriterMaxPoolSize);
         if (loggerFactory is not null)
         {
             builder.UseLoggerFactory(loggerFactory);

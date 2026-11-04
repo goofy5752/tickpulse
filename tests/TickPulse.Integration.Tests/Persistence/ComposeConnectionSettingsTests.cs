@@ -1,26 +1,30 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using Npgsql;
 using TickPulse.Infrastructure;
 using TickPulse.Infrastructure.Persistence;
+using TickPulse.Integration.Tests.Fixtures;
 
 namespace TickPulse.Integration.Tests.Persistence;
 
 /// <summary>
-/// The compose files and the code agree on the connection budget: both stacks run a pool of the default size, the API's
-/// connections fit the production database's tuned <c>max_connections</c> with headroom, and both give the API (and
-/// the database) a stop grace period, without which Compose kills a container one second after SIGTERM.
+/// The compose files (parsed as YAML) and the code agree on the connection budget: both stacks run a pool of the
+/// default size, the API's connections fit the production database's tuned <c>max_connections</c> with headroom, and
+/// the api and the database get a stop grace period, without which Compose kills a container one second after SIGTERM.
 /// </summary>
 public sealed partial class ComposeConnectionSettingsTests
 {
-    private static readonly string Root = FindRoot();
+    private const int SuperuserReserved = 3; // PostgreSQL's default superuser_reserved_connections
+
+    public static TheoryData<string> Files => [ComposeFile.Local, ComposeFile.Production];
 
     [Theory]
-    [InlineData("docker-compose.yml")]
-    [InlineData("deploy/docker-compose.prod.yml")]
+    [MemberData(nameof(Files))]
     public void ApiConnectionString_SetsTheDefaultPoolSize(string file)
     {
-        var connectionString = ApiConnectionString(file);
+        var connectionString = ComposeFile.Load(file).Environment("api", "ConnectionStrings__TickPulse");
 
+        connectionString.ShouldNotBeNull($"{file}: api has no ConnectionStrings__TickPulse");
         // Compose placeholders (${VAR:-x}, ${VAR:?msg}) are not part of the pool setting.
         new NpgsqlConnectionStringBuilder(Placeholder().Replace(connectionString, "x")).MaxPoolSize
             .ShouldBe(NpgsqlConnectionPolicy.DefaultMaxPoolSize);
@@ -30,63 +34,42 @@ public sealed partial class ComposeConnectionSettingsTests
     public void ConnectionBudget_FitsTheProductionDatabase()
     {
         var maxConnections = int.Parse(
-            TsTuneMaxConns().Match(Read("deploy/docker-compose.prod.yml")).Groups[1].Value,
-            System.Globalization.CultureInfo.InvariantCulture);
-        const int superuserReserved = 3; // PostgreSQL's default superuser_reserved_connections
+            ComposeFile.Load(ComposeFile.Production).Environment("db", "TS_TUNE_MAX_CONNS")!,
+            CultureInfo.InvariantCulture);
 
         var budget = NpgsqlConnectionPolicy.ConnectionBudget(NpgsqlConnectionPolicy.DefaultMaxPoolSize, DependencyInjection.TickWriterMaxPoolSize);
 
-        budget.ShouldBeLessThanOrEqualTo(maxConnections - superuserReserved - NpgsqlConnectionPolicy.ConnectionHeadroom);
+        budget.ShouldBeLessThanOrEqualTo(maxConnections - SuperuserReserved - NpgsqlConnectionPolicy.ConnectionHeadroom);
     }
 
     [Theory]
-    [InlineData("docker-compose.yml", "api")]
-    [InlineData("docker-compose.yml", "db")]
-    [InlineData("deploy/docker-compose.prod.yml", "api")]
-    [InlineData("deploy/docker-compose.prod.yml", "db")]
+    [InlineData(ComposeFile.Local, "api")]
+    [InlineData(ComposeFile.Local, "db")]
+    [InlineData(ComposeFile.Production, "api")]
+    [InlineData(ComposeFile.Production, "db")]
     public void Service_HasAStopGracePeriodOf30Seconds(string file, string service)
     {
-        ServiceBlock(file, service).ShouldContain("stop_grace_period: 30s");
+        ComposeFile.Load(file).StopGracePeriod(service).ShouldBe(TimeSpan.FromSeconds(30));
     }
 
-    private static string ApiConnectionString(string file)
+    [Theory]
+    [InlineData("30s", 30_000)]
+    [InlineData("1m30s", 90_000)]
+    [InlineData("500ms", 500)]
+    [InlineData("1h", 3_600_000)]
+    public void ParseDuration_ReadsComposeDurations(string value, int milliseconds)
     {
-        var match = ConnectionStringLine().Match(ServiceBlock(file, "api"));
-        match.Success.ShouldBeTrue($"{file}: api has no ConnectionStrings__TickPulse");
-        return match.Groups[1].Value;
+        ComposeFile.ParseDuration(value).ShouldBe(TimeSpan.FromMilliseconds(milliseconds));
     }
 
-    // The lines from "  <service>:" to the next key at the same or a lower indentation.
-    private static string ServiceBlock(string file, string service)
+    [Theory]
+    [InlineData("30")]
+    [InlineData("30 s")]
+    [InlineData("soon")]
+    public void ParseDuration_RejectsOtherText(string value)
     {
-        var lines = Read(file).Split('\n');
-        var start = Array.FindIndex(lines, l => l.TrimEnd() == $"  {service}:");
-        start.ShouldBeGreaterThanOrEqualTo(0, $"{file}: no service {service}");
-        var end = Array.FindIndex(lines, start + 1, l =>
-            l.TrimEnd().Length > 0 && !l.TrimStart().StartsWith('#') && l.Length - l.TrimStart().Length <= 2);
-        return string.Join('\n', lines[start..(end < 0 ? lines.Length : end)]);
+        Should.Throw<FormatException>(() => ComposeFile.ParseDuration(value));
     }
-
-    private static string Read(string file) => File.ReadAllText(Path.Combine(Root, file));
-
-    private static string FindRoot()
-    {
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-        {
-            if (File.Exists(Path.Combine(dir.FullName, "TickPulse.slnx")))
-            {
-                return dir.FullName;
-            }
-        }
-
-        throw new InvalidOperationException("TickPulse.slnx not found above the test output directory.");
-    }
-
-    [GeneratedRegex("""ConnectionStrings__TickPulse:\s*"([^"]+)"\s*$""", RegexOptions.Multiline)]
-    private static partial Regex ConnectionStringLine();
-
-    [GeneratedRegex("""TS_TUNE_MAX_CONNS:\s*"(\d+)"\s*$""", RegexOptions.Multiline)]
-    private static partial Regex TsTuneMaxConns();
 
     [GeneratedRegex(@"\$\{[^}]*\}")]
     private static partial Regex Placeholder();

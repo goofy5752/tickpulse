@@ -28,7 +28,7 @@ public sealed class GssEncryptionStartupTests(TimescaleFixture db)
         await using var api = new ApiFactory(db)
             .WithWorkers()
             .WithSystemClock()
-            .WithSetting("ConnectionStrings:TickPulse", $"{db.ConnectionString};GSS Encryption Mode={mode}");
+            .WithSetting("ConnectionStrings:TickPulse", $"{db.RawConnectionString};GSS Encryption Mode={mode}");
         await api.InitializeAsync();
         using var client = api.CreateClient();
         var state = api.Services.GetRequiredService<IngestionState>();
