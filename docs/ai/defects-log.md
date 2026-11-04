@@ -850,10 +850,10 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
 
 **The host's own real-IP setting would have denied every visitor** · First server setup · Critical · PR #30
 
-- **Symptom:** found before the first deploy, while checking the shared host. Every visitor reaching TickPulse
+- **Symptom:** found before the first deploy, while checking the host's nginx configuration. Every visitor reaching TickPulse
   through Cloudflare would have got 403.
 - **Root cause:** the host's `nginx.conf` trusts Cloudflare's ranges at the http level (`set_real_ip_from` with
-  `real_ip_header CF-Connecting-IP`) for its other sites. The realip module then replaces `$remote_addr` with the
+  `real_ip_header CF-Connecting-IP`). The realip module then replaces `$remote_addr` with the
   visitor's address before the access phase, so the Cloudflare-only allow list would have seen visitors, not
   Cloudflare, and denied them all.
 - **Fix:** `cloudflare-allow.conf`, included in both 443 servers, sets `set_real_ip_from 127.0.0.1/32`. A
@@ -872,6 +872,6 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
   its default, and `sites-enabled/` loads alphabetically. The link `grafana.tickpulse.dev` sorted before the
   host's default site, so this vhost took over unknown names and socket-wide TLS settings.
 - **Fix:** both links start with `tickpulse` (`tickpulse.dev`, `tickpulse-grafana.dev`), and the runbook checks
-  an unknown name before and after the reload. Every other site answered with the same status throughout.
+  an unknown name before and after the reload.
 - **Check:** `curl -sk --resolve nope.example:443:127.0.0.1 https://nope.example/` reaches the host default site
   again.
