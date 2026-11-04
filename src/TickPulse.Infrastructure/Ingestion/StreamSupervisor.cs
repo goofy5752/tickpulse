@@ -22,11 +22,12 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// <para><b>Gap-fill.</b> A connection that ends unexpectedly opens a gap for every known symbol
 /// (<see cref="GapFillWatermarks"/>), and so does the start of a session for every symbol with stored trades (the
 /// worker seeds the watermarks from the database). Each symbol is gap-filled on the next connection as soon as its
-/// SUBSCRIBE is acknowledged there, which may be a later reconcile pass than the first one, and the gap closes only
-/// when the fill completed on a connection that is still up (a fill bounded by a connection that broke meanwhile
-/// leaves it open for the next one). A gap that is still open on the live connection (a fill stopped at the page cap
-/// or was given up, the writer dropped a batch) is filled again on every reconcile pass, one run per symbol at a time,
-/// until it closes, so it never waits for the next connection.</para>
+/// SUBSCRIBE is acknowledged there, which may be a later reconcile pass than the first one. A fill bounded by a
+/// connection that broke meanwhile cannot close the gap for good: that connection's end reopens it. A gap that is
+/// still open on the live connection (a fill stopped at the page cap or failed, the writer dropped a batch) is filled
+/// again on every reconcile pass, one run per symbol at a time, until it closes, so it never waits for the next
+/// connection. Every pass also checks the live connection's streams against the watermarks: one that started above
+/// the last accounted id (its predecessor stalled before the rotation replaced it) opens a gap for the ids between.</para>
 /// <para><b>Lead-in.</b> A symbol that starts streaming in this session (first subscription, an added or reactivated
 /// symbol) with no watermark at all is filled from the start of the minute its SUBSCRIBE was acknowledged in, up to its
 /// first streamed trade. Without it that minute's candle would only hold the trades after the subscription, and the
@@ -164,7 +165,7 @@ internal sealed partial class StreamSupervisor(
 
         // The pumps are done. Keep the open links' last ids, and since this session ends with the stream still
         // running on the exchange, open a gap for the next session to fill.
-        watermarks.Merge(OpenLinks().SelectMany(l => l.LastIds), gap: true);
+        watermarks.Merge(OpenLinks().SelectMany(l => l.Spans), gap: true);
     }
 
     /// <summary>Closes the connections that are still open.</summary>
@@ -256,6 +257,7 @@ internal sealed partial class StreamSupervisor(
             {
                 var outcome = await reconciler.ReconcileAsync(current, ct).ConfigureAwait(false);
                 Forget(current, outcome.Unsubscribed);
+                watermarks.Verify(current.Spans);
                 RearmOpenGaps(current);
                 StartGapFills(current, pendingOnly: true, ct);
                 nextReconcile = NextReconcile(outcome);
@@ -286,9 +288,8 @@ internal sealed partial class StreamSupervisor(
         {
             LogRotationFailed(missing);
 
-            // Its last ids must not move any gap-fill start: if the old connection broke before this one subscribed,
-            // that would skip the trades between the old one's last and this one's first. They were delivered and
-            // stored all the same, so retiring records them as stored above (a later seed must not jump past a gap
+            // The old connection stays the one followed, and its end decides about gaps. This one's trades were
+            // delivered and stored all the same, so retiring records them (a later seed must not jump past a gap
             // below them).
             Retire(next, LinkEnd.Discarded);
             return null;
@@ -513,41 +514,27 @@ internal sealed partial class StreamSupervisor(
 
             var result = await gapFiller.FillAsync(symbolId, symbol, lastId, Boundary, output, ct).ConfigureAwait(false);
 
-            // A fill bounded by a connection that broke meanwhile has not reached the stream that carries on:
-            // the trades after that connection's last id are missing too, so the gap stays open.
-            if (result.Complete && !link.EndedBroken)
+            // If this link broke meanwhile, the fill stopped at a stream that no longer carries on; its retirement
+            // reopens the gap (and the version changed), so closing here is harmless.
+            if (result.Complete)
             {
-                watermarks.Filled(symbol, version);
-                return true;
+                watermarks.Filled(symbol, version, result.LastEmittedId);
             }
-
-            if (result.LastEmittedId is { } recovered)
+            else if (result.LastEmittedId is { } recovered)
             {
                 watermarks.Advance(symbol, recovered, version);
             }
 
-            GiveUp(link, symbol);
             return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            GiveUp(link, symbol);
             return false; // the session is ending; the gap stays open
         }
         catch (Exception ex)
         {
-            GiveUp(link, symbol);
             LogGapFillFailed(ex, symbol);
-            return true;
-        }
-    }
-
-    // The gap stays open; if this link streamed the symbol past it, those trades are stored above the gap.
-    private void GiveUp(StreamLink link, string symbol)
-    {
-        if (link.LastId(symbol) is { } streamed)
-        {
-            watermarks.NoteStored([new(symbol, streamed)]);
+            return true; // the gap stays open
         }
     }
 
@@ -594,7 +581,6 @@ internal sealed partial class StreamSupervisor(
 
     private void Retire(StreamLink link, LinkEnd end)
     {
-        link.MarkEnded(end); // before the dispose ends its connection
         var retire = RetireAsync(link, end);
         lock (_gate)
         {
@@ -610,15 +596,15 @@ internal sealed partial class StreamSupervisor(
         await link.DisposeAsync().ConfigureAwait(false);
         Observe(link);
 
-        // The pump drains what the socket had buffered, then ends.
+        // The pump drains what the socket had buffered, then ends, so the spans are final.
         await link.Pump.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         if (end == LinkEnd.Discarded)
         {
-            watermarks.NoteStored(link.LastIds);
+            watermarks.NoteStored(link.Spans);
         }
         else
         {
-            watermarks.Merge(link.LastIds, gap: end == LinkEnd.Broken);
+            watermarks.Merge(link.Spans, gap: end == LinkEnd.Broken);
         }
         lock (_gate)
         {
@@ -682,12 +668,15 @@ internal sealed partial class StreamSupervisor(
 /// <summary>How a connection's life ended, which decides what its last trade ids mean for gap-fill.</summary>
 internal enum LinkEnd
 {
-    /// <summary>It broke (or the session ended with it): its last ids are merged and every symbol has an open gap.</summary>
+    /// <summary>It broke (or the session ended with it): its spans are merged and every symbol has an open gap.</summary>
     Broken,
 
-    /// <summary>A rotation replaced it after the new connection was subscribed: its last ids are merged, no gap.</summary>
+    /// <summary>
+    /// A rotation replaced it after the new connection was subscribed: its spans are merged, and a gap opens only where
+    /// the new connection's stream turns out to start above them.
+    /// </summary>
     Replaced,
 
-    /// <summary>A rotation gave it up before it took over: its last ids are ignored.</summary>
+    /// <summary>A rotation gave it up before it took over: its spans are recorded as stored, and move no gap-fill start.</summary>
     Discarded,
 }

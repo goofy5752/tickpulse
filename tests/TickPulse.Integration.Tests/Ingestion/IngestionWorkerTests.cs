@@ -733,6 +733,50 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rotation_OverAStalledConnection_FillsTheTradesItMissed()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var t0 = Now.AddMinutes(-5);
+        await ExecuteSqlAsync(db, "UPDATE symbols SET is_active = false WHERE name <> 'BTCUSDT'");
+        await using var host = await StartAsync(db, _server, new Dictionary<string, string?>
+        {
+            ["Ingestion:RotationInterval"] = "00:00:02",
+            ["Ingestion:ReconcileInterval"] = "00:00:01",
+        });
+        await _server.WaitUntilAsync(s => s.ActiveConnections == 1 && s.SubscribedStreams.SetEquals([Stream("BTCUSDT")]), WaitTimeout, ct);
+        await WaitForAsync(() => host.State.Status == WsState.Connected, "connected");
+        for (var i = 1; i <= 5; i++)
+        {
+            await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+        }
+
+        await WaitForTradeCountAsync(db, "BTCUSDT", 5);
+
+        // The connection stalls: 6..10 happen on the exchange but never arrive on it. It is still open, so the next
+        // rotation replaces it cleanly (no reconnect), and only the new connection streams 11..15.
+        for (var i = 6; i <= 10; i++)
+        {
+            _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+        }
+
+        var rotations = host.Logs.Count("LogRotated");
+        await WaitForAsync(() => host.Logs.Count("LogRotated") > rotations, "a rotation");
+        await _server.WaitUntilAsync(s => s.ActiveConnections == 1, WaitTimeout, ct); // the old connection is gone
+        for (var i = 11; i <= 15; i++)
+        {
+            await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+        }
+
+        // The new connection's first trade lies above the old one's last + 1: the trades between are fetched.
+        await WaitForTradeCountAsync(db, "BTCUSDT", 15);
+        (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 15).Select(i => (long)i));
+        (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(15);
+        _server.ReceivedRequests.Where(r => r.Contains("&fromId=", StringComparison.Ordinal))
+            .ShouldBe(["/api/v3/aggTrades?symbol=BTCUSDT&fromId=6&limit=1000"]);
+        host.State.LastReconnectUtc.ShouldBeNull();
+    }
+
+    [Fact]
     public async Task Rotation_NewConnectionSubscribeRejected_KeepsTheOldOne()
     {
         await using var host = await StartAsync(db, _server, new Dictionary<string, string?> { ["Ingestion:RotationInterval"] = "00:00:02" });

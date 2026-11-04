@@ -83,16 +83,19 @@ Rules of thumb:
    ~23 h make-before-break, reconnect with jittered exponential backoff (cap 30 s), gap-fill via
    REST `aggTrades?fromId=last+1`. Every leadership session seeds the gap-fill watermarks from
    the DB (max `agg_trade_id` per active symbol, last 24 h) before it subscribes, so the gap
-   after the last stored trade is filled after a restart or handover. The seed raises an older
-   in-memory watermark to the stored id unless that watermark marks a known hole: any open gap
-   with trades stored above it. `GapFillWatermarks` records, per symbol, the highest id any
-   connection delivered (including a discarded rotation link) since the gap last closed; an
-   open gap below that, or one with a known hole (dropped batch, lead-in, fill stopped at the
-   page cap), is never raised: the max may be this process's own stream above it. The max
-   cannot see holes *below* it: one that only a crashed or other process knew about (its
-   dropped batch, its capped fill) is not recovered by the seed. A gap closes only when the
-   fill finished on a connection that is still up; a gap still open on the live connection is
-   filled again on every reconcile pass (one run per symbol at a time). A symbol that starts
+   after the last stored trade is filled after a restart or handover. `GapFillWatermarks` keeps,
+   per symbol, the end of the contiguous prefix of accounted ids (`LastId`) and one rule: it
+   moves up only across ids that were delivered by this process or stored by another instance.
+   A connection's span raises it only when contiguous with it; a span that starts higher (the
+   connection it replaced stalled) opens a gap instead, checked on every reconcile pass for the
+   live connection too. The seed raises an older in-memory watermark to the stored id only when
+   nothing this process delivered lies above it (the highest id any ended connection delivered,
+   including a discarded rotation link, or that a dropped batch or lead-in reported missing);
+   otherwise the max may be this process's own stream above the gap, and the fill walks up from
+   the watermark. The max cannot see holes *below* it: one that only a crashed or other process
+   knew about (its dropped batch, its capped fill) is not recovered by the seed. A gap still
+   open on the live connection is filled again on every reconcile pass (one run per symbol at
+   a time). A symbol that starts
    streaming with no watermark gets a lead-in from the start of its first minute
    (`aggTrades?startTime`), so that candle is not partial; a failed lead-in is retried on the
    next connection.
