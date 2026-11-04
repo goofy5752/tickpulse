@@ -39,7 +39,7 @@ The documentation follows the order a new engineer would take when getting to kn
 - A flashy frontend masking a weak backend.
 - Fabricated or embellished prompts in the prompt log.
 - Silent behaviour beyond the core requirements. Anything extra (e.g. backfill) must be documented and switchable.
-- Touching other tenants' services or configs on the shared VPS.
+- Changing anything on the host outside TickPulse's own directory, compose project and nginx vhosts.
 
 ## 3. Constraints
 
@@ -51,7 +51,7 @@ The documentation follows the order a new engineer would take when getting to kn
 - Initial symbols: BTCUSDT, ADAUSDT, ETHUSDT (seeded by migration).
 - Documentation in the repo: README, `engineering-notes.md`, an AI prompt record, a log of issues, assumptions and defects, and a deployment guide.
 - The prompt record (`docs/ai/prompts.md`) holds faithful English translations of the original prompts, which were written in Bulgarian. They are lightly edited for clarity and never invented. `engineering-notes.md` states this.
-- Hosting: an existing shared DigitalOcean VPS (Frankfurt; 4 vCPU, 7.8 GB RAM with ~3.8 GB free, ~25 GB free disk). Binance REST was verified reachable from it. Because it is shared, TickPulse uses its own directory, compose project and network, with memory limits on every container.
+- Hosting: a single Linux VPS (Ubuntu 22.04 LTS, Docker, host nginx 1.18). Binance REST was verified reachable from it. TickPulse uses its own directory, compose project and network there, with memory limits on every container.
 
 ## 4. Design decisions on open questions (each becomes an ADR in `docs/adr/`)
 
@@ -227,17 +227,17 @@ Binance WS (combined stream, dynamic SUBSCRIBE)
   - Dependabot enabled
 - **CD (push to `main`):**
   1. Build and push `ghcr.io/goofy5752/tickpulse-api:{sha}` and `:latest`.
-  2. SSH to the droplet and run `docker compose pull && up -d` in `/srv/tickpulse`.
+  2. SSH to the VPS and run `docker compose pull && up -d` in `/srv/tickpulse`.
   3. Smoke test: `/health/ready`, `24hAvgPrice` JSON, `Accept: application/xml`.
   4. On failure, automatically roll back to the previous sha.
-- **Droplet layout:**
+- **Server layout:**
   - `/srv/tickpulse` with its own compose project: `api` (serves the dashboard) + `timescaledb`, with memory limits (≈512 MB each)
   - the API is published on loopback only
   - host nginx vhosts for `tickpulse.dev` and `grafana.tickpulse.dev`, Cloudflare proxied with an Origin cert
   - secrets in `/srv/tickpulse/.env` (chmod 600) and GitHub Environment secrets
   - containers are run by an unprivileged `deploy` user (docker group, no sudo)
 - **Storage estimate:** < 2 GB for raw ticks (14-day retention, compressed) plus candles.
-- **Shared-host hygiene:** a new `server_name`-scoped vhost file, then `nginx -t`, then a graceful `reload`, so other tenants see no disruption and their configs are never edited.
+- **Host hygiene:** a new `server_name`-scoped vhost file, then `nginx -t`, then a graceful `reload`, so nothing else on the host is edited or disrupted.
   - Until DNS is live, deploy and smoke-test over an SSH tunnel to loopback.
   - The CLI default URL stays `https://tickpulse.dev`.
 - **Lifetime:** the site is meant to stay up long-term.
@@ -261,7 +261,7 @@ Binance WS (combined stream, dynamic SUBSCRIBE)
     - gap-fill trades recovered
     - API requests by route, status and **negotiated content type** (JSON vs XML)
   - Traces: incoming HTTP, Npgsql, outgoing Binance REST, and custom spans for batch flushes and backfill pages.
-- **Stack** (its own compose project, sharing nothing with other tenants on the host): a collector (Grafana Alloy or the OTel Collector; builder's choice) → **Loki** (logs), **Tempo** (traces) and **Prometheus** (metrics) → **Grafana**. Logs ↔ traces are linked by trace_id (derived fields / Tempo data links). Memory-limited containers, with retention of 14 days for logs and traces and 30 days for metrics.
+- **Stack** (its own compose project, sharing nothing with anything else on the host): a collector (Grafana Alloy or the OTel Collector; builder's choice) → **Loki** (logs), **Tempo** (traces) and **Prometheus** (metrics) → **Grafana**. Logs ↔ traces are linked by trace_id (derived fields / Tempo data links). Memory-limited containers, with retention of 14 days for logs and traces and 30 days for metrics.
 - **Everything provisioned as code** (`deploy/observability/`): datasources, plus dashboards as JSON:
   1. **TickPulse — Ingestion**: ticks/sec per symbol, ingest lag p50/p95, WS state timeline, reconnects/rotations, channel depth, flush duration, DB write rate
   2. **TickPulse — API**: RED per route (rate, errors, p50/p95/p99 latency), status codes, JSON vs XML split, rate-limit rejections

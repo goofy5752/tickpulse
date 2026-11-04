@@ -81,6 +81,8 @@ if the final version differs.
 | [N6](#n6) | Seeded symbols reported `NotRequested` while their backfill was queued | Regression run | Minor | #27 |
 | [N7](#n7) | Tempo was killed 1 s after every `down` | Regression run | Minor | #27 |
 | [N8](#n8) | A tick flashed a lighter band across the price tiles | Owner, local run | Minor | #28 |
+| [N9](#n9) | The host's own real-IP setting would have denied every visitor | First server setup | Critical | #30 |
+| [N10](#n10) | The Grafana vhost became the host's default server for unknown names | First server setup | Important | #30 |
 
 ---
 
@@ -843,3 +845,33 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
   drop the backdrop blur (`glass-still`): on the near-black page it changed nothing visible, and it was what
   re-rendered over each repaint.
 - **Test:** `TickerTiles.test.tsx`, `Tile_Tick_KeepsThePriceElement_AndEasesTheTintBack`.
+
+### N9
+
+**The host's own real-IP setting would have denied every visitor** · First server setup · Critical · PR #30
+
+- **Symptom:** found before the first deploy, while checking the host's nginx configuration. Every visitor reaching TickPulse
+  through Cloudflare would have got 403.
+- **Root cause:** the host's `nginx.conf` trusts Cloudflare's ranges at the http level (`set_real_ip_from` with
+  `real_ip_header CF-Connecting-IP`). The realip module then replaces `$remote_addr` with the
+  visitor's address before the access phase, so the Cloudflare-only allow list would have seen visitors, not
+  Cloudflare, and denied them all.
+- **Fix:** `cloudflare-allow.conf`, included in both 443 servers, sets `set_real_ip_from 127.0.0.1/32`. A
+  server-level list replaces the inherited one, so these vhosts trust no proxy but loopback and `$remote_addr`
+  stays the Cloudflare peer. The visitor's address still reaches the api in `CF-Connecting-IP`.
+- **Check:** through Cloudflare the vhost logged Cloudflare peers and answered (502 before the api started), not
+  403.
+
+### N10
+
+**The Grafana vhost became the host's default server for unknown names** · First server setup · Important · PR #30
+
+- **Symptom:** after the first reload, a request for an unknown name on 443 got TickPulse's 403 instead of the
+  host default site's 200.
+- **Root cause:** the host has no explicit `default_server`, so the first server block nginx loads for a port is
+  its default, and `sites-enabled/` loads alphabetically. The link `grafana.tickpulse.dev` sorted before the
+  host's default site, so this vhost took over unknown names and socket-wide TLS settings.
+- **Fix:** both links start with `tickpulse` (`tickpulse.dev`, `tickpulse-grafana.dev`), and the runbook checks
+  an unknown name before and after the reload.
+- **Check:** `curl -sk --resolve nope.example:443:127.0.0.1 https://nope.example/` reaches the host default site
+  again.
