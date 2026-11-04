@@ -49,6 +49,9 @@ services.AddControllers(o =>
     })
     .AddXmlDataContractSerializerFormatters();
 
+// A 406 is logged once, by the request log; not also as a framework Warning per request.
+services.AddQuietNotAcceptable();
+
 services.AddSingleton<AnalyticsService>();
 services.AddTickPulseAdmin();
 
