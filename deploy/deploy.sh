@@ -45,7 +45,7 @@ readonly PREVIOUS=.previous
 readonly RECREATE_MARKER=.recreate_observability
 readonly API_URL=http://127.0.0.1:8085
 readonly IMAGE=ghcr.io/goofy5752/tickpulse-api
-readonly SCRIPTS=(smoke.sh deploy.sh)
+readonly SCRIPTS=(smoke.sh deploy.sh mask-env.sh)
 readonly OBSERVABILITY_SERVICES=(otel-collector prometheus loki tempo grafana)
 # How long a started tag gets to answer /health/ready. It must exceed the api's migration budget,
 # MigrationRetryOptions.Default.Timeout (120 s, src/TickPulse.Api/Hosting/DatabaseMigrator.cs), plus its startup:
@@ -165,7 +165,8 @@ install_upload() {
     touch "$RECREATE_MARKER"
   fi
   # mv keeps the inode, so this running script is not disturbed by moving it.
-  mv -f "$incoming/$COMPOSE_FILE" "$incoming/smoke.sh" "$incoming/deploy.sh" .
+  mv -f "$incoming/$COMPOSE_FILE" .
+  for f in "${SCRIPTS[@]}"; do mv -f "$incoming/$f" .; done
   chmod 755 "${SCRIPTS[@]}"
   installed=1
   log "installed the uploaded files; the previous ones are in $PREVIOUS/"
@@ -239,8 +240,14 @@ if start "$tag"; then
   exit 0
 fi
 
-log "tag $tag failed; last api log lines:"
-compose logs --no-color --tail 50 api || true
+log "tag $tag failed; last api log lines (.env values masked):"
+# deploy.log ends up in the GitHub Actions log, where nothing masks the .env values (they are not GitHub secrets),
+# so the api log goes through mask-env.sh first. Without the masker, the log is withheld rather than shown.
+if [ -x ./mask-env.sh ]; then
+  compose logs --no-color --tail 50 api 2>&1 | ./mask-env.sh "$ENV_FILE" || true
+else
+  log "mask-env.sh is missing; the api log is not shown (see: docker compose logs api)"
+fi
 
 if [ -z "$previous" ] || [ "$previous" = "$tag" ]; then
   log "no earlier good tag to roll back to"

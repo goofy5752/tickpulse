@@ -30,6 +30,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The scripts deploy.sh runs on the server, and the masker that keeps .env values out of this log.
+      # shellcheck is preinstalled on ubuntu-latest.
+      - name: Deploy scripts
+        run: |
+          shellcheck --version | head -2
+          shellcheck deploy/*.sh deploy/tests/*.sh
+          bash deploy/tests/mask-env.test.sh
+
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           global-json-file: global.json

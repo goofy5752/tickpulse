@@ -107,6 +107,7 @@ to a development default.
 | `deploy/observability/` | `/srv/tickpulse/observability/` | collector, Prometheus, Loki, Tempo and Grafana config |
 | `deploy/deploy.sh` | `/srv/tickpulse/deploy.sh` | pull, start, smoke test, roll back |
 | `deploy/smoke.sh` | `/srv/tickpulse/smoke.sh` | the smoke test |
+| `deploy/mask-env.sh` | `/srv/tickpulse/mask-env.sh` | masks the `.env` values in the api log that `deploy.sh` prints |
 | — | `/srv/tickpulse/.env` | secrets (chmod 600, never in the repository) |
 | — | `/srv/tickpulse/.last_good_tag` | the last tag that passed the smoke test |
 | — | `/srv/tickpulse/.previous/` | the compose file, scripts and `observability/` from before the last install, for its rollback |
@@ -138,7 +139,7 @@ is never cut off halfway; only pull-request runs are superseded.
    - Only one deploy runs at a time.
    - It goes through these steps:
      1. **Upload.** Under the server's deploy lock, it empties `/srv/tickpulse/.incoming/`, then copies
-        `docker-compose.prod.yml`, `smoke.sh`, `deploy.sh` and `observability/` into it.
+        `docker-compose.prod.yml`, `smoke.sh`, `deploy.sh`, `mask-env.sh` and `observability/` into it.
      2. **Start.** It runs `.incoming/deploy.sh --detach --install <sha>`. The script runs on in its own
         session (`nohup setsid`), so a dropped SSH connection cannot stop it halfway. Its output goes to
         `.incoming/deploy.log` and its exit code to `.incoming/deploy.exit`.
@@ -174,15 +175,23 @@ On the server, `deploy.sh` works through these steps and stops at the first fail
 
 **Rollback.** If step 5, 6 or 7 fails:
 
-1. The failed files are renamed into `.failed-<time>/`.
-2. The files in `.previous/` are put back: the compose file, the scripts, and `observability/` if it
+1. The last 50 lines of the api log are printed, through `mask-env.sh`.
+2. The failed files are renamed into `.failed-<time>/`.
+3. The files in `.previous/` are put back: the compose file, the scripts, and `observability/` if it
    differs, whose containers are then recreated again.
-3. The tag in `.last_good_tag` is started and smoke-tested again. It starts against the schema the
+4. The tag in `.last_good_tag` is started and smoke-tested again. It starts against the schema the
    failed tag has already migrated, which is safe only because migrations are expand-only (see
    [Migrations and rollback](#migrations-and-rollback)).
 
 The job fails either way, so a rolled-back deploy is never green.
 
+**Secrets in the log.** `deploy.log` is streamed into the GitHub Actions log, and the `.env` values are
+not GitHub secrets, so Actions does not mask them. `deploy.sh` therefore pipes the api log through
+`mask-env.sh .env`, which replaces every `.env` value of 4 or more characters with `***`. The matching is
+literal, so a value may contain any character. If the masker is missing or cannot read `.env`, the api
+log is left out of `deploy.log` instead of being printed unmasked. `deploy/tests/mask-env.test.sh` runs in
+the `backend` job, next to `shellcheck` of the deploy scripts. Read the unmasked log on the server with
+`dc logs api`.
 
 | Exit code | Meaning |
 |---|---|
