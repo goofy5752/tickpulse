@@ -83,7 +83,7 @@ if the final version differs.
 | [N8](#n8) | A tick flashed a lighter band across the price tiles | Owner, local run | Minor | #28 |
 | [N9](#n9) | The host's own real-IP setting would have denied every visitor | First server setup | Critical | #30 |
 | [N10](#n10) | The Grafana vhost became the host's default server for unknown names | First server setup | Important | #30 |
-| [N11](#n11) | The first deploy was refused: the CD job never uploaded `mask-env.sh` | First deploy | Important | TBD |
+| [N11](#n11) | The first deploy was refused: the CD job never uploaded `mask-env.sh` | First deploy | Important | #32 |
 | [N12](#n12) | Grafana could not load its data source plugins on the live site | Owner, live site | Important | #33 |
 
 ---
@@ -880,7 +880,7 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
 
 ### N11
 
-**The first deploy was refused: the CD job never uploaded `mask-env.sh`** · First deploy · Important · PR TBD
+**The first deploy was refused: the CD job never uploaded `mask-env.sh`** · First deploy · Important · PR #32
 
 - **Symptom:** the first `deploy` job ended with "deploy.sh refused to deploy …":
   `.incoming/mask-env.sh is missing from the upload; nothing was changed`.
