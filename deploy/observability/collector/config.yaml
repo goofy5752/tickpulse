@@ -1,0 +1,87 @@
+# OpenTelemetry Collector: the single OTLP entry point for TickPulse telemetry.
+#
+#   traces  -> Tempo       (OTLP/gRPC)
+#   metrics -> Prometheus  (remote write)
+#   logs    -> Loki        (native OTLP endpoint)
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # First in every pipeline: refuses data before the container hits its 128 MiB limit.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 96
+    spike_limit_mib: 24
+
+  # Keep only the resource attributes that are useful as Prometheus labels. Every resource
+  # attribute becomes a label on every series, so SDK/process attributes would only add noise.
+  transform/metric_resource:
+    error_mode: ignore
+    metric_statements:
+      - context: resource
+        statements:
+          - keep_keys(attributes, ["service.name", "service.namespace", "service.version", "service.instance.id", "deployment.environment", "deployment.environment.name"])
+
+  batch:
+    send_batch_size: 4096
+    send_batch_max_size: 8192
+    timeout: 2s
+
+exporters:
+  otlp_grpc/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  prometheus_remote_write:
+    endpoint: http://prometheus:9090/api/v1/write
+    # Resource attributes become labels, e.g. service.name -> service_name="tickpulse-api".
+    resource_to_telemetry_conversion:
+      enabled: true
+    # Default OTel -> Prometheus naming: counters get _total, units become suffixes (_seconds, _milliseconds, _bytes).
+    add_metric_suffixes: true
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 5m
+
+  otlp_http/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      level: normal
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/metric_resource, batch]
+      exporters: [prometheus_remote_write]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_http/loki]

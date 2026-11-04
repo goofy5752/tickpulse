@@ -1,0 +1,160 @@
+# TickPulse alert rules. Each rule is a Prometheus instant query (A) plus a threshold (C).
+# Grafana expands environment variables in provisioning files, so templates use .Labels/.Values
+# instead of the $labels/$values aliases.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Ingestion
+    folder: TickPulse
+    interval: 20s
+    rules:
+      - uid: tp-ws-disconnected
+        title: WebSocket disconnected
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prom
+            model:
+              refId: A
+              # 1 while some instance is Connected (WsState 2). Missing series (the API is down
+              # or not exporting) count as disconnected.
+              expr: max(tickpulse_ws_state{service_name="tickpulse-api"} == bool 2) or vector(0)
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        for: 1m
+        noDataState: Alerting
+        execErrState: Error
+        labels:
+          severity: critical
+          component: ingestion
+        annotations:
+          summary: The Binance WebSocket has not been connected for more than 60 seconds.
+          description: No TickPulse instance reports a Connected stream, so no trades are being ingested. Check the API logs for connection errors.
+          __dashboardUid__: tp-ingestion
+          __panelId__: "19"
+
+      - uid: tp-ingest-lag-p95
+        title: Ingest lag p95 above 5 s
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prom
+            model:
+              refId: A
+              expr: histogram_quantile(0.95, sum by (le) (rate(tickpulse_ingest_lag_milliseconds_bucket{service_name="tickpulse-api"}[5m])))
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [5000] }
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+          component: ingestion
+        annotations:
+          summary: 'Ingest lag p95 is {{ with .Values.A }}{{ humanize .Value }}{{ end }} ms (threshold 5000 ms).'
+          description: Trades take longer than 5 s from Binance trade time to the database. Look at channel depth and flush duration on the Ingestion dashboard.
+          __dashboardUid__: tp-ingestion
+          __panelId__: "13"
+
+      - uid: tp-zero-ticks
+        title: No ticks for an active symbol
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 1800, to: 0 }
+            datasourceUid: prom
+            model:
+              refId: A
+              # Ticks in the last minute, for symbols that received ticks in the last 30 minutes
+              # (a symbol removed by an admin stops alerting once it has been quiet for 30 minutes).
+              expr: >-
+                sum by (symbol) (increase(tickpulse_ingest_ticks_received_total{service_name="tickpulse-api"}[1m]))
+                and on (symbol)
+                (sum by (symbol) (increase(tickpulse_ingest_ticks_received_total{service_name="tickpulse-api"}[30m])) > 0)
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [0.5] }
+        for: 1m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+          component: ingestion
+        annotations:
+          summary: '{{ .Labels.symbol }} has received no ticks for 2 minutes.'
+          description: The symbol is subscribed but no aggTrade messages arrived. Check the WebSocket state and the symbol's trading status on Binance.
+          __dashboardUid__: tp-ingestion
+          __panelId__: "9"
+
+  - orgId: 1
+    name: API
+    folder: TickPulse
+    interval: 30s
+    rules:
+      - uid: tp-api-5xx-ratio
+        title: API 5xx ratio above 2 %
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prom
+            model:
+              refId: A
+              expr: >-
+                sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api", http_response_status_code=~"5.."}[5m]))
+                / sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api"}[5m]))
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.02] }
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: '{{ with .Values.A }}{{ humanizePercentage .Value }}{{ end }} of API requests fail with 5xx (threshold 2 %).'
+          description: Server errors over the last 5 minutes. The API dashboard shows the affected routes; failed requests link to their traces.
+          __dashboardUid__: tp-api
+          __panelId__: "10"

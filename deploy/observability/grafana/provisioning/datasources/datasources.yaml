@@ -1,0 +1,91 @@
+# Grafana datasources with fixed UIDs (prom, loki, tempo); dashboards and alert rules refer to them.
+# Grafana expands environment variables in provisioning files, so a literal "$" is written as "$$".
+apiVersion: 1
+
+prune: true
+
+datasources:
+  - name: Prometheus
+    uid: prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Metrics are pushed every 15 s; $__rate_interval is derived from this.
+      timeInterval: 15s
+      httpMethod: POST
+      prometheusType: Prometheus
+      prometheusVersion: 3.15.1
+      cacheLevel: Low
+      incrementalQuerying: true
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000
+      timeout: 60
+      derivedFields:
+        # trace_id is OTLP structured metadata on every log record written inside a span.
+        - name: TraceID
+          matcherType: label
+          matcherRegex: trace_id
+          datasourceUid: tempo
+          url: "$${__value.raw}"
+          urlDisplayLabel: Open trace in Tempo
+        # The same trace on the Logs dashboard; this link also works for anonymous viewers.
+        - name: TraceView
+          matcherType: label
+          matcherRegex: trace_id
+          url: "/d/tp-logs/tickpulse-logs?var-trace_id=$${__value.raw}"
+          urlDisplayLabel: Show trace on the Logs dashboard
+
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      streamingEnabled:
+        search: true
+        metrics: true
+      nodeGraph:
+        enabled: true
+      search:
+        hide: false
+      traceQuery:
+        timeShiftEnabled: true
+        spanStartTimeShift: -30m
+        spanEndTimeShift: 30m
+      lokiSearch:
+        datasourceUid: loki
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        filterByTraceID: true
+        filterBySpanID: false
+        customQuery: true
+        tags:
+          - key: service.name
+            value: service_name
+        # trace_id lives in structured metadata (not in the log line), so filter on it as a label.
+        query: '{$${__tags}} | trace_id="$${__trace.traceId}"'
+      tracesToMetrics:
+        datasourceUid: prom
+        spanStartTimeShift: -5m
+        spanEndTimeShift: 5m
+        tags:
+          - key: service.name
+            value: service_name
+        queries:
+          - name: Request rate
+            query: 'sum(rate(http_server_request_duration_seconds_count{$$__tags}[5m]))'
+          - name: Request latency p95
+            query: 'histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{$$__tags}[5m])))'

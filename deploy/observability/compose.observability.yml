@@ -1,0 +1,182 @@
+# TickPulse observability stack: OTel Collector -> Tempo / Prometheus / Loki -> Grafana.
+#
+# Standalone:  docker compose -f deploy/observability/compose.observability.yml --profile observability up -d
+# Included:    the root docker-compose.yml pulls this file in with a top-level `include:`.
+#
+# Only Grafana and the collector's OTLP ports are published, on 127.0.0.1 by default.
+# Every container has a memory limit; see README.md in this folder.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.164.0
+    profiles: [observability]
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    environment:
+      GOMEMLIMIT: 100MiB
+    ports:
+      # OTLP for an API running on the host (dotnet run). Containers use otel-collector:4317.
+      - "${OTEL_COLLECTOR_BIND:-127.0.0.1}:${OTEL_GRPC_PORT:-4317}:4317"
+      - "${OTEL_COLLECTOR_BIND:-127.0.0.1}:${OTEL_HTTP_PORT:-4318}:4318"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    restart: unless-stopped
+    logging: *logging
+    networks: [tickpulse]
+
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    profiles: [observability]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=4GB
+      - --web.enable-remote-write-receiver
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    environment:
+      GOMEMLIMIT: 220MiB
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: unless-stopped
+    logging: *logging
+    networks: [tickpulse]
+
+  loki:
+    image: grafana/loki:3.7.9
+    profiles: [observability]
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    environment:
+      GOMEMLIMIT: 220MiB
+    # The image is distroless (no shell, wget or health flag), so readiness is checked from
+    # Grafana's side; see README.md.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: unless-stopped
+    logging: *logging
+    networks: [tickpulse]
+
+  tempo:
+    image: grafana/tempo:3.1.1
+    profiles: [observability]
+    command: ["-target=all", "-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    environment:
+      GOMEMLIMIT: 220MiB
+    healthcheck:
+      test: ["CMD", "/tempo", "-health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: unless-stopped
+    logging: *logging
+    networks: [tickpulse]
+
+  grafana:
+    image: grafana/grafana:13.3.0
+    profiles: [observability]
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    environment:
+      GOMEMLIMIT: 110MiB
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3000}
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Local development default only; deployments must set GRAFANA_ADMIN_PASSWORD.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-tickpulse-dev}
+      GF_SECURITY_COOKIE_SECURE: ${GRAFANA_COOKIE_SECURE:-false}
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      # Anyone can view the TickPulse dashboards; Explore and editing stay admin-only.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_ANONYMOUS_HIDE_VERSION: "true"
+      GF_USERS_VIEWERS_CAN_EDIT: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/ingestion.json
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 10s
+      # Alert email: SMTP and recipient come from the environment, never from the repository.
+      GF_SMTP_ENABLED: ${GF_SMTP_ENABLED:-false}
+      GF_SMTP_HOST: ${GF_SMTP_HOST:-}
+      GF_SMTP_USER: ${GF_SMTP_USER:-}
+      GF_SMTP_PASSWORD: ${GF_SMTP_PASSWORD:-}
+      GF_SMTP_FROM_ADDRESS: ${GF_SMTP_FROM_ADDRESS:-alerts@tickpulse.dev}
+      GF_SMTP_FROM_NAME: TickPulse alerts
+      GF_SMTP_STARTTLS_POLICY: ${GF_SMTP_STARTTLS_POLICY:-MandatoryStartTLS}
+      ALERT_EMAIL: ${ALERT_EMAIL:-alerts@example.com}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      # Each bundled datasource runs as its own ~15 MiB backend process; only Prometheus, Loki
+      # and Tempo are used, so the rest are disabled to stay well inside the 192 MiB limit.
+      GF_PLUGINS_DISABLE_PLUGINS: cloudwatch,elasticsearch,grafana-postgresql-datasource,grafana-pyroscope-datasource,influxdb,jaeger,mssql,mysql,opentsdb,stackdriver,zipkin
+      GF_LOG_LEVEL: warn
+    ports:
+      - "${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+      loki:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+    restart: unless-stopped
+    logging: *logging
+    networks: [tickpulse]
+
+networks:
+  tickpulse: {}
+
+volumes:
+  prometheus-data: {}
+  loki-data: {}
+  tempo-data: {}
+  grafana-data: {}

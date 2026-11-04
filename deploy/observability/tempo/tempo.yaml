@@ -1,0 +1,42 @@
+# Tempo 3: single binary (-target=all), local block storage, OTLP in from the collector.
+# Retention: 14 days (336h) of trace blocks.
+
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+backend_scheduler:
+  provider:
+    compaction:
+      compaction:
+        block_retention: 336h
+
+backend_worker:
+  compaction:
+    block_retention: 336h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+overrides:
+  defaults:
+    compaction:
+      block_retention: 336h
+
+usage_report:
+  reporting_enabled: false
