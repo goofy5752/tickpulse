@@ -67,6 +67,11 @@ With the rest of TickPulse (the root `docker-compose.yml` includes this file):
 docker compose --profile observability up -d
 ```
 
+In production, `deploy/docker-compose.prod.yml` takes these services over with `extends`. There they
+always run (no profile), only Grafana is published (on `127.0.0.1:3005`, for the host nginx), and every
+container gets a read-only root filesystem, `cap_drop: ALL` and 50 MB log files. See
+[`docs/deployment.md`](../../docs/deployment.md).
+
 On its own, from the repository root:
 
 ```bash
@@ -82,8 +87,8 @@ can view everything, and the admin login is `admin` / `${GRAFANA_ADMIN_PASSWORD:
 > wins, and changing the variable does nothing. So:
 >
 > - **Production must set `GRAFANA_ADMIN_PASSWORD` before the very first start.** The production
->   compose override requires it (`${GRAFANA_ADMIN_PASSWORD:?}`), so a deployment without it fails to start
->   instead of silently getting the local default `tickpulse-dev`.
+>   compose file (`deploy/docker-compose.prod.yml`) requires it (`${GRAFANA_ADMIN_PASSWORD:?}`), so a
+>   deployment without it fails to start instead of silently getting the local default `tickpulse-dev`.
 > - To change it later, run
 >   `docker compose exec grafana grafana cli admin reset-admin-password '<new>'`, or recreate the
 >   `grafana-data` volume. Nothing else is stored there; everything else is provisioned.
@@ -150,8 +155,9 @@ following from every span and log record before export:
 The API logs IPs only as `client_ip_hash`.
 
 **Rate limiting.** In production, the host nginx in front of `grafana.tickpulse.dev` rate-limits
-`/api/ds/query` (and the other `/api/` query paths) per client IP. This bounds how fast anyone can
-spend the per-query budgets above.
+`/api/ds/query` and the datasource proxy and resource paths per visitor (`CF-Connecting-IP`): 5 requests
+per second with a burst of 40, then 429 (`deploy/nginx/grafana.tickpulse.conf`). This bounds how fast
+anyone can spend the per-query budgets above.
 
 ## What gets provisioned
 

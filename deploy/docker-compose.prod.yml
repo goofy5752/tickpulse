@@ -1,0 +1,178 @@
+# TickPulse, production stack: db + api + the observability services, as one compose project.
+#
+# Lives in /srv/tickpulse on the server, next to observability/ (deploy/observability in the repository),
+# smoke.sh, deploy.sh and the git-ignored .env (chmod 600). The CD job copies the files and runs deploy.sh;
+# by hand:
+#
+#   export TICKPULSE_TAG=$(cat .last_good_tag)
+#   docker compose -f docker-compose.prod.yml --env-file .env ps
+#
+# Differences from the local docker-compose.yml:
+#   - the api comes from GHCR (ghcr.io/goofy5752/tickpulse-api:${TICKPULSE_TAG}); nothing is built here
+#   - every secret is required (${VAR:?}), so a missing .env entry stops the deploy instead of using a dev default
+#   - the observability services always run (no profile), and only the api and Grafana are published, on loopback
+#     (8085 and 3005), for the host nginx; the collector's OTLP ports are not published at all
+#   - every container has a memory limit, json-file logs of at most 3 x 50 MB, a read-only root filesystem,
+#     no capabilities it does not need, and no-new-privileges
+#
+# Needs Docker Compose 2.24.4 or newer (!reset / !override in the extends overrides).
+name: tickpulse
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
+# Shared by every service. The images run as unprivileged users (db drops to "postgres" itself), and each one
+# writes only to its named volume and a tmpfs.
+x-hardening: &hardening
+  read_only: true
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  restart: unless-stopped
+  logging: *logging
+  networks: [tickpulse]
+
+services:
+  db:
+    <<: *hardening
+    # Same image as docker-compose.yml and the integration tests.
+    image: timescale/timescaledb:2.31.0-pg17
+    # 128 MB of shared buffers inside the 512 MB limit; the rest is left for work_mem, connections and the page cache.
+    command: ["postgres", "-c", "shared_buffers=128MB"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tickpulse}
+      POSTGRES_USER: ${POSTGRES_USER:-tickpulse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      # timescaledb-tune (first init only) sizes the other settings for this limit, not for the whole host, and for
+      # 40 connections: the api uses at most 24 (Maximum Pool Size=20 below, plus 4 for the tick writer).
+      TS_TUNE_MEMORY: 512MB
+      TS_TUNE_MAX_CONNS: "40"
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - tickpulse-db:/var/lib/postgresql/data
+    # The entrypoint starts as root, fixes the ownership of the data and socket directories, then switches to
+    # "postgres"; these are the capabilities that needs.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    shm_size: 128m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    mem_limit: 512m
+
+  api:
+    <<: *hardening
+    image: ghcr.io/goofy5752/tickpulse-api:${TICKPULSE_TAG:?TICKPULSE_TAG must be set (the image tag to run)}
+    depends_on:
+      db:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    environment:
+      # Keep POSTGRES_PASSWORD free of ';' (it ends a connection-string field). The pool stays well inside the
+      # database's max_connections (TS_TUNE_MAX_CONNS above); Npgsql's default of 100 would not.
+      ConnectionStrings__TickPulse: "Host=db;Port=5432;Database=${POSTGRES_DB:-tickpulse};Username=${POSTGRES_USER:-tickpulse};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env};Maximum Pool Size=20"
+      Database__RunMigrationsOnStartup: "true"
+      # Six months of 1-minute candles per symbol, loaded once from Binance REST; afterwards only the gaps.
+      Backfill__Enabled: "true"
+      Admin__ApiKey: ${ADMIN_API_KEY:?ADMIN_API_KEY must be set in .env}
+      # The host nginx reaches the published port through docker-proxy, which connects from this network's
+      # gateway. CF-Connecting-IP is trusted from that one address only (not from the other containers), and it
+      # is the same TICKPULSE_GATEWAY that the tickpulse network below pins.
+      ForwardedHeaders__KnownNetworks: ${TICKPULSE_GATEWAY:-172.30.0.1}/32
+      Otel__Endpoint: http://otel-collector:4317
+      Otel__IpSalt: ${OTEL_IP_SALT:-}
+      # The dashboards expect 15 s metric exports (the SDK default is 60 s).
+      OTEL_METRIC_EXPORT_INTERVAL: "15000"
+    ports:
+      - "127.0.0.1:8085:8080"
+    tmpfs:
+      - /tmp
+    mem_limit: 512m
+
+  # ---------- observability: the services of observability/compose.observability.yml ----------
+  # extends keeps the images, commands, config mounts, healthchecks and GOMEMLIMITs in one place; the overrides
+  # below are what production changes. Relative paths in that file resolve against observability/.
+  #
+  # Each mem_limit below must stay equal to deploy.resources.limits.memory of the same service in
+  # observability/compose.observability.yml: compose refuses to start when the two differ.
+
+  otel-collector:
+    <<: *hardening
+    extends:
+      file: observability/compose.observability.yml
+      service: otel-collector
+    profiles: !reset []
+    # The api reaches it as otel-collector:4317 inside the network; nothing on the host needs OTLP.
+    ports: !reset []
+    mem_limit: 128m
+
+  prometheus:
+    <<: *hardening
+    extends:
+      file: observability/compose.observability.yml
+      service: prometheus
+    profiles: !reset []
+    mem_limit: 256m
+
+  loki:
+    <<: *hardening
+    extends:
+      file: observability/compose.observability.yml
+      service: loki
+    profiles: !reset []
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+
+  tempo:
+    <<: *hardening
+    extends:
+      file: observability/compose.observability.yml
+      service: tempo
+    profiles: !reset []
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+
+  grafana:
+    <<: *hardening
+    extends:
+      file: observability/compose.observability.yml
+      service: grafana
+    profiles: !reset []
+    environment:
+      GF_SERVER_ROOT_URL: https://grafana.tickpulse.dev
+      # Applied on the first start only (empty grafana-data volume); see observability/README.md.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in .env}
+      GF_SECURITY_COOKIE_SECURE: "true"
+      # Console only: the root filesystem is read-only, and json-file already keeps the logs.
+      GF_LOG_MODE: console
+    ports: !override
+      - "127.0.0.1:3005:3000"
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+
+networks:
+  # Its own bridge network. Pick a subnet no other network on the host uses (TICKPULSE_SUBNET in .env), and set
+  # TICKPULSE_GATEWAY to an address inside it; the api trusts CF-Connecting-IP from the gateway only.
+  tickpulse:
+    ipam:
+      config:
+        - subnet: ${TICKPULSE_SUBNET:-172.30.0.0/24}
+          gateway: ${TICKPULSE_GATEWAY:-172.30.0.1}
+
+volumes:
+  tickpulse-db: {}
+  prometheus-data: {}
+  loki-data: {}
+  tempo-data: {}
+  grafana-data: {}
