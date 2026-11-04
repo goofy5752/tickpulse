@@ -463,5 +463,7 @@ docker-compose.yml           local stack
 - [docs/adr/](docs/adr/README.md): the architecture decision records
 - [docs/deployment.md](docs/deployment.md): the single-host deployment, CD and rollback, operations, and the
   scale-out production design
+- [docs/ai/prompts.md](docs/ai/prompts.md): the prompts that built TickPulse, the owner's and the agents', and
+  why each is shaped the way it is
 - [docs/ai/defects-log.md](docs/ai/defects-log.md): the defects caught and what guards against them
 - [deploy/observability/README.md](deploy/observability/README.md): metrics, dashboards and alerts
