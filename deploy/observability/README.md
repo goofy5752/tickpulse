@@ -39,7 +39,10 @@ flowchart LR
 | `grafana` | `grafana/grafana:13.3.0` | 256M | — | `127.0.0.1:3000` |
 
 Every image is pinned to an exact release. Go services also get a `GOMEMLIMIT` below their container
-limit, so the runtime collects garbage before the kernel kills the container.
+limit, so the runtime collects garbage before the kernel kills the container. Every service has a
+`stop_grace_period` of 30 s (production inherits it through `extends`): without one Compose kills a
+container 1 s after SIGTERM, and Tempo, Loki and Prometheus would lose what they buffered or replay their
+WAL after every redeploy.
 
 ### Under load
 
@@ -367,7 +370,8 @@ Conventions the dashboards rely on:
 
 | Source | Series |
 |---|---|
-| ASP.NET Core hosting (`AddAspNetCoreInstrumentation`) | `http_server_request_duration_seconds_bucket` / `_count` (`http_route`, `http_response_status_code`, `http_request_method`), `http_server_active_requests` |
+| ASP.NET Core hosting (`AddAspNetCoreInstrumentation`) | `http_server_request_duration_seconds_bucket` / `_count` (`http_route`, `http_response_status_code`, `http_request_method`), `http_server_active_requests`. Every dashboard file and the dashboard page share `http_route="static"`, so a deploy (new hashed file names) adds no series; a request that matched no endpoint (a 404) has no `http_route` and shows as `(no route)` |
+| SignalR (meter `Microsoft.AspNetCore.Http.Connections`) | `signalr_server_active_connections`: the In-flight stat subtracts it from `http_server_active_requests`, because each open dashboard holds one hub request open |
 | ASP.NET Core rate limiting (optional meter `Microsoft.AspNetCore.RateLimiting`) | `aspnetcore_rate_limiting_requests_total` (`aspnetcore_rate_limiting_result`, `aspnetcore_rate_limiting_policy`) |
 | .NET runtime (`System.Runtime` meter via `AddRuntimeInstrumentation`) | `dotnet_process_cpu_time_seconds_total` (`cpu_mode`), `dotnet_process_cpu_count`, `dotnet_process_memory_working_set_bytes`, `dotnet_gc_collections_total` (`gc_heap_generation`), `dotnet_gc_heap_allocated_bytes_total`, `dotnet_gc_last_collection_heap_size_bytes` (`gc_heap_generation`), `dotnet_gc_last_collection_memory_committed_size_bytes`, `dotnet_gc_pause_time_seconds_total`, `dotnet_thread_pool_thread_count`, `dotnet_thread_pool_queue_length`, `dotnet_thread_pool_work_item_count_total`, `dotnet_monitor_lock_contentions_total`, `dotnet_exceptions_total` (`error_type`) |
 | Npgsql 10 (`Npgsql.OpenTelemetry`) | `db_client_operation_duration_seconds_bucket` / `_count`, `db_client_connection_count` (`db_client_connection_state` = `idle` \| `used`), `db_client_connection_max`, `db_client_connection_pending_requests`, `db_client_connection_npgsql_timeouts_total` |
@@ -384,7 +388,7 @@ names, and the collector panels accept both suffixed and unsuffixed names.
   `ingest.flush` (Error status when the batch was dropped); `tickpulse.symbol`,
   `tickpulse.backfill.start` (ISO-8601 UTC, e.g. `2026-11-01T12:00:00.0000000Z`) and
   `tickpulse.backfill.fetched` / `.inserted` on `backfill.page`; `tickpulse.symbol` and
-  `tickpulse.gapfill.from_id` / `.emitted` / `.complete` on `gapfill.run`. The trace tables search
+  `tickpulse.gapfill.from_id` / `.emitted` / `.complete` on `gapfill.run`, plus `tickpulse.gapfill.until` (ISO-8601 UTC) on the tail-out run that completes a removed symbol's last minute. The trace tables search
   with TraceQL, e.g.
   `{ resource.service.name = "tickpulse-api" && name =~ "ingest.flush|backfill.page|gapfill.run" }`.
 - **Logs** reach Loki through its native OTLP endpoint.
