@@ -20,7 +20,7 @@ public sealed class AdminSymbolResponse
     [DataMember(Name = "createdAt", Order = 3)]
     public DateTime CreatedAt { get; init; }
 
-    /// <summary>When the symbol was last deactivated (UTC), also after a reactivation; <see langword="null"/> if it never was.</summary>
+    /// <summary>When the inactive symbol was deactivated (UTC); <see langword="null"/> while the symbol is active.</summary>
     [DataMember(Name = "deactivatedAt", Order = 4)]
     public DateTime? DeactivatedAt { get; init; }
 

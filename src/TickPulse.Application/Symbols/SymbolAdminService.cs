@@ -30,6 +30,9 @@ public sealed record SymbolAddResult(MonitoredSymbol Symbol, bool Created);
 /// </remarks>
 public sealed class SymbolAdminService
 {
+    /// <summary>The name of the add request's field, and of the parameter its validation problem names.</summary>
+    public const string SymbolParameter = "symbol";
+
     private readonly ISymbolRepository _symbols;
     private readonly IExchangeMetadata _exchange;
     private readonly ISymbolChangeSignal _changes;
@@ -57,13 +60,25 @@ public sealed class SymbolAdminService
     public async Task<AppResult<IReadOnlyList<MonitoredSymbol>>> ListAsync(CancellationToken ct) =>
         AppResult<IReadOnlyList<MonitoredSymbol>>.Ok(await _symbols.ListAsync(ct));
 
+    /// <summary>One symbol, active or not; <see cref="AppError.UnknownSymbol"/> when it is unknown or malformed.</summary>
+    public async Task<AppResult<MonitoredSymbol>> GetAsync(string? raw, CancellationToken ct) =>
+        SymbolName.TryCreate(raw, out var name) && await _symbols.FindAsync(name, ct) is { } found
+            ? AppResult<MonitoredSymbol>.Ok(found)
+            : AppResult<MonitoredSymbol>.Fail(AppError.UnknownSymbol, $"Symbol '{Shown(raw)}' is not monitored.");
+
     /// <summary>
-    /// Activates <paramref name="raw"/>: <see cref="AppError.InvalidSymbol"/> when it is malformed or not trading on the
-    /// exchange, <see cref="AppError.UpstreamUnavailable"/> when the exchange cannot tell, and
-    /// <see cref="AppError.SymbolLimit"/> when the active limit is reached.
+    /// Activates <paramref name="raw"/>: <see cref="AppError.Validation"/> about <c>symbol</c> when it is missing or
+    /// blank, <see cref="AppError.InvalidSymbol"/> when it is malformed or not trading on the exchange,
+    /// <see cref="AppError.UpstreamUnavailable"/> when the exchange cannot tell, and <see cref="AppError.SymbolLimit"/>
+    /// when the active limit is reached.
     /// </summary>
     public async Task<AppResult<SymbolAddResult>> AddAsync(string? raw, CancellationToken ct)
     {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return AppResult<SymbolAddResult>.Invalid(SymbolParameter, "symbol is required.");
+        }
+
         if (!SymbolName.TryCreate(raw, out var name))
         {
             return AppResult<SymbolAddResult>.Fail(
@@ -121,13 +136,14 @@ public sealed class SymbolAdminService
             || await _symbols.FindAsync(name, ct) is not { IsActive: true }
             || !await _symbols.DeactivateAsync(name, ct))
         {
-            var shown = SymbolName.TryCreate(raw, out var normalised) ? normalised.Value : raw?.Trim();
-            return AppResult<string>.Fail(AppError.UnknownSymbol, $"Symbol '{shown}' is not an active symbol.");
+            return AppResult<string>.Fail(AppError.UnknownSymbol, $"Symbol '{Shown(raw)}' is not an active symbol.");
         }
 
         _changes.Notify();
         return AppResult<string>.Ok(name.Value);
     }
+
+    private static string? Shown(string? raw) => SymbolName.TryCreate(raw, out var normalised) ? normalised.Value : raw?.Trim();
 
     // Runs after the add committed, so it ignores the request token: a client that goes away now must not leave an
     // active symbol that is never backfilled. Pending is stored before the worker sees the id, so the list never shows

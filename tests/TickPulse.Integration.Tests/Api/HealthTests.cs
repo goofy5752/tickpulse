@@ -46,21 +46,33 @@ public sealed class HealthTests(ApiFactory api) : IClassFixture<ApiFactory>
         }
     }
 
-    [Fact]
-    public async Task HealthReady_IngestionDisconnected_Returns503()
+    // Connecting and waiting to reconnect are expected, self-healing states: not ready, but Degraded rather than
+    // Unhealthy, so the health check log reports them at Warning instead of Error.
+    [Theory]
+    [InlineData(WsState.Connecting)]
+    [InlineData(WsState.Disconnected)]
+    public async Task HealthReady_IngestionNotStreaming_Returns503Degraded(WsState notStreaming)
     {
         var state = api.Services.GetRequiredService<IngestionState>();
         using var client = api.CreateClient();
-        state.SetDisconnected();
+        if (notStreaming == WsState.Connecting)
+        {
+            state.SetConnecting();
+        }
+        else
+        {
+            state.SetDisconnected();
+        }
+
         try
         {
             using var response = await client.GetAsync(new Uri("/health/ready", UriKind.Relative), Ct);
 
             response.StatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
             using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
-            body.RootElement.GetProperty("status").GetString().ShouldBe("Unhealthy");
+            body.RootElement.GetProperty("status").GetString().ShouldBe("Degraded");
             var ingestion = Check(body, "ingestion");
-            ingestion.GetProperty("status").GetString().ShouldBe("Unhealthy");
+            ingestion.GetProperty("status").GetString().ShouldBe("Degraded");
             ingestion.TryGetProperty("description", out _).ShouldBeFalse();
         }
         finally

@@ -1,10 +1,10 @@
 using System.Globalization;
 using System.Reflection;
+using Microsoft.AspNetCore.Http.Features;
 using Serilog;
 using Serilog.Events;
 using Serilog.Formatting.Compact;
 using Serilog.Sinks.OpenTelemetry;
-using TickPulse.Api.Health;
 using TickPulse.Api.Hosting;
 
 namespace TickPulse.Api.Telemetry;
@@ -45,6 +45,9 @@ internal static class TelemetrySetup
             (services, logger) => ConfigureLogging(logger, services, version, environment),
             preserveStaticLogger: true,
             writeToProviders: true);
+        builder.Services.AddSingleton(sp => new RequestSampleBudget(
+            RequestSampleBudget.PerSecond(sp.GetRequiredService<IConfiguration>()),
+            sp.GetRequiredService<TimeProvider>()));
         builder.Services.AddSingleton<OtlpExport>();
         return builder;
     }
@@ -57,8 +60,8 @@ internal static class TelemetrySetup
     public static WebApplication UseTickPulseTelemetry(this WebApplication app)
     {
         ArgumentNullException.ThrowIfNull(app);
-        _ = app.Services.GetRequiredService<OtlpExport>();
-        app.UseTickPulseRequestLogging();
+        var export = app.Services.GetRequiredService<OtlpExport>();
+        app.UseTickPulseRequestLogging(tracing: export.Tracing is not null);
         app.UseMiddleware<ApiMetricsMiddleware>();
         return app;
     }
@@ -71,21 +74,42 @@ internal static class TelemetrySetup
     }
 
     /// <summary>
-    /// One structured log line per request with <c>client_ip_hash</c> (never the address) and the route template.
-    /// Health probes log at Debug, server errors at Error.
+    /// One structured log line per request with <c>client_ip_hash</c> (never the address) and the route template, at
+    /// the level <see cref="RequestLogPolicy"/> chooses: problems and slow requests always, ordinary requests as far as
+    /// <see cref="RequestSampleBudget"/> allows.
     /// </summary>
-    private static IApplicationBuilder UseTickPulseRequestLogging(this IApplicationBuilder app)
+    /// <param name="app">The application.</param>
+    /// <param name="tracing">
+    /// Whether traces are exported. Then an ordinary request is logged when its trace was sampled, so the logged
+    /// requests and the traced ones are the same; otherwise the request log takes from the budget itself.
+    /// </param>
+    private static IApplicationBuilder UseTickPulseRequestLogging(this IApplicationBuilder app, bool tracing)
     {
         var hasher = app.ApplicationServices.GetRequiredService<ClientIpHasher>();
+        var budget = app.ApplicationServices.GetRequiredService<RequestSampleBudget>();
         return app.UseSerilogRequestLogging(o =>
         {
             // The host's own logger, not the static one: several hosts may share a process (tests).
             o.Logger = app.ApplicationServices.GetRequiredService<Serilog.ILogger>();
             o.MessageTemplate = RequestLogTemplate;
-            o.GetLevel = (context, _, exception) =>
-                exception is not null || context.Response.StatusCode >= StatusCodes.Status500InternalServerError ? LogEventLevel.Error
-                : context.Request.Path.StartsWithSegments(HealthEndpoints.PathPrefix) ? LogEventLevel.Debug
-                : LogEventLevel.Information;
+
+            // Runs once per request, when it completes and before the hosting activity stops.
+            o.GetLevel = (context, elapsedMs, exception) =>
+            {
+                var activity = context.Features.Get<IHttpActivityFeature>()?.Activity;
+                var level = RequestLogPolicy.Level(
+                    context.Request.Path,
+                    context.Response.StatusCode,
+                    elapsedMs,
+                    exception,
+                    tracing ? () => activity?.Recorded == true : budget.TryTake);
+                if (tracing && level >= LogEventLevel.Information)
+                {
+                    RequestLogPolicy.KeepTrace(activity);
+                }
+
+                return level;
+            };
             o.EnrichDiagnosticContext = (diagnostics, context) =>
             {
                 diagnostics.Set("client_ip_hash", hasher.Hash(ClientAddressing.ClientAddress(context)));

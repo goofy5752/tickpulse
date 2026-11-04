@@ -32,6 +32,9 @@ public sealed class ProbeController : ControllerBase
     public const string KnownSymbol = "BTCUSDT";
     public const string SecretMessage = "probe-secret-detail";
 
+    /// <summary>How long <see cref="Slow"/> takes (real time, not the host's fake clock).</summary>
+    public static readonly TimeSpan SlowDelay = TimeSpan.FromMilliseconds(300);
+
     /// <summary>A <see cref="ProbeResponse"/> for <see cref="KnownSymbol"/>, otherwise a 404 <c>unknown-symbol</c> problem.</summary>
     [HttpGet("{symbol}")]
     public IActionResult Get(string symbol) =>
@@ -52,4 +55,12 @@ public sealed class ProbeController : ControllerBase
     [HttpGet("throw")]
     [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "MVC actions are instance methods.")]
     public IActionResult Throw() => throw new InvalidOperationException(SecretMessage);
+
+    /// <summary>Answers 204 after <see cref="SlowDelay"/>, longer than the request log's slow-request bound.</summary>
+    [HttpGet("slow")]
+    public async Task<IActionResult> Slow()
+    {
+        await Task.Delay(SlowDelay, HttpContext.RequestAborted);
+        return NoContent();
+    }
 }

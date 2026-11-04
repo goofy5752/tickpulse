@@ -3,6 +3,13 @@
 #   traces  -> Tempo       (OTLP/gRPC)
 #   metrics -> Prometheus  (remote write)
 #   logs    -> Loki        (native OTLP endpoint)
+#
+# Under overload the collector sheds traces and logs first and keeps metrics, which the alerts depend on:
+#   - traces and logs pass memory_limiter/bulk, which starts refusing at a lower heap size than
+#     memory_limiter/metrics, so metrics still get through while traces and logs are refused;
+#   - the Tempo and Loki exporters have a sending queue bounded by bytes (4 MiB) and a short retry
+#     window, so a slow or rate-limited backend (Loki answering 429) makes the collector drop data
+#     after a few seconds instead of holding it in memory for minutes.
 
 extensions:
   health_check:
@@ -17,11 +24,18 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
-  # First in every pipeline: refuses data before the container hits its 128 MiB limit.
-  memory_limiter:
+  # Container limit 128 MiB, GOMEMLIMIT 100 MiB. Each limiter refuses new data once the Go heap
+  # passes limit_mib - spike_limit_mib (soft limit) and forces a GC at limit_mib (hard limit).
+  # Traces and logs: soft limit 56 MiB.
+  memory_limiter/bulk:
     check_interval: 1s
-    limit_mib: 96
-    spike_limit_mib: 24
+    limit_mib: 72
+    spike_limit_mib: 16
+  # Metrics (a few hundred points every 15 s): soft limit 84 MiB, refused last.
+  memory_limiter/metrics:
+    check_interval: 1s
+    limit_mib: 90
+    spike_limit_mib: 6
 
   # Keep only the resource attributes that are useful as Prometheus labels. Every resource
   # attribute becomes a label on every series, so SDK/process attributes would only add noise.
@@ -55,9 +69,18 @@ processors:
       - pattern: ^http\.response\.header\..+
         action: delete
 
-  batch:
-    send_batch_size: 4096
-    send_batch_max_size: 8192
+  # Batches stay well below the backends' 4 MiB gRPC message limit (a request log record is about 1 KB).
+  batch/traces:
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+    timeout: 2s
+  batch/logs:
+    send_batch_size: 512
+    send_batch_max_size: 1024
+    timeout: 2s
+  batch/metrics:
+    send_batch_size: 2048
+    send_batch_max_size: 4096
     timeout: 2s
 
 exporters:
@@ -65,6 +88,22 @@ exporters:
     endpoint: tempo:4317
     tls:
       insecure: true
+    timeout: 10s
+    # Bounded by size, not by batch count: at most 4 MiB of encoded spans wait here (a few full
+    # batches); beyond that new batches are dropped. Decoded in memory that is a few times larger,
+    # so both bulk queues together stay inside the 28 MiB gap between the bulk limiter (soft 56 MiB)
+    # and the metrics limiter (soft 84 MiB): a full bulk queue cannot push the heap into the range
+    # where metrics are refused.
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      sizer: bytes
+      queue_size: 4194304
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
 
   prometheus_remote_write:
     endpoint: http://prometheus:9090/api/v1/write
@@ -73,6 +112,12 @@ exporters:
       enabled: true
     # Default OTel -> Prometheus naming: counters get _total, units become suffixes (_seconds, _milliseconds, _bytes).
     add_metric_suffixes: true
+    timeout: 10s
+    remote_write_queue:
+      enabled: true
+      queue_size: 2000
+    # Metrics are small and the alerts read them: retry for longer than traces and logs. Prometheus
+    # accepts samples up to 5 minutes out of order (out_of_order_time_window).
     retry_on_failure:
       enabled: true
       max_elapsed_time: 5m
@@ -81,6 +126,20 @@ exporters:
     endpoint: http://loki:3100/otlp
     tls:
       insecure: true
+    timeout: 10s
+    sending_queue:
+      enabled: true
+      num_consumers: 2
+      # At most 4 MiB of encoded log records waiting, see the Tempo exporter.
+      sizer: bytes
+      queue_size: 4194304
+    # Loki answers 429 when its ingestion limit is reached; retrying for minutes would only pile
+    # up memory, so give up after 30 s and drop the batch.
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
 
 service:
   extensions: [health_check]
@@ -98,13 +157,13 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, attributes/scrub, batch]
+      processors: [memory_limiter/bulk, attributes/scrub, batch/traces]
       exporters: [otlp_grpc/tempo]
     metrics:
       receivers: [otlp]
-      processors: [memory_limiter, transform/metric_resource, batch]
+      processors: [memory_limiter/metrics, transform/metric_resource, batch/metrics]
       exporters: [prometheus_remote_write]
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, attributes/scrub, batch]
+      processors: [memory_limiter/bulk, attributes/scrub, batch/logs]
       exporters: [otlp_http/loki]
