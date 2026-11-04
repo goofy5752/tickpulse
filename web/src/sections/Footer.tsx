@@ -1,5 +1,5 @@
 import { PulseMark } from '@/components/PulseMark'
-import { DOCS_PATH, GITHUB_URL, GRAFANA_URL } from '@/lib/links'
+import { DOCS_PATH, GITHUB_URL, GRAFANA_URL, repoUrl } from '@/lib/links'
 
 interface FooterLink {
   label: string
@@ -11,9 +11,10 @@ const groups: readonly { title: string; links: readonly FooterLink[] }[] = [
   {
     title: 'Read',
     links: [
-      { label: 'README', href: `${GITHUB_URL}#readme`, external: true },
-      { label: 'Engineering notes', href: `${GITHUB_URL}/blob/main/engineering-notes.md`, external: true },
-      { label: 'Architecture decisions', href: `${GITHUB_URL}/tree/main/docs/adr`, external: true },
+      { label: 'README', href: repoUrl('README.md'), external: true },
+      { label: 'Engineering notes', href: repoUrl('engineering-notes.md'), external: true },
+      { label: 'Architecture decisions', href: repoUrl('docs/adr/'), external: true },
+      { label: 'Deployment', href: repoUrl('docs/deployment.md'), external: true },
     ],
   },
   {

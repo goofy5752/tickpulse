@@ -131,7 +131,7 @@ Tear the stack down and delete its data with `down -v`.
 |---|---|---|
 | `GRAFANA_ADMIN_PASSWORD` | `tickpulse-dev` | Grafana admin password, applied on first boot only (see above). **Required in production.** |
 | `GRAFANA_ADMIN_USER` | `admin` | Grafana admin user |
-| `GRAFANA_ROOT_URL` | `http://localhost:3000` | `GF_SERVER_ROOT_URL`; `https://grafana.tickpulse.dev` in production |
+| `GRAFANA_ROOT_URL` | `http://localhost:3000` | `GF_SERVER_ROOT_URL`, and the target of the dashboard's Grafana links (baked into the api image at build time); `https://grafana.tickpulse.dev` in production |
 | `GRAFANA_COOKIE_SECURE` | `false` | `true` behind HTTPS |
 | `GRAFANA_BIND`, `GRAFANA_PORT` | `127.0.0.1`, `3000` | Where Grafana is published (the reverse proxy targets it) |
 | `OTEL_COLLECTOR_BIND`, `OTEL_GRPC_PORT`, `OTEL_HTTP_PORT` | `127.0.0.1`, `4317`, `4318` | Host ports of the collector |
