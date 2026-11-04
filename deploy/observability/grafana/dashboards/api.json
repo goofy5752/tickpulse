@@ -2163,7 +2163,18 @@
               "filters": []
             }
           ],
-          "transformations": [],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "nested": true
+                },
+                "indexByName": {},
+                "renameByName": {}
+              }
+            }
+          ],
           "fieldConfig": {
             "defaults": {
               "unit": "short",
@@ -2214,27 +2225,6 @@
                   {
                     "id": "displayName",
                     "value": "Trace ID"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "spanID"
-                },
-                "properties": [
-                  {
-                    "id": "links",
-                    "value": null
-                  },
-                  {
-                    "id": "links",
-                    "value": [
-                      {
-                        "title": "Open trace",
-                        "url": "/d/tp-logs/tickpulse-logs?var-trace_id=${__data.fields.traceIdHidden}&${__url_time_range}"
-                      }
-                    ]
                   }
                 ]
               }
@@ -2283,7 +2273,18 @@
               "filters": []
             }
           ],
-          "transformations": [],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "nested": true
+                },
+                "indexByName": {},
+                "renameByName": {}
+              }
+            }
+          ],
           "fieldConfig": {
             "defaults": {
               "unit": "short",
@@ -2334,27 +2335,6 @@
                   {
                     "id": "displayName",
                     "value": "Trace ID"
-                  }
-                ]
-              },
-              {
-                "matcher": {
-                  "id": "byName",
-                  "options": "spanID"
-                },
-                "properties": [
-                  {
-                    "id": "links",
-                    "value": null
-                  },
-                  {
-                    "id": "links",
-                    "value": [
-                      {
-                        "title": "Open trace",
-                        "url": "/d/tp-logs/tickpulse-logs?var-trace_id=${__data.fields.traceIdHidden}&${__url_time_range}"
-                      }
-                    ]
                   }
                 ]
               }

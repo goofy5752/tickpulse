@@ -142,9 +142,11 @@ Without SMTP, everything still provisions; Grafana only logs a delivery error wh
   - Every trace link in the dashboards therefore points at the **Logs** dashboard's trace view
     (`/d/tp-logs/…?var-trace_id=…`), which works for anonymous visitors.
   - The Tempo trace tables would also offer the datasource's own `Trace: <id>` and `Span: <id>`
-    links, which open Explore. An override on `traceID` and `spanID` first clears the field's links
+    links, which open Explore. The `traceID` override therefore first clears the field's links
     (`"value": null`) and then sets only *Open trace*: Grafana merges a `links` override with the
     datasource's links rather than replacing them, so setting the new link alone would keep both.
+    Field overrides do not reach the expandable span rows, so the tables leave them out (an
+    `organize` transformation excludes the `nested` field); the trace view shows the spans.
   - Admins additionally get the Explore links (Loki derived field → Tempo, Tempo → "Logs for this trace").
 - Provisioned dashboards cannot be saved from the UI (`allowUiUpdates: false`). The JSON in this
   folder is the source of truth.
