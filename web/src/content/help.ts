@@ -72,8 +72,9 @@ export const HELP = {
 
   chartSection: {
     title: 'Price chart',
-    summary: 'Candles for the selected symbol and period, with the SMA line and its calculation window.',
+    summary: 'Candles or a line of closes for the selected symbol and period, with the SMA and its window.',
     details: [
+      'Switch between candles and a line with the icons next to the periods; the line takes the colour of the move across the range shown, and the choice is remembered in this browser.',
       'Pick the symbol with the tiles above and the period with the buttons on the right. Scroll or pinch to zoom, drag to pan; on a phone a vertical swipe still scrolls the page.',
       'Each period opens on a sensible range: 6 h of 1m, 24 h of 5m, 7 days of 30m, a year of 1d and five years of 1w candles, more when the SMA window needs it (up to 1,000 candles), shown as far as history reaches: about six months with backfill.',
     ],
