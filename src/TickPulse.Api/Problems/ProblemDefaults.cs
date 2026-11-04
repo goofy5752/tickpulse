@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.AspNetCore.WebUtilities;
 
 namespace TickPulse.Api.Problems;
@@ -31,8 +32,14 @@ internal static class ProblemDefaults
                 case StatusCodes.Status404NotFound:
                     Set(problem, ProblemSlugs.NotFound, NotFoundDetail, force: false);
                     break;
+                case StatusCodes.Status405MethodNotAllowed:
+                    Set(problem, ProblemSlugs.MethodNotAllowed, MethodNotAllowedDetail(context.HttpContext), force: false);
+                    break;
                 case StatusCodes.Status406NotAcceptable:
                     Set(problem, ProblemSlugs.NotAcceptable, NotAcceptableDetail, force: false);
+                    break;
+                case StatusCodes.Status415UnsupportedMediaType:
+                    Set(problem, ProblemSlugs.UnsupportedMediaType, UnsupportedMediaTypeDetail(context.HttpContext), force: false);
                     break;
                 case StatusCodes.Status429TooManyRequests:
                     Set(problem, ProblemSlugs.RateLimited, detail: null, force: false);
@@ -52,6 +59,21 @@ internal static class ProblemDefaults
         problem.Extensions.TryAdd(ProblemFactory.TraceIdKey, ProblemFactory.TraceId(context.HttpContext));
         options.CustomizeProblemDetails?.Invoke(context);
     }
+
+    // Routing answers 405 itself and sets Allow; the problem only points at it.
+    private static string MethodNotAllowedDetail(HttpContext context) => string.Create(
+        CultureInfo.InvariantCulture,
+        $"The {Truncate(context.Request.Method)} method is not supported by this resource; the Allow header lists the methods that are.");
+
+    private static string UnsupportedMediaTypeDetail(HttpContext context) =>
+        context.Request.ContentType is { Length: > 0 } contentType
+            ? string.Create(
+                CultureInfo.InvariantCulture,
+                $"The request body's media type '{Truncate(contentType)}' is not supported; send application/json or application/xml.")
+            : "The request body has no media type; send application/json or application/xml.";
+
+    // The method and the Content-Type come from the client; a problem never echoes more than a short prefix of them.
+    private static string Truncate(string value) => value.Length <= 100 ? value : value[..100] + "…";
 
     private static void Set(Microsoft.AspNetCore.Mvc.ProblemDetails problem, string slug, string? detail, bool force)
     {

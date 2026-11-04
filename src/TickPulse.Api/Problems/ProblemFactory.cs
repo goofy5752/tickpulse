@@ -32,6 +32,8 @@ public static class ProblemFactory
         [ProblemSlugs.UpstreamUnavailable] = "Upstream unavailable",
         [ProblemSlugs.Internal] = "Internal server error",
         [ProblemSlugs.NotFound] = "Not found",
+        [ProblemSlugs.MethodNotAllowed] = "Method not allowed",
+        [ProblemSlugs.UnsupportedMediaType] = "Unsupported media type",
     }.ToFrozenDictionary(StringComparer.Ordinal);
 
     /// <summary>A problem for a use-case failure.</summary>
@@ -148,4 +150,6 @@ public static class ProblemSlugs
     public const string UpstreamUnavailable = "upstream-unavailable";
     public const string Internal = "internal";
     public const string NotFound = "not-found";
+    public const string MethodNotAllowed = "method-not-allowed";
+    public const string UnsupportedMediaType = "unsupported-media-type";
 }
