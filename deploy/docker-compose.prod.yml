@@ -83,9 +83,10 @@ services:
       # Six months of 1-minute candles per symbol, loaded once from Binance REST; afterwards only the gaps.
       Backfill__Enabled: "true"
       Admin__ApiKey: ${ADMIN_API_KEY:?ADMIN_API_KEY must be set in .env}
-      # The host nginx reaches the published port through this network's gateway, so CF-Connecting-IP is trusted
-      # from inside the subnet only. Keep it equal to the subnet of the tickpulse network below.
-      ForwardedHeaders__KnownNetworks: ${TICKPULSE_SUBNET:-172.30.0.0/24}
+      # The host nginx reaches the published port through docker-proxy, which connects from this network's
+      # gateway. CF-Connecting-IP is trusted from that one address only (not from the other containers), and it
+      # is the same TICKPULSE_GATEWAY that the tickpulse network below pins.
+      ForwardedHeaders__KnownNetworks: ${TICKPULSE_GATEWAY:-172.30.0.1}/32
       Otel__Endpoint: http://otel-collector:4317
       Otel__IpSalt: ${OTEL_IP_SALT:-}
       # The dashboards expect 15 s metric exports (the SDK default is 60 s).
@@ -99,6 +100,9 @@ services:
   # ---------- observability: the services of observability/compose.observability.yml ----------
   # extends keeps the images, commands, config mounts, healthchecks and GOMEMLIMITs in one place; the overrides
   # below are what production changes. Relative paths in that file resolve against observability/.
+  #
+  # Each mem_limit below must stay equal to deploy.resources.limits.memory of the same service in
+  # observability/compose.observability.yml: compose refuses to start when the two differ.
 
   otel-collector:
     <<: *hardening
@@ -158,11 +162,13 @@ services:
     mem_limit: 256m
 
 networks:
-  # Its own bridge network. Pick a subnet no other network on the host uses (TICKPULSE_SUBNET in .env).
+  # Its own bridge network. Pick a subnet no other network on the host uses (TICKPULSE_SUBNET in .env), and set
+  # TICKPULSE_GATEWAY to an address inside it; the api trusts CF-Connecting-IP from the gateway only.
   tickpulse:
     ipam:
       config:
         - subnet: ${TICKPULSE_SUBNET:-172.30.0.0/24}
+          gateway: ${TICKPULSE_GATEWAY:-172.30.0.1}
 
 volumes:
   tickpulse-db: {}

@@ -11,9 +11,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  # A newer push supersedes a PR run, but a run on main is never cancelled halfway through a deploy; the next one
-  # waits for it.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # A newer push supersedes a PR run. Push and manual runs are never cancelled, so a deploy is never cut off
+  # halfway; the next run waits for it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   DOTNET_NOLOGO: true
@@ -28,9 +28,9 @@ jobs:
       DOMAIN_LINE_MIN: 95
       OVERALL_LINE_MIN: 80
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           global-json-file: global.json
 
@@ -104,7 +104,7 @@ jobs:
 
       - name: Upload coverage
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage
           path: coverage/report
@@ -118,9 +118,9 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -141,34 +141,31 @@ jobs:
       - name: Build
         run: npm run build
 
-  # Continuous delivery. On every push to main (and on a manual run) the api image goes to GHCR as :<sha>, and on
-  # main also as :latest. The SSH deploy runs only when the variable DEPLOY_ENABLED is 'true' (on the repository or
-  # the production environment, together with the DEPLOY_* secrets; see docs/deployment.md), so main stays green
-  # before the server is set up. On the server, deploy/deploy.sh pulls, starts, waits for /health/ready, runs
-  # deploy/smoke.sh, and rolls back to the last good tag when anything fails.
-  deploy:
+  # Continuous delivery, in two jobs.
+  #   image   on every push to main (and on a manual run): builds the api image and pushes it to GHCR as :<sha>, and
+  #           on main also as :latest. It holds the only write token (packages: write) and runs the docker actions.
+  #   deploy  only when the repository variable DEPLOY_ENABLED is 'true', so main stays green before the server is
+  #           set up (docs/deployment.md). It reads the production environment's secrets, has read-only
+  #           permissions and uses no third-party action: plain ssh and scp. On the server, deploy/deploy.sh
+  #           validates, pulls, installs, starts, waits for /health/ready, runs deploy/smoke.sh and rolls back to
+  #           the last good tag when anything fails.
+  # Every action is pinned to a full commit sha; Dependabot (github-actions) keeps the pins and comments current.
+  image:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: [backend, web]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    environment:
-      name: production
-      url: https://tickpulse.dev
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
-    # One deploy at a time, across branches too (a manual run from a branch deploys that branch).
-    concurrency:
-      group: deploy-production
-      cancel-in-progress: false
     env:
       IMAGE: ghcr.io/goofy5752/tickpulse-api
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -186,7 +183,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push the api image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: api
@@ -200,8 +197,33 @@ jobs:
           cache-from: type=gha,scope=api
           cache-to: type=gha,scope=api,mode=max
 
+      - name: Summary
+        run: echo "### Image"$'\n'"\`$IMAGE:$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    # A job-level condition cannot see environment variables, so DEPLOY_ENABLED is a repository variable.
+    if: vars.DEPLOY_ENABLED == 'true'
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: https://tickpulse.dev
+    permissions:
+      contents: read
+    # One deploy at a time, across branches too (a manual run from a branch deploys that branch).
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    env:
+      REMOTE_DIR: /srv/tickpulse
+      # How long to wait for deploy.sh on the server: pull, start, ready (90 s) and smoke (120 s), and the same
+      # again for a rollback, fit with room to spare.
+      DEPLOY_WAIT_SECONDS: 1200
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Configure SSH
-        if: vars.DEPLOY_ENABLED == 'true'
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -211,14 +233,15 @@ jobs:
           set -euo pipefail
           for name in DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
             if [ -z "${!name}" ]; then
-              echo "::error::DEPLOY_ENABLED is 'true' but the secret $name is not set."
+              echo "::error::DEPLOY_ENABLED is 'true' but the production secret $name is not set."
               exit 1
             fi
           done
           install -d -m 700 ~/.ssh
           (umask 077 && printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/tickpulse_deploy)
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/tickpulse_known_hosts
-          # Host-key checking stays strict: the server must match DEPLOY_KNOWN_HOSTS.
+          # Host-key checking stays strict: the server must match DEPLOY_KNOWN_HOSTS. One shared connection
+          # (ControlMaster) carries the upload and the polling below.
           cat > ~/.ssh/config <<EOF
           Host tickpulse-prod
             HostName $DEPLOY_HOST
@@ -231,41 +254,78 @@ jobs:
             ConnectTimeout 20
             ServerAliveInterval 15
             ServerAliveCountMax 4
+            ControlMaster auto
+            ControlPath ~/.ssh/tickpulse-%C
+            ControlPersist 5m
           EOF
           chmod 600 ~/.ssh/config
 
-      - name: Copy the deployment files
-        if: vars.DEPLOY_ENABLED == 'true'
+      - name: Upload the deployment files
         run: |
           set -euo pipefail
-          # Into a fresh staging directory; deploy.sh --install moves them into place.
-          ssh tickpulse-prod 'rm -rf /srv/tickpulse/.incoming && mkdir -p /srv/tickpulse/.incoming'
+          # A fresh staging directory, emptied under the deploy lock, so a deploy that is still running on the
+          # server (say, after a timed-out job) is never pulled out from under it.
+          # shellcheck disable=SC2029 # REMOTE_DIR expands here, on purpose
+          if ! ssh tickpulse-prod "cd $REMOTE_DIR && flock -n .deploy.lock sh -c 'rm -rf .incoming && mkdir .incoming'"; then
+            echo "::error::Could not prepare $REMOTE_DIR/.incoming: SSH failed, or another deploy still holds the lock."
+            exit 1
+          fi
           scp -rp deploy/docker-compose.prod.yml deploy/smoke.sh deploy/deploy.sh deploy/observability \
-            tickpulse-prod:/srv/tickpulse/.incoming/
+            "tickpulse-prod:$REMOTE_DIR/.incoming/"
 
-      - name: Deploy, smoke test, roll back on failure
-        if: vars.DEPLOY_ENABLED == 'true'
+      - name: Start the deploy on the server
         run: |
-          # The sha expands here, on the runner, on purpose; deploy.sh accepts only [A-Za-z0-9._-].
+          # deploy.sh runs detached (nohup setsid), so a dropped connection cannot stop it halfway. The sha
+          # expands here, on the runner, on purpose; deploy.sh accepts only [A-Za-z0-9._-].
           # shellcheck disable=SC2029
-          ssh tickpulse-prod "bash /srv/tickpulse/.incoming/deploy.sh --install '$GITHUB_SHA'"
+          ssh tickpulse-prod "bash $REMOTE_DIR/.incoming/deploy.sh --detach --install '$GITHUB_SHA'"
 
-      - name: Remove the SSH key
-        if: always() && vars.DEPLOY_ENABLED == 'true'
-        run: rm -f ~/.ssh/tickpulse_deploy
+      - name: Follow the deploy (smoke test, rollback on failure)
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/deploy.log"
+          chunk="$RUNNER_TEMP/deploy.chunk"
+          : > "$log"
+          deadline=$((SECONDS + DEPLOY_WAIT_SECONDS))
+          while :; do
+            # The exit code first: deploy.exit appears only once deploy.log is complete, so the log fetched
+            # after it is the whole log. A failed poll (network blip) is simply retried.
+            # shellcheck disable=SC2029
+            code="$(ssh tickpulse-prod "cat $REMOTE_DIR/.incoming/deploy.exit 2> /dev/null" 2> /dev/null)" || code=""
+            sent=$(wc -c < "$log")
+            # shellcheck disable=SC2029
+            if ssh tickpulse-prod "tail -c +$((sent + 1)) $REMOTE_DIR/.incoming/deploy.log 2> /dev/null" > "$chunk" 2> /dev/null; then
+              cat "$chunk"
+              cat "$chunk" >> "$log"
+            fi
+            case "$code" in
+              '') ;;
+              0) echo "Deployed $GITHUB_SHA."; exit 0 ;;
+              1) echo "::error::The deploy of $GITHUB_SHA failed; the server rolled back (or had nothing to roll back to)."; exit 1 ;;
+              2) echo "::error::deploy.sh refused to deploy $GITHUB_SHA; nothing on the server was changed."; exit 1 ;;
+              3) echo "::error::The deploy of $GITHUB_SHA failed and so did the rollback; the site may be down."; exit 1 ;;
+              *) echo "::error::Unexpected exit status '$code' from deploy.sh."; exit 1 ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::No result after ${DEPLOY_WAIT_SECONDS} s. deploy.sh may still be running: see $REMOTE_DIR/.incoming/deploy.log on the server."
+              exit 1
+            fi
+            sleep 5
+          done
+
+      - name: Close SSH and remove the key
+        if: always()
+        run: |
+          ssh -O exit tickpulse-prod 2> /dev/null || true
+          rm -f ~/.ssh/tickpulse_deploy
 
       - name: Summary
         if: always()
         env:
-          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED }}
           JOB_STATUS: ${{ job.status }}
         run: |
           {
             echo "### Deploy"
-            echo "- Image: \`$IMAGE:$GITHUB_SHA\`"
-            if [ "$DEPLOY_ENABLED" = true ]; then
-              echo "- SSH deploy: $JOB_STATUS (the step log shows the smoke test and any rollback)"
-            else
-              echo "- SSH deploy: skipped (DEPLOY_ENABLED is not 'true')"
-            fi
+            echo "- \`ghcr.io/goofy5752/tickpulse-api:$GITHUB_SHA\`: $JOB_STATUS"
+            echo "- The *Follow the deploy* step shows the smoke test and any rollback."
           } >> "$GITHUB_STEP_SUMMARY"

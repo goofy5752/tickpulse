@@ -6,7 +6,7 @@ run on a shared VPS behind Cloudflare. The whole deployment is code in this repo
 - the compose project (`deploy/docker-compose.prod.yml`)
 - the host nginx vhosts (`deploy/nginx/`)
 - the deploy and smoke-test scripts (`deploy/deploy.sh`, `deploy/smoke.sh`)
-- the CD job (`deploy` in `.github/workflows/ci.yml`)
+- the CD jobs (`image` and `deploy` in `.github/workflows/ci.yml`)
 
 ## Live topology
 
@@ -14,7 +14,7 @@ run on a shared VPS behind Cloudflare. The whole deployment is code in this repo
 flowchart LR
     visitor(["Browser · CLI · curl"])
     cf["Cloudflare<br/>proxied DNS · TLS · Full (strict)"]
-    gha["GitHub Actions<br/>job deploy"]
+    gha["GitHub Actions<br/>jobs image, deploy"]
     ghcr[("GHCR<br/>tickpulse-api:&lt;sha&gt;, :latest")]
 
     subgraph vps["Shared VPS"]
@@ -53,13 +53,20 @@ flowchart LR
   host. It admits only Cloudflare's published ranges and redirects port 80 to HTTPS. It forwards
   `CF-Connecting-IP` and upgrades WebSockets: SignalR on `/hubs/` and Grafana Live on `/api/live/`. It
   also sets HSTS and rate-limits Grafana's query endpoints.
+  - The vhosts listen with plain `listen 443 ssl`, without `http2`. On nginx 1.18, `http2` is a property
+    of the shared listening socket and would switch HTTP/2 on for every site on 443. Visitors still get
+    HTTP/2 and HTTP/3 from Cloudflare; only the hop from Cloudflare to the origin is HTTP/1.1.
+  - They declare no `default_server`. nginx then treats the first server block it loads for a port as
+    that port's default, which answers unknown names and decides socket-wide TLS settings. The host must
+    therefore keep its own explicit `default_server` on 80 and 443 (setup step 6 checks it).
 - **The compose project `tickpulse`** runs in `/srv/tickpulse`, on its own bridge network:
   - `db` and `api`
   - the five observability services (`deploy/observability/README.md`)
 
-  Only the api (`127.0.0.1:8085`) and Grafana (`127.0.0.1:3005`) are published, both on loopback. The
-  api trusts `CF-Connecting-IP` only from inside the compose network's subnet, which is where the host
-  nginx appears from, through the network gateway.
+  Only the api (`127.0.0.1:8085`) and Grafana (`127.0.0.1:3005`) are published, both on loopback. The host
+  nginx reaches them through docker-proxy, which connects from the network's gateway. The api trusts
+  `CF-Connecting-IP` from that one address only (`ForwardedHeaders__KnownNetworks` is
+  `${TICKPULSE_GATEWAY}/32`), not from the other containers.
 
 | Service | Image | Memory limit | Published |
 |---|---|---|---|
@@ -95,6 +102,10 @@ to a development default.
 | `deploy/smoke.sh` | `/srv/tickpulse/smoke.sh` | the smoke test |
 | — | `/srv/tickpulse/.env` | secrets (chmod 600, never in the repository) |
 | — | `/srv/tickpulse/.last_good_tag` | the last tag that passed the smoke test |
+| — | `/srv/tickpulse/.previous/` | the compose file, scripts and `observability/` from before the last install, for its rollback |
+| — | `/srv/tickpulse/.incoming/` | the CD upload; afterwards it holds `deploy.log` and `deploy.exit` of the last CD deploy |
+| — | `/srv/tickpulse/.deploy.lock` | the `flock` lock that allows one deploy at a time |
+| — | `/srv/tickpulse/.failed-<time>/` | the files of a deploy that was rolled back, deleted after the next successful deploy |
 | `deploy/nginx/tickpulse.conf` | `/etc/nginx/sites-available/tickpulse.dev` | API and dashboard vhost |
 | `deploy/nginx/grafana.tickpulse.conf` | `/etc/nginx/sites-available/grafana.tickpulse.dev` | Grafana vhost |
 | `deploy/nginx/tickpulse-http.conf` | `/etc/nginx/conf.d/tickpulse.conf` | http-level maps and the rate-limit zone |
@@ -103,43 +114,69 @@ to a development default.
 
 ## How a deploy works
 
-The `deploy` job runs on every push to `main` and on a manual run (`workflow_dispatch`), after
-`backend` and `web` pass. It uses the GitHub environment `production`, and only one deploy runs at a
-time.
+CD is two jobs in `.github/workflows/ci.yml`. Both run after `backend` and `web` pass, on every push to
+`main` and on a manual run (`workflow_dispatch`). Every action is pinned to a full commit sha, and
+Dependabot keeps the pins current. Push and manual runs are never cancelled by a newer run, so a deploy
+is never cut off halfway; only pull-request runs are superseded.
 
-1. **Image.** It builds the Dockerfile's `api` target and pushes `ghcr.io/goofy5752/tickpulse-api:<sha>`
-   with the GitHub Actions cache. A push to `main` also gets `:latest`.
-2. **Gate.** The remaining steps run only when the variable `DEPLOY_ENABLED` is `true` (a repository or
-   `production` environment variable). Until the server is set up, `main` builds and publishes images
-   and stays green.
-3. **Copy.** Over SSH, it copies `docker-compose.prod.yml`, `smoke.sh`, `deploy.sh` and `observability/`
-   into a fresh `/srv/tickpulse/.incoming/`. It uses the key and the pinned host key from the
-   environment secrets, with strict host-key checking.
-4. **Deploy.** It runs `.incoming/deploy.sh --install <sha>`, which works through these steps and stops
-   at the first failure:
-   1. moves the files into place. `observability/` is replaced only when its content changed, and then
-      its containers are recreated, because compose cannot see changes inside bind-mounted config
-      files.
-   2. `docker compose -f docker-compose.prod.yml --env-file .env pull`. If the pull fails, the job stops
-      here and the running stack is unchanged.
-   3. `up -d --remove-orphans`.
-   4. waits up to 90 s for `/health/ready` on `127.0.0.1:8085` to return 200.
-   5. runs `./smoke.sh http://127.0.0.1:8085`, retrying for up to 120 s, so a first start on an empty
-      database has time for its first complete 1-minute candle.
+1. **`image`** builds the Dockerfile's `api` target and pushes `ghcr.io/goofy5752/tickpulse-api:<sha>`,
+   using the GitHub Actions cache. A push to `main` also gets `:latest`. This job holds the only write
+   token (`packages: write`), runs the docker actions, and has no environment and no deploy secrets.
+2. **`deploy`** runs only when the **repository** variable `DEPLOY_ENABLED` is `true`. A job-level
+   condition cannot read environment variables, so it has to be a repository variable. Until the server
+   is set up, `main` builds and publishes images and stays green.
+   - It runs in the `production` environment with `contents: read` only, and uses no third-party
+     action: plain `ssh` and `scp`, with the key and the pinned host key from the environment secrets and
+     strict host-key checking.
+   - Only one deploy runs at a time.
+   - It goes through these steps:
+     1. **Upload.** Under the server's deploy lock, it empties `/srv/tickpulse/.incoming/`, then copies
+        `docker-compose.prod.yml`, `smoke.sh`, `deploy.sh` and `observability/` into it.
+     2. **Start.** It runs `.incoming/deploy.sh --detach --install <sha>`. The script runs on in its own
+        session (`nohup setsid`), so a dropped SSH connection cannot stop it halfway. Its output goes to
+        `.incoming/deploy.log` and its exit code to `.incoming/deploy.exit`.
+     3. **Follow.** It polls those two files every 5 s, streams the log into the job log, and fails if
+        there is no result within 20 minutes.
 
-   On success, it writes the sha to `.last_good_tag` and deletes the older local tags of the api image,
-   keeping the new tag and the rollback target.
-5. **Rollback.** If step 3 or a later one fails, `deploy.sh` redeploys the tag in `.last_good_tag` and
-   smoke-tests it again. The job fails either way, so a rolled-back deploy is never green.
-   - A rollback restores the api image, not the copied files: the compose file and `observability/` stay
-     at the new version.
-   - Exit codes:
+On the server, `deploy.sh` works through these steps and stops at the first failure:
 
-     | Code | Meaning |
-     |---|---|
-     | 1 | failed and rolled back, or there was nothing to roll back to |
-     | 2 | bad usage or setup |
-     | 3 | the rollback failed as well |
+1. **Lock.** It takes `.deploy.lock` (`flock`). A second deploy is refused.
+2. **Validate.** It runs `docker compose config` with the *uploaded* compose file and `.env`, and
+   `bash -n` on the uploaded scripts. Nothing has changed yet, so an invalid upload is refused (exit 2)
+   with the running stack and its files untouched.
+3. **Pull.** It pulls every image for `<sha>` with the uploaded compose file. A failed pull also changes
+   nothing (exit 1).
+4. **Install.** The live compose file and scripts move to `.previous/`, and the uploaded ones take their
+   place. For `observability/`:
+   - if it is unchanged, it stays where it is, and `.previous/` gets a copy;
+   - if it changed, the old directory is *renamed* into `.previous/`, never deleted, and the new one
+     takes its place. The running containers keep reading the old files (the same inodes) until step 5
+     recreates them on the new ones.
+
+   Compose cannot see changes inside bind-mounted files, which is why `deploy.sh` does this itself.
+5. **Start.** `up -d --remove-orphans`, and when `observability/` changed,
+   `up -d --no-deps --force-recreate` of its five services.
+6. **Ready.** It waits up to 90 s for `/health/ready` on `127.0.0.1:8085` to return 200.
+7. **Smoke.** It runs `./smoke.sh http://127.0.0.1:8085`, retrying for up to 120 s, so a first start on an
+   empty database has time for its first complete 1-minute candle.
+8. **Done.** On success, it writes the sha to `.last_good_tag`, deletes leftover `.failed-*` directories,
+   and deletes the older local tags of the api image, keeping the new tag and the rollback target.
+
+**Rollback.** If step 5, 6 or 7 fails:
+
+1. The failed files are renamed into `.failed-<time>/`.
+2. The files in `.previous/` are put back: the compose file, the scripts, and `observability/` if it
+   differs, whose containers are then recreated again.
+3. The tag in `.last_good_tag` is started and smoke-tested again.
+
+The job fails either way, so a rolled-back deploy is never green.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | deployed |
+| 1 | failed and rolled back, there was nothing to roll back to, or the pull failed (nothing changed) |
+| 2 | refused: bad usage, invalid upload, missing `.env`, or another deploy running; nothing changed |
+| 3 | failed, and the rollback failed as well |
 
 `smoke.sh <base-url> [wait-seconds]` needs only bash, curl and grep. It works against
 `http://127.0.0.1:8085` on the server and against `https://tickpulse.dev` from anywhere. It checks:
@@ -165,7 +202,7 @@ own files, and nginx is only ever reloaded gracefully after `nginx -t` passes.
 - Docker Engine with Docker Compose **2.24.4 or newer** (the prod compose uses `!reset` / `!override`)
 - nginx 1.18 or newer, with `conf.d/*.conf` and `sites-enabled/*` included inside `http {}`, as Debian and
   Ubuntu set it up
-- `curl` and `diff`
+- `bash`, `curl`, `diff`, and `flock`, `setsid` and `nohup` (util-linux and coreutils)
 
 1. **Domain.** Register `tickpulse.dev` and use Cloudflare as its DNS.
 2. **DNS.** Add `A tickpulse.dev` and `A grafana.tickpulse.dev`, both **proxied**, pointing at the VPS.
@@ -198,7 +235,8 @@ own files, and nginx is only ever reloaded gracefully after `nginx -t` passes.
    GRAFANA_ADMIN_PASSWORD=<long random; applied on Grafana's first start only>
    # Optional
    OTEL_IP_SALT=<random; keeps the daily client-IP hashes stable across restarts>
-   TICKPULSE_SUBNET=172.30.0.0/24          # change if another network on the host uses it
+   TICKPULSE_SUBNET=172.30.0.0/24          # change if another network on the host uses it,
+   TICKPULSE_GATEWAY=172.30.0.1            # together with its gateway (the only trusted proxy)
    ALERT_EMAIL=<alert recipient>
    GF_SMTP_ENABLED=true
    GF_SMTP_HOST=<smtp host:port>
@@ -212,6 +250,10 @@ own files, and nginx is only ever reloaded gracefully after `nginx -t` passes.
 6. **nginx.** Copy the four files from `deploy/nginx/` to the server, then, as root:
 
    ```bash
+   # the host must already have an explicit default server on 80 and on 443 (see "Live topology"):
+   # expect a default_server line for each port
+   nginx -T 2> /dev/null | grep -E 'listen .*(80|443).*default_server'
+
    # note the status codes of the sites already on the host
    for h in <each existing site>; do curl -s -o /dev/null -w "$h %{http_code}\n" "https://$h/"; done
 
@@ -230,6 +272,11 @@ own files, and nginx is only ever reloaded gracefully after `nginx -t` passes.
    `tickpulse-http.conf` must go into `conf.d/`, because `map` and `limit_req_zone` are allowed only at
    the http level. Every name it defines starts with `tickpulse`, so it cannot collide with another
    site's configuration.
+
+   If the `grep` finds no `default_server` for a port, give the host's own default site one first. That
+   is a separate change to that site, made on purpose. Otherwise whichever server block nginx loads first
+   for that port, possibly one of these vhosts, becomes the default and answers requests for unknown
+   names.
 7. **GitHub environment.** Under *Settings → Environments*, create `production` with these secrets:
 
    | Secret | Value |
@@ -239,12 +286,15 @@ own files, and nginx is only ever reloaded gracefully after `nginx -t` passes.
    | `DEPLOY_SSH_KEY` | a dedicated private key whose public half is in `~deploy/.ssh/authorized_keys` |
    | `DEPLOY_KNOWN_HOSTS` | the host's key lines, from `ssh-keyscan -t ed25519 <host>`, checked against the host's own fingerprint |
 
-   Optionally, restrict the environment to the `main` branch and add required reviewers.
-8. **Enable the deploy.** Add the variable `DEPLOY_ENABLED` = `true`, on the `production` environment or
-   the repository. Re-run the latest `main` workflow, or start *CI* with *Run workflow*.
-9. **Public image.** After the first push, set the GHCR package `tickpulse-api` to **public**
-   (*Package settings → Change visibility*), so the server pulls without credentials. Until then the
-   pull fails, and the job stops at step 2 without touching the server's stack.
+8. **Public image.** A push to `main` runs the `image` job even before the deploy is enabled, which
+   creates the GHCR package `tickpulse-api`. Set it to **public** (*Package settings → Change
+   visibility*), so the server pulls without credentials. Check it from any machine, logged out:
+   `docker pull ghcr.io/goofy5752/tickpulse-api:latest`. A deploy against a private package would fail at
+   the pull and change nothing.
+9. **Enable the deploy.** Add the **repository** variable `DEPLOY_ENABLED` = `true`, under *Settings →
+   Secrets and variables → Actions → Variables*. It must be a repository variable, not an environment
+   variable, because the `deploy` job's condition is checked before the environment is loaded. Then
+   re-run the latest `main` workflow, or start *CI* with *Run workflow*.
 10. **Verify.**
 
     ```bash
@@ -255,7 +305,16 @@ own files, and nginx is only ever reloaded gracefully after `nginx -t` passes.
 
     Open <https://grafana.tickpulse.dev> in a private window. It should show *TickPulse Ingestion* without
     a login.
-11. **Uptime check.** Create a free external monitor (for example UptimeRobot) on
+11. **Rollback drill.** Check the rollback once, end to end:
+    1. On a throwaway branch (for example `drill/rollback`), make `/health/ready` fail.
+    2. Start *CI* on that branch with *Run workflow*. The `deploy` job must log a failed ready check or
+       smoke test, roll back to the previous sha, and fail, while <https://tickpulse.dev> stays up.
+    3. Delete the branch.
+12. **Protect the environment.** After the drill, restrict `production` to the branches that may deploy,
+    under *Deployment branches and tags → Selected branches*: `main`, plus the drill branch pattern
+    (`drill/*`) for future drills. A manual run from any other branch then cannot reach the deploy
+    secrets. Add required reviewers if deploys should wait for an approval.
+13. **Uptime check.** Create a free external monitor (for example UptimeRobot) on
     `https://tickpulse.dev/health/ready`, with email alerts.
 
 ## Operations
@@ -279,8 +338,9 @@ alias dc='docker compose -f docker-compose.prod.yml --env-file .env'
 | psql | `docker exec -it tickpulse-db-1 psql -U tickpulse -d tickpulse` |
 | Reset the Grafana admin password | `dc exec grafana grafana cli admin reset-admin-password '<new>'` |
 
-A manual deploy or rollback takes the files already in place. To change the files themselves, push to
-`main`.
+A manual deploy or rollback uses the files already in place, and takes the same deploy lock as the CD job.
+To change the files themselves, push to `main`. The output of the last CD deploy stays in
+`.incoming/deploy.log` until the next one.
 
 ### Database backup and restore
 
