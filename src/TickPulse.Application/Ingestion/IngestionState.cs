@@ -38,6 +38,7 @@ public sealed class IngestionState(TimeProvider clock)
     private DateTime? _connectedSinceUtc;
     private DateTime? _lastReconnectUtc;
     private DateTime? _nextRotationUtc;
+    private DateTime? _leaderSinceUtc;
     private double _lastLagMs;
 
     // Exponentially decaying event rate: every tick adds 1/τ, and the sum decays by e^(−Δt/τ).
@@ -72,6 +73,21 @@ public sealed class IngestionState(TimeProvider clock)
             lock (_gate)
             {
                 return _isLeader;
+            }
+        }
+    }
+
+    /// <summary>
+    /// When this process became leader for the current leadership session (UTC); <see langword="null"/> while not
+    /// leader. Connection changes within a session keep it; every new session gets a new value.
+    /// </summary>
+    public DateTime? LeaderSinceUtc
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _leaderSinceUtc;
             }
         }
     }
@@ -149,6 +165,7 @@ public sealed class IngestionState(TimeProvider clock)
         lock (_gate)
         {
             _isLeader = false;
+            _leaderSinceUtc = null;
             _status = WsState.Standby;
             _connectedSinceUtc = null;
             _nextRotationUtc = null;
@@ -166,7 +183,7 @@ public sealed class IngestionState(TimeProvider clock)
     {
         lock (_gate)
         {
-            _isLeader = true;
+            BecomeLeader();
             _status = WsState.Connected;
             _connectedSinceUtc = connectedSinceUtc;
             _nextRotationUtc = nextRotationUtc;
@@ -233,13 +250,23 @@ public sealed class IngestionState(TimeProvider clock)
     }
 
     // Caller holds _gate.
+    private void BecomeLeader()
+    {
+        if (!_isLeader)
+        {
+            _isLeader = true;
+            _leaderSinceUtc = clock.GetUtcNow().UtcDateTime;
+        }
+    }
+
+    // Caller holds _gate.
     private double Decay(long now) => Math.Exp(-clock.GetElapsedTime(_rateTimestamp, now).TotalSeconds / RateWindow.TotalSeconds);
 
     private void SetLeaderStatus(WsState status)
     {
         lock (_gate)
         {
-            _isLeader = true;
+            BecomeLeader();
             _status = status;
             _connectedSinceUtc = null;
             _nextRotationUtc = null;

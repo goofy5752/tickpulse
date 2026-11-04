@@ -54,6 +54,31 @@ public sealed class IngestionStateTests
     }
 
     [Fact]
+    public void LeaderSinceUtc_MarksTheStartOfEachLeadershipSession()
+    {
+        var state = new IngestionState(_clock);
+        state.LeaderSinceUtc.ShouldBeNull();
+
+        state.SetConnecting();
+        state.LeaderSinceUtc.ShouldBe(T0);
+        state.LeaderSinceUtc!.Value.Kind.ShouldBe(DateTimeKind.Utc);
+
+        // Connection changes within the session keep it.
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        state.SetConnected(T0, T0.AddHours(23));
+        state.SetDisconnected();
+        state.SetConnecting();
+        state.LeaderSinceUtc.ShouldBe(T0);
+
+        // A new session after standing by starts a new one.
+        state.SetStandby();
+        state.LeaderSinceUtc.ShouldBeNull();
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        state.SetConnecting();
+        state.LeaderSinceUtc.ShouldBe(T0.AddMinutes(2));
+    }
+
+    [Fact]
     public void TicksPerSecond_SteadyRate_ConvergesThenDecays()
     {
         var state = new IngestionState(_clock);

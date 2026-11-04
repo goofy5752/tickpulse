@@ -41,6 +41,9 @@ public interface IMarketDataQueries
     /// <summary>The latest stored 1-minute bucket (streamed or backfilled) starting before <paramref name="beforeUtc"/>, or <see langword="null"/>.</summary>
     Task<DateTime?> LastMinuteBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct);
 
+    /// <summary>The latest 1-minute bucket holding streamed ticks that starts before <paramref name="beforeUtc"/>, or <see langword="null"/>.</summary>
+    Task<DateTime?> LastStreamMinuteBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct);
+
     /// <summary>
     /// The earliest and latest backfilled (exchange) minutes strictly before <paramref name="beforeUtc"/>, or
     /// <see langword="null"/> when there are none.

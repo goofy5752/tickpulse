@@ -200,6 +200,7 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         // partial index wins by a wide margin. For the average both indexes give the same bounded range on
         // (symbol_id, bucket_start) and the choice is cost-only: either is fine, a sequential scan is not.
         firstStream.ShouldContain("ix_candles_1m_stream");
+        (await ExplainAsync(MarketDataQueries.LastStreamMinuteBeforeSql, Int(Btc), Ts(now))).ShouldContain("ix_candles_1m_stream");
         average.ShouldMatch(@"(Index|Index Only|Bitmap Index) Scan( Backward)? using (ix_candles_1m_stream|pk_candles_1m)");
         average.ShouldNotContain("Seq Scan on candles_1m");
     }
@@ -573,6 +574,23 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         (await queries.LastMinuteBeforeAsync(Btc, Start.AddMinutes(5), Ct)).ShouldBeNull();
         (await queries.LastMinuteBeforeAsync(Ada, Start.AddHours(1), Ct)).ShouldBeNull();
         await Should.ThrowAsync<ArgumentException>(() => queries.LastMinuteBeforeAsync(Btc, DateTime.SpecifyKind(Start, DateTimeKind.Unspecified), Ct));
+    }
+
+    [Fact]
+    public async Task LastStreamMinuteBefore_IgnoresBackfill()
+    {
+        var queries = Queries();
+        (await queries.LastStreamMinuteBeforeAsync(Btc, Start.AddHours(1), Ct)).ShouldBeNull();
+
+        await Writer().WriteBatchAsync([NewTick(Btc, 1, 1m, 1m, Start.AddMinutes(5).AddSeconds(42)), NewTick(Eth, 1, 1m, 1m, Start.AddMinutes(40))], Ct);
+        await CandleWriter().InsertBackfillAsync(Btc, [Candle(Start.AddMinutes(9), close: 1m), Candle(Start.AddMinutes(50), close: 1m)], Ct);
+
+        var last = await queries.LastStreamMinuteBeforeAsync(Btc, Start.AddMinutes(50), Ct);
+        last.ShouldBe(Start.AddMinutes(5));
+        last!.Value.Kind.ShouldBe(DateTimeKind.Utc);
+        (await queries.LastStreamMinuteBeforeAsync(Btc, Start.AddMinutes(5), Ct)).ShouldBeNull(); // the bound is exclusive
+        (await queries.LastStreamMinuteBeforeAsync(Ada, Start.AddHours(1), Ct)).ShouldBeNull();
+        await Should.ThrowAsync<ArgumentException>(() => queries.LastStreamMinuteBeforeAsync(Btc, DateTime.SpecifyKind(Start, DateTimeKind.Unspecified), Ct));
     }
 
     [Fact]
