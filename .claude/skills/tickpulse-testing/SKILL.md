@@ -17,6 +17,15 @@ description: Use before writing or changing any code in the TickPulse repo, and 
 4. **No real clock.** Inject `FakeTimeProvider` (`Microsoft.Extensions.TimeProvider.Testing`);
    never `Thread.Sleep`/`Task.Delay` to wait for time to pass. For async conditions, poll with a
    bounded timeout.
+   - **Binance REST under a fake clock.** Polly's standard resilience pipeline takes its clock from
+     the `TimeProvider` registered in DI. With a `FakeTimeProvider` registered, its retry delays
+     and timeouts wait on the frozen clock, so a 5xx retry hangs until the test advances it. Any
+     test that registers a `FakeTimeProvider` together with `AddBinanceRest` (ingestion gap-fill,
+     backfill, `ApiFactory`) must call
+     `services.ConfigureBinanceRestResilience(o => o.Retry.Delay = TimeSpan.Zero)`. The options
+     name is `BinanceServiceCollectionExtensions.RestResilienceOptionsName`
+     (`BinanceRestClient-standard`). Attempt (10 s) and total (30 s) timeouts then fire only when
+     the test advances the clock past them.
 5. **Names are `Method_Condition_Expected`**, e.g. `AlignDown_Week_IsMondayMidnightUtc`,
    `WriteBatch_Twice_LeavesCandlesUnchanged`, `Avg_GarbageSymbol_Returns404Problem`.
 6. **Assertions use Shouldly**; substitutes use NSubstitute (Application tests only; prefer real

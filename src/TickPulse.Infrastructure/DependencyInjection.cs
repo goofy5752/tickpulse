@@ -3,8 +3,14 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using TickPulse.Application.Abstractions;
+using TickPulse.Application.Ingestion;
+using TickPulse.Infrastructure.Backfill;
+using TickPulse.Infrastructure.Binance;
+using TickPulse.Infrastructure.Ingestion;
 using TickPulse.Infrastructure.Persistence;
 
 namespace TickPulse.Infrastructure;
@@ -46,7 +52,91 @@ public static class DependencyInjection
         services.AddSingleton<ISymbolRepository, SymbolRepository>();
         services.AddSingleton<IMarketDataQueries, MarketDataQueries>();
 
+        services.AddBinanceRest(configuration);
+
+        // Shared between the API (admin use case, health, statistics) and the ingestion worker.
+        services.TryAddSingleton<IngestionState>();
+        services.TryAddSingleton<ISymbolChangeSignal, SymbolChangeSignal>();
+
         return services;
+    }
+
+    /// <summary>
+    /// Registers the leader-elected ingestion worker (a hosted service) and its parts. Call it after
+    /// <see cref="AddTickPulseInfrastructure"/>, whose ports it uses. Settings come from the <c>Ingestion</c> section
+    /// and <c>Binance:WsBaseUrl</c>; invalid settings fail at startup.
+    /// </summary>
+    public static IServiceCollection AddTickPulseIngestion(this IServiceCollection services, IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        services.AddOptions<IngestionOptions>()
+            .Bind(configuration.GetSection(IngestionOptions.SectionName))
+            .ValidateOnStart();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<IngestionOptions>, IngestionOptionsValidator>());
+
+        services.TryAddSingleton<SymbolIdCache>();
+        services.TryAddSingleton<IStreamConnectionFactory>(sp => new StreamConnectionFactory(
+            WsBaseUrl(configuration),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetService<ILoggerFactory>() ?? NullLoggerFactory.Instance));
+        services.TryAddSingleton<GapFillWatermarks>();
+        services.TryAddSingleton<IGapFillWatermark>(sp => sp.GetRequiredService<GapFillWatermarks>());
+        services.TryAddSingleton<TickBatchWriter>();
+        services.TryAddSingleton(sp => new GapFiller(
+            sp.GetRequiredService<IAggTradeSource>(),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetService<ILogger<GapFiller>>() ?? NullLogger<GapFiller>.Instance));
+        services.TryAddSingleton(sp => new SymbolReconciler(
+            sp.GetRequiredService<ISymbolRepository>(),
+            sp.GetRequiredService<SymbolIdCache>(),
+            sp.GetService<ILogger<SymbolReconciler>>() ?? NullLogger<SymbolReconciler>.Instance));
+        // The worker is the lock's only owner, so the lock is created here and not registered.
+        services.AddHostedService(sp => new IngestionWorker(
+            new PostgresLeaderLock(RequiredConnectionString(configuration), sp.GetService<ILogger<PostgresLeaderLock>>()),
+            sp.GetRequiredService<IStreamConnectionFactory>(),
+            sp.GetRequiredService<SymbolReconciler>(),
+            sp.GetRequiredService<TickBatchWriter>(),
+            sp.GetRequiredService<GapFiller>(),
+            sp.GetRequiredService<SymbolIdCache>(),
+            sp.GetRequiredService<GapFillWatermarks>(),
+            sp.GetRequiredService<ISymbolChangeSignal>(),
+            sp.GetRequiredService<IngestionState>(),
+            sp.GetRequiredService<IOptions<IngestionOptions>>(),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetService<ILoggerFactory>() ?? NullLoggerFactory.Instance));
+
+        AddBackfill(services, configuration);
+        return services;
+    }
+
+    // The backfill worker runs only while the ingestion worker holds leadership, so it is registered with it. One
+    // instance is both the hosted service and the IBackfillQueue the admin use case enqueues into.
+    private static void AddBackfill(IServiceCollection services, IConfiguration configuration)
+    {
+        services.AddOptions<BackfillOptions>()
+            .Bind(configuration.GetSection(BackfillOptions.SectionName))
+            .ValidateOnStart();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<BackfillOptions>, BackfillOptionsValidator>());
+
+        services.TryAddSingleton(sp => new BackfillWorker(
+            sp.GetRequiredService<IKlineSource>(),
+            sp.GetRequiredService<ICandleWriter>(),
+            sp.GetRequiredService<ISymbolRepository>(),
+            sp.GetRequiredService<IMarketDataQueries>(),
+            sp.GetRequiredService<IngestionState>(),
+            sp.GetRequiredService<IOptions<BackfillOptions>>(),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetService<ILogger<BackfillWorker>>() ?? NullLogger<BackfillWorker>.Instance));
+        services.TryAddSingleton<IBackfillQueue>(sp => sp.GetRequiredService<BackfillWorker>());
+        services.AddHostedService(sp => sp.GetRequiredService<BackfillWorker>());
+    }
+
+    private static Uri WsBaseUrl(IConfiguration configuration)
+    {
+        var raw = configuration[StreamConnectionFactory.WsBaseUrlKey];
+        return new Uri(string.IsNullOrWhiteSpace(raw) ? StreamConnectionFactory.DefaultWsBaseUrl : raw.Trim(), UriKind.Absolute);
     }
 
     /// <summary>The shared data source used by every component except the tick writer.</summary>

@@ -8,6 +8,9 @@ public sealed record AverageWindow(decimal Average, DateTime FirstTickUtc, DateT
 /// <summary>One aggregated candle of a period.</summary>
 public sealed record CandleRow(DateTime BucketStart, decimal Open, decimal High, decimal Low, decimal Close, decimal Volume);
 
+/// <summary>The first and last minute (bucket starts, UTC) of a set of candles.</summary>
+public sealed record MinuteRange(DateTime First, DateTime Last);
+
 /// <summary>Read-side port over ticks and candles.</summary>
 public interface IMarketDataQueries
 {
@@ -22,4 +25,10 @@ public interface IMarketDataQueries
     Task<long> ApproximateTickCountAsync(CancellationToken ct);
 
     Task<DateTime?> FirstStreamMinuteAsync(int symbolId, CancellationToken ct);
+
+    /// <summary>
+    /// The earliest and latest backfilled (exchange) minutes strictly before <paramref name="beforeUtc"/>, or
+    /// <see langword="null"/> when there are none.
+    /// </summary>
+    Task<MinuteRange?> BackfillRangeBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct);
 }

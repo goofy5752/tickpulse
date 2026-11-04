@@ -31,11 +31,11 @@ public readonly record struct Period
     /// <summary>Parses an exact, case-sensitive period code.</summary>
     public static bool TryParse(string? code, out Period period)
     {
-        foreach (var candidate in All)
+        foreach (var known in All)
         {
-            if (string.Equals(candidate.Code, code, StringComparison.Ordinal))
+            if (string.Equals(known.Code, code, StringComparison.Ordinal))
             {
-                period = candidate;
+                period = known;
                 return true;
             }
         }
