@@ -39,7 +39,7 @@ namespace TickPulse.Infrastructure.Backfill;
 /// before queueing it, so this happens even when its earlier backfill had completed.</para>
 /// <para>The stretch before a session's stream: when a symbol's last streamed minute before the session lies further
 /// back than <see cref="IngestionWorker.SeedWindow"/>, the session seed finds no stored trade to gap-fill from (an
-/// outage longer than the trade replay window), so no trade of the stretch is recovered. Klines fill it: from right after
+/// outage longer than that window), so no trade of the stretch is recovered. Klines fill it: from right after
 /// the latest minute stored before the session's first streamed minute, up to that minute. Until the session has
 /// streamed the symbol, the fill goes up to the session's start and the symbol is checked again on every poll, so the
 /// minutes up to the stream's first one are filled once it starts. A shorter outage is left to the trade gap-fill, which
