@@ -2,10 +2,10 @@ import { useCallback, useEffect, useState } from 'react'
 
 export type Theme = 'dark' | 'light'
 
-/** Shared with the pre-paint script in index.html, which applies the stored theme before React loads. */
+/** Shared with the pre-paint script public/theme-init.js, which applies the stored theme before React loads. */
 export const THEME_STORAGE_KEY = 'tickpulse.theme'
 
-/** Browser chrome colour per theme; matches `--color-bg` in theme.css and the script in index.html. */
+/** Browser chrome colour per theme; matches `--color-bg` in theme.css and public/theme-init.js. */
 export const THEME_COLORS: Record<Theme, string> = { dark: '#07070d', light: '#f3f2fa' }
 
 function initialTheme(): Theme {

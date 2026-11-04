@@ -20,7 +20,7 @@
 #      deleted: the running containers keep reading the old files (same inodes) until step 5 recreates them.
 #   5. up -d --remove-orphans, and recreate the observability containers when their config changed
 #      (compose cannot see changes inside bind-mounted files)
-#   6. wait up to READY_TIMEOUT seconds (90) for /health/ready on 127.0.0.1:8085
+#   6. wait up to READY_TIMEOUT seconds (180) for /health/ready on 127.0.0.1:8085
 #   7. ./smoke.sh http://127.0.0.1:8085, retrying for SMOKE_WAIT seconds (120), which covers a first start on an
 #      empty database
 #   8. success: write <tag> to .last_good_tag, delete older api images, exit 0.
@@ -45,9 +45,13 @@ readonly PREVIOUS=.previous
 readonly RECREATE_MARKER=.recreate_observability
 readonly API_URL=http://127.0.0.1:8085
 readonly IMAGE=ghcr.io/goofy5752/tickpulse-api
-readonly SCRIPTS=(smoke.sh deploy.sh)
+readonly SCRIPTS=(smoke.sh deploy.sh mask-env.sh)
 readonly OBSERVABILITY_SERVICES=(otel-collector prometheus loki tempo grafana)
-readonly READY_TIMEOUT="${READY_TIMEOUT:-90}"
+# How long a started tag gets to answer /health/ready. It must exceed the api's migration budget,
+# MigrationRetryOptions.Default.Timeout (120 s, src/TickPulse.Api/Hosting/DatabaseMigrator.cs), plus its startup:
+# a start that is still retrying its migrations must not be rolled back as failed.
+# DeployReadyTimeoutTests (tests/TickPulse.Integration.Tests) fails the build when the two drift apart.
+readonly READY_TIMEOUT="${READY_TIMEOUT:-180}"
 readonly SMOKE_WAIT="${SMOKE_WAIT:-120}"
 
 log() { printf '[deploy %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -129,6 +133,14 @@ else
 fi
 target_compose config --quiet || refuse "the compose file does not validate with .env"
 log "the compose file validates"
+# The API refuses to start in Production with an admin key under 32 characters (AdminApiKey.MinLength). Refuse here,
+# before the pull, instead of failing the readiness wait and rolling back. Only the length is ever printed.
+admin_key="$(sed -n 's/^ADMIN_API_KEY=//p' "$ENV_FILE" | tail -n 1 | tr -d '\r')"
+admin_key="${admin_key#[\"\']}"; admin_key="${admin_key%[\"\']}"
+if [ "${#admin_key}" -lt 32 ]; then
+  refuse "ADMIN_API_KEY in $ENV_FILE has ${#admin_key} characters; production needs at least 32 (see docs/deployment.md)"
+fi
+unset admin_key
 
 # 3. Pull with the same compose file.
 if [ "${SKIP_PULL:-0}" != 1 ]; then
@@ -161,7 +173,8 @@ install_upload() {
     touch "$RECREATE_MARKER"
   fi
   # mv keeps the inode, so this running script is not disturbed by moving it.
-  mv -f "$incoming/$COMPOSE_FILE" "$incoming/smoke.sh" "$incoming/deploy.sh" .
+  mv -f "$incoming/$COMPOSE_FILE" .
+  for f in "${SCRIPTS[@]}"; do mv -f "$incoming/$f" .; done
   chmod 755 "${SCRIPTS[@]}"
   installed=1
   log "installed the uploaded files; the previous ones are in $PREVIOUS/"
@@ -235,8 +248,14 @@ if start "$tag"; then
   exit 0
 fi
 
-log "tag $tag failed; last api log lines:"
-compose logs --no-color --tail 50 api || true
+log "tag $tag failed; last api log lines (.env values masked):"
+# deploy.log ends up in the GitHub Actions log, where nothing masks the .env values (they are not GitHub secrets),
+# so the api log goes through mask-env.sh first. Without the masker, the log is withheld rather than shown.
+if [ -x ./mask-env.sh ]; then
+  compose logs --no-color --tail 50 api 2>&1 | ./mask-env.sh "$ENV_FILE" || true
+else
+  log "mask-env.sh is missing; the api log is not shown (see: docker compose logs api)"
+fi
 
 if [ -z "$previous" ] || [ "$previous" = "$tag" ]; then
   log "no earlier good tag to roll back to"

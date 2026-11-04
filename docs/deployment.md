@@ -59,7 +59,13 @@ flowchart LR
 - **The host nginx** serves only its two `server_name`-scoped vhosts and changes nothing else on the
   host. It admits only Cloudflare's published ranges and redirects port 80 to HTTPS. It forwards
   `CF-Connecting-IP` and upgrades WebSockets: SignalR on `/hubs/` and Grafana Live on `/api/live/`. It
-  also sets HSTS and rate-limits Grafana's query endpoints.
+  also sets HSTS and rate-limits two groups of paths.
+  - Rate limits are per visitor (`CF-Connecting-IP`) and answer 429. Grafana's query endpoints get 5
+    requests per second with a burst of 40 (a whole dashboard at once). The api paths that its own rate
+    limiter does not cover get 10 per second with a burst of 20: `/health/*` (`/health/ready` opens a
+    database connection on every hit), `/docs` and `/openapi/*`. The match is case-insensitive, like the
+    api's routing. `deploy.sh` and its smoke test call the api on `127.0.0.1:8085`, past nginx, so they
+    are not limited.
   - The vhosts listen with plain `listen 443 ssl`, without `http2`. On nginx 1.18, `http2` is a property
     of the shared listening socket and would switch HTTP/2 on for every site on 443. Visitors still get
     HTTP/2 and HTTP/3 from Cloudflare; only the hop from Cloudflare to the origin is HTTP/1.1.
@@ -107,6 +113,7 @@ to a development default.
 | `deploy/observability/` | `/srv/tickpulse/observability/` | collector, Prometheus, Loki, Tempo and Grafana config |
 | `deploy/deploy.sh` | `/srv/tickpulse/deploy.sh` | pull, start, smoke test, roll back |
 | `deploy/smoke.sh` | `/srv/tickpulse/smoke.sh` | the smoke test |
+| `deploy/mask-env.sh` | `/srv/tickpulse/mask-env.sh` | masks the `.env` values in the api log that `deploy.sh` prints |
 | — | `/srv/tickpulse/.env` | secrets (chmod 600, never in the repository) |
 | — | `/srv/tickpulse/.last_good_tag` | the last tag that passed the smoke test |
 | — | `/srv/tickpulse/.previous/` | the compose file, scripts and `observability/` from before the last install, for its rollback |
@@ -115,7 +122,7 @@ to a development default.
 | — | `/srv/tickpulse/.failed-<time>/` | the files of a deploy that was rolled back, deleted after the next successful deploy |
 | `deploy/nginx/tickpulse.conf` | `/etc/nginx/sites-available/tickpulse.dev` | API and dashboard vhost |
 | `deploy/nginx/grafana.tickpulse.conf` | `/etc/nginx/sites-available/grafana.tickpulse.dev` | Grafana vhost |
-| `deploy/nginx/tickpulse-http.conf` | `/etc/nginx/conf.d/tickpulse.conf` | http-level maps and the rate-limit zone |
+| `deploy/nginx/tickpulse-http.conf` | `/etc/nginx/conf.d/tickpulse.conf` | http-level maps and the rate-limit zones |
 | `deploy/nginx/cloudflare-allow.conf` | `/etc/nginx/snippets/tickpulse-cloudflare-allow.conf` | Cloudflare ranges (allow), everything else denied |
 | — | `/etc/ssl/tickpulse/origin.pem`, `origin.key` | Cloudflare Origin certificate (root-only) |
 
@@ -138,7 +145,7 @@ is never cut off halfway; only pull-request runs are superseded.
    - Only one deploy runs at a time.
    - It goes through these steps:
      1. **Upload.** Under the server's deploy lock, it empties `/srv/tickpulse/.incoming/`, then copies
-        `docker-compose.prod.yml`, `smoke.sh`, `deploy.sh` and `observability/` into it.
+        `docker-compose.prod.yml`, `smoke.sh`, `deploy.sh`, `mask-env.sh` and `observability/` into it.
      2. **Start.** It runs `.incoming/deploy.sh --detach --install <sha>`. The script runs on in its own
         session (`nohup setsid`), so a dropped SSH connection cannot stop it halfway. Its output goes to
         `.incoming/deploy.log` and its exit code to `.incoming/deploy.exit`.
@@ -163,7 +170,10 @@ On the server, `deploy.sh` works through these steps and stops at the first fail
    Compose cannot see changes inside bind-mounted files, which is why `deploy.sh` does this itself.
 5. **Start.** `up -d --remove-orphans`, and when `observability/` changed,
    `up -d --no-deps --force-recreate` of its five services.
-6. **Ready.** It waits up to 90 s for `/health/ready` on `127.0.0.1:8085` to return 200.
+6. **Ready.** It waits up to 180 s (`READY_TIMEOUT`) for `/health/ready` on `127.0.0.1:8085` to return 200.
+   The api applies its migrations before it serves anything and retries them for up to 120 s
+   (`MigrationRetryOptions.Timeout`), so this wait must stay above that. `DeployReadyTimeoutTests` fails
+   the build if the two drift apart.
 7. **Smoke.** It runs `./smoke.sh http://127.0.0.1:8085`, retrying for up to 120 s, so a first start on an
    empty database has time for its first complete 1-minute candle.
 8. **Done.** On success, it writes the sha to `.last_good_tag`, deletes leftover `.failed-*` directories,
@@ -171,12 +181,35 @@ On the server, `deploy.sh` works through these steps and stops at the first fail
 
 **Rollback.** If step 5, 6 or 7 fails:
 
-1. The failed files are renamed into `.failed-<time>/`.
-2. The files in `.previous/` are put back: the compose file, the scripts, and `observability/` if it
+1. The last 50 lines of the api log are printed, through `mask-env.sh`.
+2. The failed files are renamed into `.failed-<time>/`.
+3. The files in `.previous/` are put back: the compose file, the scripts, and `observability/` if it
    differs, whose containers are then recreated again.
-3. The tag in `.last_good_tag` is started and smoke-tested again.
+4. The tag in `.last_good_tag` is started and smoke-tested again. It starts against the schema the
+   failed tag has already migrated, which is safe only because migrations are expand-only (see
+   [Migrations and rollback](#migrations-and-rollback)).
 
 The job fails either way, so a rolled-back deploy is never green.
+
+**Secrets in the log.** `deploy.log` is streamed into the GitHub Actions log, and the `.env` values are
+not GitHub secrets, so Actions does not mask them. `deploy.sh` therefore pipes the api log through
+`mask-env.sh .env`, which replaces every `.env` value of 4 or more characters with `***`.
+
+- It masks each value as Compose reads it, as written in the file, and in the two JSON spellings the
+  api's log uses: `"` as `\"` and `\` as `\\`, and inside the rendered message, where string properties
+  are quoted too.
+- Matching is literal. Overlapping matches are masked as one span.
+- It reads `.env` the way Compose does for plain `KEY=value` lines only: single or double quotes on one
+  line, the escapes `\"`, `\\` and `\$` in double quotes, `$$` for a literal `$`, and ` # comment` after
+  a value. Anything it cannot read with certainty withholds the api log, with the line number (never the
+  value) as the reason. This includes values over several lines, `$VAR` interpolation, other escapes, or a
+  backslash or quote in an unquoted value. A missing masker or an unreadable `.env` withholds the log too.
+  Writing every value unquoted, from letters, digits and `-_./+=@`, always works.
+- `deploy/tests/mask-env.test.sh` runs in the `backend` job, after a pinned `shellcheck` of the deploy
+  scripts. Its Serilog lines come from `deploy/tests/fixtures/serilog-events.jsonl`, which
+  `DeployLogFixtureTests` keeps identical to what the api's formatter writes.
+
+Read the unmasked log on the server with `dc logs api`.
 
 | Exit code | Meaning |
 |---|---|
@@ -238,7 +271,7 @@ own files, and nginx is only ever reloaded gracefully after `nginx -t` passes.
    ```dotenv
    # Required
    POSTGRES_PASSWORD=<long random, letters and digits only>
-   ADMIN_API_KEY=<long random>
+   ADMIN_API_KEY=<long random, at least 32 characters; a shorter key fails startup>
    GRAFANA_ADMIN_PASSWORD=<long random; applied on Grafana's first start only>
    # Optional
    OTEL_IP_SALT=<random; keeps the daily client-IP hashes stable across restarts>
@@ -349,6 +382,26 @@ A manual deploy or rollback uses the files already in place, and takes the same 
 To change the files themselves, push to `main`. The output of the last CD deploy stays in
 `.incoming/deploy.log` until the next one.
 
+### Migrations and rollback
+
+The api runs with `Database__RunMigrationsOnStartup=true`, and a rollback, automatic or by hand, starts
+the previous image against a schema the newer image has already migrated. EF Core does not migrate
+down, so the previous code must work on the newer schema. One rule makes that hold:
+
+> **Migrations are expand-only. A contracting migration ships one release after the code stops using
+> the object.**
+
+- **Expand** (any release): add a table, a nullable column, a column with a default, an index, a view,
+  or a seed row. The previous image ignores what it does not know.
+- **Contract** (a later release): drop or rename a table or column, narrow a type, add `NOT NULL` to an
+  existing column, or remove seed data. Ship the code that stops reading and writing the object first,
+  let it become `.last_good_tag`, and only then ship the migration that removes it. A rollback then
+  lands on code that no longer needs the object.
+- A rename is an expand (add the new name, write both, backfill), a release that reads only the new
+  name, and a contract (drop the old one).
+
+The PR template asks for this under *Risks*. Every migration so far is additive.
+
 ### Database backup and restore
 
 The backup is a custom-format dump, streamed out of the container. There is no `-t`, because a TTY
@@ -388,6 +441,9 @@ dc start api
 - **nginx vhosts.** The CD job does not copy them. After changing one, install it the way step 6 does.
 - **Secrets.**
   - To rotate `ADMIN_API_KEY`, edit `.env`, then run `dc up -d api`.
+  - Since #23, Production refuses admin keys under 32 characters. Check with
+    `awk '/^ADMIN_API_KEY=/{print length(substr($0, 15))}' .env` before deploying; rotate if under 32.
+    `deploy.sh` runs the same check before it pulls and refuses the deploy (exit 2, nothing changed).
   - `POSTGRES_PASSWORD` applies only when the volume is first created. To change it later, run
     `ALTER USER tickpulse PASSWORD '…'` in psql first, then update `.env` and run `dc up -d api`.
   - The Grafana admin password works the same way; reset it with the command in the table above.

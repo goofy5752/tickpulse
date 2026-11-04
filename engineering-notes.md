@@ -91,8 +91,8 @@ flowchart LR
 6. **A ledger of rulings.** Before execution, a pre-flight scan checked what each plan item produced
    against what later items consumed. It found gaps and conflicts (an interface nobody implemented, a
    test placed in a layer that could not reference the code, two items creating the same file), and
-   the first ten rulings settled them, each with its cost if wrong. By the end the ledger held 38 rulings
-   (R1–R38), for example R17 (temp-table staging), R18 (atomic symbol add), R23 (workers never crash
+   the first ten rulings settled them, each with its cost if wrong. By the end the ledger held 40 rulings
+   (R1–R40), for example R17 (temp-table staging), R18 (atomic symbol add), R23 (workers never crash
    the host) and R36 (429 sampled like a success).
 7. **Model tiering.** Mechanical items and scoped re-reviews ran on a smaller model; standard
    integration work and ordinary reviews on a larger one; the hardest reviews (the gap-fill state

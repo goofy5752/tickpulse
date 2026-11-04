@@ -177,5 +177,9 @@ public sealed partial class DatabaseMigrator(
 internal sealed record MigrationRetryOptions(int MaxAttempts, TimeSpan BaseDelay, TimeSpan Timeout)
 {
     /// <summary>5 attempts, 1 s → 2 s → 4 s → 8 s between them, at most 2 minutes in total.</summary>
+    /// <remarks>
+    /// <c>READY_TIMEOUT</c> in <c>deploy/deploy.sh</c> must stay above this timeout, or a deploy would roll back a start
+    /// that is still migrating; <c>DeployReadyTimeoutTests</c> checks it.
+    /// </remarks>
     public static readonly MigrationRetryOptions Default = new(5, TimeSpan.FromSeconds(1), TimeSpan.FromMinutes(2));
 }

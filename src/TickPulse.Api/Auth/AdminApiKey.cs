@@ -11,8 +11,10 @@ namespace TickPulse.Api.Auth;
 /// </summary>
 public sealed class AdminApiKey
 {
-    /// <summary>Keys shorter than this are accepted, with a warning at startup.</summary>
-    public const int RecommendedMinLength = 32;
+    /// <summary>
+    /// The shortest key the Production environment accepts; anywhere else a shorter key works, with a warning at startup.
+    /// </summary>
+    public const int MinLength = 32;
 
     private readonly byte[]? _digest;
 
