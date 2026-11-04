@@ -101,8 +101,12 @@ Rules of thumb:
    delivers a symbol, a short REST page completes its fill only past them. A symbol that starts
    streaming with no watermark gets a lead-in from the start of its first minute
    (`aggTrades?startTime`), so that candle is not partial; a failed lead-in is retried on the
-   next connection. After an outage longer than the seed window the trades of that stretch are not
-   recovered; with backfill enabled, every leadership session fills its candles from klines.
+   next connection. Symmetrically, a removed symbol gets a one-shot tail-out after its UNSUBSCRIBE
+   ack: once its last minute is over, REST fills from the last delivered id + 1 (or the id handed
+   over by a rotation, if the link has delivered none yet) up to that minute's end (background,
+   bounded, best-effort; it never delays the unsubscribe and never writes past that minute). After
+   an outage longer than the seed window the trades of that stretch are not recovered; with backfill
+   enabled, every leadership session fills its candles from klines.
    Symbol changes signal ingestion in-process and are also reconciled against the DB every 30 s.
 6. **Bounded channel** with `FullMode=Wait` (backpressure, never drop). Batches flush at 500 ms or
    5,000 ticks.

@@ -240,6 +240,33 @@ public sealed class NegotiationTests(ApiFactory api) : IClassFixture<ApiFactory>
     }
 
     [Fact]
+    public async Task NotAcceptable_LogsNoFrameworkWarning_AndKeepsTheProblem()
+    {
+        var logs = new IngestionTestHost.LogCapture();
+        await using var host = new ApiFactory(api.Database).WithLogging(logs);
+        await host.InitializeAsync();
+        using var client = host.CreateClient();
+
+        for (var i = 0; i < 3; i++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "/api/probe/BTCUSDT");
+            request.Headers.Accept.ParseAdd("text/csv");
+            using var response = await client.SendAsync(request, Ct);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.NotAcceptable);
+            var problem = await ReadAsync(response);
+            problem.Type.ShouldBe(TypeBase + "not-acceptable");
+            problem.Status.ShouldBe(406);
+        }
+
+        // Each 406 is still on record, once, in the request log (4xx at Information); MVC's own "no output
+        // formatter" message is Debug now, below the Microsoft.AspNetCore minimum, so a client cannot flood Warnings.
+        await IngestionTestHost.WaitForAsync(() => logs.Entries.Count(e => e.Message.Contains("responded 406", StringComparison.Ordinal)) == 3, "three request log lines");
+        logs.Entries.Where(e => e.Message.Contains("responded 406", StringComparison.Ordinal)).ShouldAllBe(e => e.Level == LogLevel.Information);
+        logs.Entries.ShouldNotContain(e => e.Category.StartsWith("Microsoft.AspNetCore.Mvc", StringComparison.Ordinal) && e.Level >= LogLevel.Information);
+    }
+
+    [Fact]
     public async Task RateLimit_Rejections_LogOneWarningPerClientPerWindow()
     {
         var logs = new IngestionTestHost.LogCapture();

@@ -26,4 +26,11 @@ public interface ISymbolRepository
     Task<int> CountActiveAsync(CancellationToken ct);
 
     Task SetBackfillStatusAsync(int symbolId, BackfillStatus status, DateTime? fromUtc, CancellationToken ct);
+
+    /// <summary>
+    /// Marks the symbol <see cref="BackfillStatus.Pending"/>, keeping <see cref="MonitoredSymbol.BackfilledFromUtc"/>, but only
+    /// while it is active and its backfill has not completed: a symbol removed since it was read is not left Pending,
+    /// and a completion written meanwhile (by another instance) is not overwritten. Returns whether it was marked.
+    /// </summary>
+    Task<bool> MarkPendingIfUnfinishedAsync(int symbolId, CancellationToken ct);
 }

@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Http.Metadata;
 using Microsoft.AspNetCore.StaticAssets;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Net.Http.Headers;
@@ -28,6 +30,9 @@ internal static class DashboardAssets
 {
     public const string ImmutableCacheControl = "public, max-age=31536000, immutable";
     public const string RevalidateCacheControl = "no-cache";
+
+    /// <summary>The <c>http.route</c> of every dashboard file and of the dashboard fallback.</summary>
+    public const string StaticRoute = "static";
 
     private static readonly PathString AssetsPrefix = new("/assets");
 
@@ -66,6 +71,46 @@ internal static class DashboardAssets
     /// The build-time assets from the static web assets manifest (<paramref name="manifestPath"/>, by default the
     /// app's <c>{ApplicationName}.staticwebassets.endpoints.json</c>; empty when the build had no <c>wwwroot</c>).
     /// </summary>
+    /// <remarks>Every file shares the <see cref="StaticRoute"/> <c>http.route</c> (see <see cref="UseDashboardRouteTag"/>).</remarks>
     public static StaticAssetsEndpointConventionBuilder MapDashboardAssets(this IEndpointRouteBuilder endpoints, string? manifestPath = null) =>
-        endpoints.MapStaticAssets(manifestPath);
+        endpoints.MapStaticAssets(manifestPath).WithMetadata(StaticRouteMetadata.Instance);
+
+    /// <summary>The dashboard fallback: <c>index.html</c> for client-side routes, under the <see cref="StaticRoute"/> label.</summary>
+    public static IEndpointConventionBuilder MapDashboardFallback(this IEndpointRouteBuilder endpoints) =>
+        endpoints.MapFallbackToFile(DashboardRouteConstraint.FallbackPattern, "index.html").WithMetadata(StaticRouteMetadata.Instance);
+
+    /// <summary>
+    /// Keeps the <c>http.route</c> of the request metrics bounded: every dashboard file and the fallback page count
+    /// under one <see cref="StaticRoute"/> value, instead of one value per file name (which carry a content hash, so
+    /// every deploy would add a new set of series).
+    /// </summary>
+    /// <remarks>
+    /// <para>A <c>MapStaticAssets</c> or fallback endpoint carries the route itself (<see cref="StaticRouteMetadata"/>).
+    /// The fallback and <c>UseStaticFiles</c>, though, serve the file with no endpoint (the fallback clears its own),
+    /// and ASP.NET Core then records no route at all. This middleware adds the route for those: a successful
+    /// <c>GET</c>/<c>HEAD</c> outside the API, hub, health and docs prefixes that ended without an endpoint. A miss
+    /// (404) stays route-less, one bounded series.</para>
+    /// </remarks>
+    public static IApplicationBuilder UseDashboardRouteTag(this IApplicationBuilder app) =>
+        app.Use(async (context, next) =>
+        {
+            await next(context);
+            var response = context.Response;
+            if (context.GetEndpoint() is null
+                && (HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method))
+                && response.StatusCode is >= 200 and < 300 or StatusCodes.Status304NotModified
+                && !DashboardRouteConstraint.IsReserved(context.Request.Path.Value ?? string.Empty)
+                && context.Features.Get<IHttpMetricsTagsFeature>() is { } tags)
+            {
+                tags.Tags.Add(new KeyValuePair<string, object?>("http.route", StaticRoute));
+            }
+        });
+
+    /// <summary>Gives an endpoint the <see cref="StaticRoute"/> <c>http.route</c> in the request metrics.</summary>
+    internal sealed class StaticRouteMetadata : IRouteDiagnosticsMetadata
+    {
+        public static readonly StaticRouteMetadata Instance = new();
+
+        public string Route => StaticRoute;
+    }
 }

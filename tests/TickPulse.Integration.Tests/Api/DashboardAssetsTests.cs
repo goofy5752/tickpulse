@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
@@ -7,8 +8,12 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Diagnostics.Metrics.Testing;
 using TickPulse.Api.Hosting;
+using TickPulse.Infrastructure.Telemetry;
 using TickPulse.Integration.Tests.Fixtures;
+using TickPulse.Integration.Tests.Ingestion;
 using static TickPulse.Integration.Tests.Api.ProblemReader;
 
 namespace TickPulse.Integration.Tests.Api;
@@ -176,6 +181,57 @@ public sealed class DashboardAssetsTests(ApiFactory api) : IClassFixture<ApiFact
         ShouldBeRevalidated(second, "/index.html");
     }
 
+    // ---- metrics: every dashboard file and the fallback share one http.route, so a deploy adds no series --------
+
+    [Fact]
+    public async Task ManifestAssets_ShareTheStaticRouteLabel()
+    {
+        await using var host = await StaticAssetsHost.StartAsync();
+        using var durations = new MetricCollector<double>(host.Services.GetRequiredService<IMeterFactory>(), HostingMeter, RequestDuration);
+
+        foreach (var path in new[] { AssetPath, "/index.html" })
+        {
+            using var response = await host.Client.SendAsync(Request(path, "br"), Ct);
+            response.StatusCode.ShouldBe(HttpStatusCode.OK, path);
+        }
+
+        await IngestionTestHost.WaitForAsync(() => durations.GetMeasurementSnapshot().Count >= 2, "two requests measured");
+        Routes(durations).ShouldBe([DashboardAssets.StaticRoute]);
+    }
+
+    [Fact]
+    public async Task DashboardRequests_HaveABoundedRouteLabelSet()
+    {
+        await WriteAsync(api.WebRoot, "/index.html", "<!doctype html><title>tickpulse-route-test</title>");
+        await WriteAsync(api.WebRoot, AssetPath, Filler(AssetPath));
+        await WriteAsync(api.WebRoot, StylePath, Filler(StylePath));
+        await WriteAsync(api.WebRoot, "/favicon.svg", "<svg xmlns=\"http://www.w3.org/2000/svg\"/>");
+        var meters = api.Services.GetRequiredService<IMeterFactory>();
+        using var durations = new MetricCollector<double>(meters, HostingMeter, RequestDuration);
+        using var responses = new MetricCollector<long>(meters, TickPulseMetrics.MeterName, "tickpulse.api.responses");
+        using var client = api.CreateClient();
+
+        // Each file name would be a route of its own; a new build brings new hashed names.
+        string[] dashboard = ["/", "/index.html", AssetPath, StylePath, "/favicon.svg", "/symbols/BTCUSDT", "/symbols/ETHUSDT", "/assets/missing-AbCdEf12.js"];
+        foreach (var path in dashboard.Append("/api/symbols"))
+        {
+            using var response = await client.GetAsync(new Uri(path, UriKind.Relative), Ct);
+        }
+
+        await IngestionTestHost.WaitForAsync(() => durations.GetMeasurementSnapshot().Count >= dashboard.Length + 1, "every request measured");
+        var routes = Routes(durations);
+        routes.ShouldContain(DashboardAssets.StaticRoute);
+        routes.ShouldContain("api/symbols");
+        routes.ShouldBeSubsetOf([DashboardAssets.StaticRoute, "api/symbols", null]); // null: no endpoint matched (a 404)
+        responses.GetMeasurementSnapshot().Select(m => (string?)m.Tags["route"]).Distinct().ShouldBe(["api/symbols"]); // /api only
+    }
+
+    private const string HostingMeter = "Microsoft.AspNetCore.Hosting";
+    private const string RequestDuration = "http.server.request.duration";
+
+    private static string?[] Routes(MetricCollector<double> durations) =>
+        [.. durations.GetMeasurementSnapshot().Select(m => m.Tags.TryGetValue("http.route", out var route) ? (string?)route : null).Distinct()];
+
     private static void ShouldBeImmutable(HttpResponseMessage response)
     {
         var cache = response.Headers.CacheControl.ShouldNotBeNull();
@@ -254,6 +310,8 @@ public sealed class DashboardAssetsTests(ApiFactory api) : IClassFixture<ApiFact
         }
 
         public HttpClient Client { get; }
+
+        public IServiceProvider Services => _app.Services;
 
         public static async Task<StaticAssetsHost> StartAsync()
         {

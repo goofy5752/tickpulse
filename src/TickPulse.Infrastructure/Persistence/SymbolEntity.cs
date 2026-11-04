@@ -17,6 +17,8 @@ public sealed class SymbolEntity
 
     public DateTime? DeactivatedAt { get; set; }
 
+    public DateTime? ReactivatedAt { get; set; }
+
     public BackfillStatus BackfillStatus { get; set; }
 
     public DateTime? BackfilledFrom { get; set; }

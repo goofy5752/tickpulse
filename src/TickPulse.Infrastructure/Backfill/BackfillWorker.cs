@@ -24,8 +24,10 @@ namespace TickPulse.Infrastructure.Backfill;
 /// <para>Works only while <see cref="IngestionState.IsLeader"/> is true, and never touches the leader lock itself.
 /// Each leadership session (<see cref="IngestionState.LeaderSinceUtc"/>, including the one at start-up and one this
 /// worker never saw begin) queues every active symbol: one whose status is not <see cref="BackfillStatus.Completed"/>
-/// for its backfill, a completed one only for the stretch before the session's stream (below). Symbols are processed
-/// one at a time, in queue order; a symbol that is already queued or running is not queued again.</para>
+/// for its backfill, marked <see cref="BackfillStatus.Pending"/> so the seeded symbols do not report
+/// <see cref="BackfillStatus.NotRequested"/> while they wait their turn; a completed one, which stays Completed, only
+/// for the stretch before the session's stream (below). Symbols are processed one at a time, in queue order; a symbol
+/// that is already queued or running is not queued again.</para>
 /// <para>A symbol is fetched from <c>AlignDown(now − Depth, 1m)</c> up to, but excluding, its first streamed minute
 /// (or the current minute when nothing was streamed yet), in ascending pages of <see cref="PageSize"/> by
 /// <c>startTime</c>. A run that was interrupted (shutdown, lost leadership, failure) continues after the latest minute
@@ -35,14 +37,15 @@ namespace TickPulse.Infrastructure.Backfill;
 /// completion <c>backfilled_from</c> records the earliest backfilled minute actually stored.</para>
 /// <para>A reactivated symbol (it streamed, was deactivated, and is active again) also gets the stretch it was inactive:
 /// from right after the latest minute stored before its new stream, up to the first minute streamed since its last
-/// deactivation (or the current minute). The admin use case marks such a symbol <see cref="BackfillStatus.Pending"/>
+/// reactivation (<c>reactivated_at</c>; or the current minute). The admin use case marks such a symbol <see cref="BackfillStatus.Pending"/>
 /// before queueing it, so this happens even when its earlier backfill had completed.</para>
-/// <para>The stretch before a session's stream: when a symbol's last streamed minute before the session lies further
-/// back than <see cref="IngestionWorker.SeedWindow"/>, the session seed finds no stored trade to gap-fill from (an
-/// outage longer than that window), so no trade of the stretch is recovered. Klines fill it: from right after
-/// the latest minute stored before the session's first streamed minute, up to that minute. Until the session has
-/// streamed the symbol, the fill goes up to the session's start and the symbol is checked again on every poll, so the
-/// minutes up to the stream's first one are filled once it starts. A shorter outage is left to the trade gap-fill, which
+/// <para>The stretch before a session's stream: when the session seed found no stored trade of a symbol to gap-fill
+/// from (its last streamed minute before the session starts at or before <c>since − </c><see cref="IngestionWorker.SeedWindow"/>,
+/// an outage longer than that window, or a completed symbol never streamed), no trade of the stretch is recovered.
+/// Klines fill it: from right after the latest minute stored before the session's first streamed minute, up to that
+/// minute. Until the session has streamed the symbol, the fill goes up to the session's start and the symbol is checked
+/// again at a doubling interval (up to <see cref="MaxStreamCheckInterval"/>), so the minutes up to the stream's first
+/// one are filled once it starts. A shorter outage is left to the trade gap-fill, which
 /// rebuilds the exact candles. Status and <c>backfilled_from</c> are not changed by it.</para>
 /// <para>Failures: a transient Binance error is retried up to <see cref="MaxTransientRetries"/> times with
 /// <see cref="RetryDelay"/>, unless leadership was lost (then the run pauses). A permanent Binance error, persisting
@@ -263,14 +266,25 @@ internal sealed partial class BackfillWorker(
         }
     }
 
-    // Queues every active symbol for the leadership session `session`, in id order. False when the database could not
-    // be read.
+    // Queues every active symbol for the leadership session `session`, in id order: an unfinished one for its backfill,
+    // a completed one for the stretch before the session's stream. Each unfinished one is marked Pending (the seeded
+    // symbols start as NotRequested, a failed or interrupted one says Failed or Running), so the status says what is
+    // about to happen while it waits its turn; a completed one keeps Completed. False when the database could not be
+    // read or written; the next turn scans again.
     private async Task<bool> TryQueueActiveAsync(DateTime? session, CancellationToken ct)
     {
         IReadOnlyList<MonitoredSymbol> active;
+        MonitoredSymbol[] unfinished;
         try
         {
             active = await symbols.ListActiveAsync(ct).ConfigureAwait(false);
+            unfinished = [.. active.Where(s => s.BackfillStatus != BackfillStatus.Completed)];
+            // Conditional in the database: a symbol removed since the read is not left Pending, and a completion
+            // written meanwhile (another instance that led until just now) is not overwritten.
+            foreach (var symbol in unfinished.Where(s => s.BackfillStatus != BackfillStatus.Pending))
+            {
+                await symbols.MarkPendingIfUnfinishedAsync(symbol.Id, ct).ConfigureAwait(false);
+            }
         }
         catch (DbException ex)
         {
@@ -281,14 +295,12 @@ internal sealed partial class BackfillWorker(
         _scanNeeded = false;
         _scannedSession = session;
         _awaitingStream.Clear();
-        var unfinished = 0;
         foreach (var symbol in active)
         {
             Enqueue(symbol.Id);
-            unfinished += symbol.BackfillStatus == BackfillStatus.Completed ? 0 : 1;
         }
 
-        LogQueuedPending(active.Count, unfinished);
+        LogQueuedPending(active.Count, unfinished.Length);
         return true;
     }
 
@@ -385,10 +397,15 @@ internal sealed partial class BackfillWorker(
     }
 
     // The minutes a reactivated symbol missed while inactive: from right after the latest minute stored before its new
-    // stream (or `from`, if that is earlier) up to the first minute streamed since its last deactivation, or the current
+    // stream (or `from`, if that is earlier) up to the first minute streamed since its last reactivation, or the current
     // minute when nothing was streamed yet. Null when the symbol never streamed before that deactivation (the walk up
     // to the first stream minute already covers it) or the stretch is empty. An interrupted fill resumes on its own:
     // the minutes it stored are the latest ones before the end.
+    // The end is searched from the reactivation, not from the deactivation: the old stream (and the tail-out of its
+    // last minute) can have stored a minute after deactivated_at when the UNSUBSCRIBE took effect late, and ending
+    // there would leave the whole stretch unfilled. The search starts LeadInClockSkew before the reactivation, where
+    // the new stream's lead-in starts at the earliest. A reactivation recorded before reactivated_at existed falls
+    // back to the deactivation.
     private async Task<(DateTime Start, DateTime End)?> InactiveStretchAsync(
         MonitoredSymbol symbol, DateTime? firstStream, DateTime from, DateTime current, CancellationToken ct)
     {
@@ -397,7 +414,10 @@ internal sealed partial class BackfillWorker(
             return null;
         }
 
-        var end = await queries.FirstStreamMinuteAtOrAfterAsync(symbol.Id, deactivated, ct).ConfigureAwait(false) ?? current;
+        var newStreamFrom = symbol.ReactivatedAtUtc is { } reactivated && reactivated > deactivated
+            ? Period.OneMinute.AlignDown(reactivated - StreamSupervisor.LeadInClockSkew)
+            : deactivated;
+        var end = await queries.FirstStreamMinuteAtOrAfterAsync(symbol.Id, newStreamFrom, ct).ConfigureAwait(false) ?? current;
         var last = await queries.LastMinuteBeforeAsync(symbol.Id, end, ct).ConfigureAwait(false);
         var start = last is { } minute && minute + Minute > from ? minute + Minute : from;
         return start < end ? (start, end) : null;

@@ -175,6 +175,63 @@ public sealed class GapFillerTests
     }
 
     [Fact]
+    public async Task TailOut_EmitsTheTradesAfterTheLastDelivered_UpToTheEndTime()
+    {
+        // Trade n trades at T0 + n ms; the stream delivered up to 100 and the minute ends at T0 + 2500 ms.
+        var source = new FakeAggTrades(1, 3500);
+
+        var result = await Filler(source).TailOutAsync(BtcId, "BTCUSDT", 100, T0.AddMilliseconds(2500), _output.Writer, Ct);
+
+        result.ShouldBe(new GapFillResult(2399, 2499, Complete: true));
+        Emitted().Select(t => t.AggTradeId).ShouldBe(Enumerable.Range(101, 2399).Select(i => (long)i));
+        source.Requests.ShouldBe([101L, 1101L, 2101L]);
+    }
+
+    [Fact]
+    public async Task TailOut_ShortPage_IsTheEndOfTheData()
+    {
+        var source = new FakeAggTrades(1, 120);
+
+        var result = await Filler(source).TailOutAsync(BtcId, "BTCUSDT", 100, T0.AddSeconds(10), _output.Writer, Ct);
+
+        result.ShouldBe(new GapFillResult(20, 120, Complete: true));
+        source.Requests.ShouldBe([101L]);
+    }
+
+    [Fact]
+    public async Task TailOut_NothingAfterTheLastDelivered_EmitsNothing()
+    {
+        var source = new FakeAggTrades(1, 3500);
+
+        var result = await Filler(source).TailOutAsync(BtcId, "BTCUSDT", 2600, T0.AddMilliseconds(2500), _output.Writer, Ct);
+
+        result.ShouldBe(new GapFillResult(0, null, Complete: true));
+        Emitted().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task TailOut_IsBoundedByThePageCap()
+    {
+        var source = new FakeAggTrades(1, 10_000);
+
+        var result = await Filler(source, maxPages: 2).TailOutAsync(BtcId, "BTCUSDT", 0, T0.AddSeconds(9), _output.Writer, Ct);
+
+        result.ShouldBe(new GapFillResult(2000, 2000, Complete: false));
+        source.Requests.ShouldBe([1L, 1001L]);
+    }
+
+    [Fact]
+    public async Task TailOut_PermanentFailure_GivesUp()
+    {
+        var source = new FakeAggTrades(1, 10);
+        source.Failures.Enqueue(new BinanceApiException("bad request", HttpStatusCode.BadRequest, isTransient: false, null));
+
+        var result = await Filler(source).TailOutAsync(BtcId, "BTCUSDT", 0, T0.AddSeconds(1), _output.Writer, Ct);
+
+        result.ShouldBe(new GapFillResult(0, null, Complete: false));
+    }
+
+    [Fact]
     public async Task FirstTradeIdFrom_ReturnsTheFirstTradeAtOrAfterTheTime()
     {
         var source = new FakeAggTrades(1, 3000);

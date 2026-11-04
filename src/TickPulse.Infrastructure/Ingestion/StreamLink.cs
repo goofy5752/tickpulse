@@ -16,6 +16,7 @@ internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsync
 {
     private readonly ConcurrentDictionary<string, IdSpan> _spans = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _handedOver = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTime> _lastTimes = new(StringComparer.OrdinalIgnoreCase);
 
     public BinanceWebSocketConnection Connection { get; } = connection;
 
@@ -40,11 +41,17 @@ internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsync
     public IEnumerable<KeyValuePair<string, IdSpan>> Spans => _spans;
 
     /// <summary>Notes a trade that reached the tick channel.</summary>
-    public void Record(string symbol, long tradeId) =>
+    public void Record(string symbol, long tradeId, DateTime tradeTimeUtc)
+    {
         _spans.AddOrUpdate(symbol, static (_, id) => new IdSpan(id, id), static (_, span, id) => span with { Last = Math.Max(span.Last, id) }, tradeId);
+        _lastTimes[symbol] = tradeTimeUtc; // the pump alone writes, in stream order
+    }
 
     /// <summary>The last trade id this link delivered for the symbol, if any yet.</summary>
     public long? LastId(string symbol) => _spans.TryGetValue(symbol, out var span) ? span.Last : null;
+
+    /// <summary>The trade time of the last trade this link delivered for the symbol, if any yet.</summary>
+    public DateTime? LastTradeTimeUtc(string symbol) => _lastTimes.TryGetValue(symbol, out var time) ? time : null;
 
     /// <summary>The first trade id this link delivered for the symbol, if any yet.</summary>
     public long? FirstId(string symbol) => _spans.TryGetValue(symbol, out var span) ? span.First : null;
@@ -75,6 +82,7 @@ internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsync
         GapFillHandled.Remove(symbol);
         _spans.TryRemove(symbol, out _);
         _handedOver.TryRemove(symbol, out _);
+        _lastTimes.TryRemove(symbol, out _);
     }
 
     public ValueTask DisposeAsync() => Connection.DisposeAsync();

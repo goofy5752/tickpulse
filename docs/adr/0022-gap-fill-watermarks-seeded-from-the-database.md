@@ -95,6 +95,15 @@ finds the first trade at or after the start of the current minute (minus 5 s for
 gap-fill completes that minute, so the first candle is not partial. A failed lookup is retried on the
 next connection.
 
+**Tail-out.** The mirror of the lead-in, for a symbol that is removed: its UNSUBSCRIBE takes effect
+mid-minute, so that minute would keep only the trades streamed before it, with a wrong close. Once the
+minute is over (plus 5 s), one bounded REST pass fetches the trades from the last id the connection
+delivered (or, when it has delivered none since a clean rotation, the id the retired connection handed
+over) up to the end of that minute, through the gap-fill path. It runs in the background and never
+delays the unsubscribe, and it moves no watermark (the removed symbol's entry is dropped). It stores nothing
+past that minute, so a later reactivation's backfill of the inactive stretch still starts right after it.
+Best-effort: a failure or the end of the session leaves the minute partial, as before.
+
 ## Alternatives
 
 - **Persisting the watermarks in a table.** Rejected: the ticks themselves already are the record of

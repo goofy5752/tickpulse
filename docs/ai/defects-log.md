@@ -16,8 +16,9 @@ being fixed. Style nits and refactors are not listed.
 - **Load test:** findings that showed up only under the heavier load that followed the E2E run (`F18`,
   and `F19`, which F18's crashes had hidden). They count with the E2E findings: 19 in all, `F1`–`F19`.
 - **Security scan:** the automated security review of the CD pipeline.
-- **Regression run:** a later end-to-end pass over the dashboard in headless Chrome against the full
-  local stack. Its findings are `N1` onwards.
+- **Regression run:** a second live run of the full stack against real Binance, on `main` after the F1–F19
+  fixes, which re-checked every earlier finding (the dashboard in headless Chrome included). Its findings are
+  `N1`–`N7`.
 
 **Updating an entry.** When a fix merges, put its PR number on the entry and adjust the fix and test lines
 if the final version differs.
@@ -72,7 +73,13 @@ if the final version differs.
 | [F17](#f17) | Symbol lists logged as quoted JSON arrays | E2E run | Minor | #16 |
 | [F18](#f18) | The API segfaulted (exit 139) under load | Load test | Critical | #18 |
 | [F19](#f19) | The local connection pool exceeded `max_connections`: 20–35 % 500s under load | Load test | Important | #18 |
-| [N1](#n1) | Fast symbol switches broke the chart's time scale: `Value is null` on every repaint | Regression run | Important | — |
+| [N1](#n1) | Fast symbol switches broke the chart's time scale: `Value is null` on every repaint | Regression run | Important | #25 |
+| [N2](#n2) | The minute a symbol is removed in kept a partial candle with a wrong close | Regression run | Minor | #27 |
+| [N3](#n3) | "In-flight" counted the dashboards' live hub connections | Regression run | Minor | #27 |
+| [N4](#n4) | Every static file became its own `http_route` value | Regression run | Minor | #27 |
+| [N5](#n5) | Every 406 logged a framework Warning | Regression run | Minor | #27 |
+| [N6](#n6) | Seeded symbols reported `NotRequested` while their backfill was queued | Regression run | Minor | #27 |
+| [N7](#n7) | Tempo was killed 1 s after every `down` | Regression run | Minor | #27 |
 
 ---
 
@@ -700,7 +707,7 @@ Found once [F18](#f18) stopped the crashes, which had hidden it. Fixed in the sa
 
 ### N1
 
-**Fast symbol switches broke the chart's time scale: `Value is null` on every repaint** · Regression run · Important · PR pending
+**Fast symbol switches broke the chart's time scale: `Value is null` on every repaint** · Regression run · Important · PR #25
 
 - **Symptom:**
   - On the 1w or 1m chart, switching symbols quickly (ADA, then BTC before ADA's candles arrive)
@@ -728,3 +735,93 @@ Found once [F18](#f18) stopped the crashes, which had hidden it. Fixed in the sa
   sequence and checks that every candle is still found at its index: `SetSeriesData_FastSymbolSwitch_KeepsEveryCandleOnTheTimeScale`
   failed before the fix (week 25 was lost) and passes after it. Verified in Chrome against the full
   stack: 0 console errors across fast switches on all five periods, against 3–10 before.
+
+### N2
+
+**The minute a symbol is removed in kept a partial candle with a wrong close** · Regression run · Minor · PR #27
+
+The residual part of [F6](#f6): F6 completed the minute a symbol starts streaming in, not the one it stops in.
+
+- **Symptom:** removing a symbol mid-minute left that minute with only the trades streamed before the
+  UNSUBSCRIBE (XRP 11:30: close 1.2926 against Binance's 1.2940, volume 1,510 against 26,007), so that
+  bucket's 1m SMA close was wrong.
+- **Root cause:** nothing fetched the trades between the UNSUBSCRIBE and the end of that minute; a
+  reactivation's backfill starts at the minute after the deactivation.
+- **Fix:** a tail-out, the mirror of the lead-in. After the UNSUBSCRIBE ack, once the minute the stream
+  stopped in is over (plus 5 s), one bounded gap-fill pass fetches `aggTrades?fromId=<last delivered + 1>`
+  up to that minute's end. It runs in the background, never delays the unsubscribe, moves no watermark and
+  never writes past that minute ([ADR 0022](../adr/0022-gap-fill-watermarks-seeded-from-the-database.md)).
+  A reactivation's backfill ends the inactive stretch at the first minute streamed since the reactivation (new
+  column `symbols.reactivated_at`), not at the first stream row after the deactivation: when the UNSUBSCRIBE took
+  effect late, the old stream and its tail-out store a minute after `deactivated_at`, and the stretch would have
+  ended there, unfilled.
+  Combined with the rotation handover of [F2](#f2) (PR #26): a symbol removed right after a clean rotation,
+  before the new connection delivered it, tails out from the id the retired connection handed over.
+- **Test:** `IngestionWorkerTests.RemovedSymbol_LastStreamedMinuteIsCompletedFromRest`,
+  `GapFillerTests.TailOut_*`, `BackfillWorkerTests.Reactivated_LateUnsubscribe_StillFillsTheInactiveStretch`,
+  `IngestionWorkerTests.RemovedRightAfterACleanRotation_TailsOutFromTheRetiredLinksLastId`.
+
+### N3
+
+**"In-flight" counted the dashboards' live hub connections** · Regression run · Minor · PR #27
+
+- **Symptom:** the API dashboard's In-flight stat read about 10 at an idle 1 req/s.
+- **Root cause:** `http_server_active_requests` counts every open request, and each open dashboard holds
+  one SignalR request open for as long as it is open. The gauge has no route to filter the hub out.
+- **Fix:** the stat subtracts the WebSocket transports of `signalr_server_active_connections` (the
+  `Microsoft.AspNetCore.Http.Connections` meter, now exported explicitly; long polling holds no request open between
+  polls), clamped at 0; the panel description says so.
+- **Test:** `DashboardQueryTests.InFlight_LeavesOutTheLiveHubConnections` (the panel's query on a real
+  Prometheus).
+
+### N4
+
+**Every static file became its own `http_route` value** · Regression run · Minor · PR #27
+
+- **Symptom:** the request metrics listed `assets/index-<hash>.js`, every font file and `favicon.svg` as
+  routes, plus a route-less series shown as "Value" in the legends.
+- **Root cause:** `MapStaticAssets` makes one endpoint per file, with the file path as its route. The names
+  carry a content hash, so every deploy added a new set of series.
+- **Fix:** the static-asset and fallback endpoints carry `http.route="static"`, and the dashboard responses
+  served without an endpoint (the fallback clears its own, `UseStaticFiles` has none) are tagged the same
+  way. `tickpulse.api.responses` already counted `/api` only. The per-route legends name the route-less
+  series `(no route)`.
+- **Test:** `DashboardAssetsTests.ManifestAssets_ShareTheStaticRouteLabel`,
+  `DashboardRequests_HaveABoundedRouteLabelSet`.
+
+### N5
+
+**Every 406 logged a framework Warning** · Regression run · Minor · PR #27
+
+- **Symptom:** each `Accept: text/csv` request logged MVC's "No output formatter was found" at Warning, on
+  top of the request log line, so one client could write a Warning per request past the request sampling.
+- **Fix:** MVC's `ObjectResultExecutor` is built with a logger that writes its Warnings at Debug. The 406
+  problem and the request log line (Information) are unchanged.
+- **Test:** `NegotiationTests.NotAcceptable_LogsNoFrameworkWarning_AndKeepsTheProblem`.
+
+### N6
+
+**Seeded symbols reported `NotRequested` while their backfill was queued** · Regression run · Minor · PR #27
+
+- **Symptom:** on a first start ADA and ETH showed `NotRequested` ("no history was requested") for 2.5–5
+  minutes, until the backfill reached them.
+- **Root cause:** the startup scan queued them without changing their status; only the admin use case set
+  `Pending`.
+- **Fix:** the scan marks every unfinished symbol it queues `Pending`, keeping `backfilled_from`. The update is
+  conditional (`is_active` and not `Completed`), so a symbol removed since the scan read it is not left Pending,
+  and a completion written meanwhile by another instance is not overwritten.
+- **Test:** `BackfillWorkerTests.StartupScan_MarksEveryQueuedSymbolPending`,
+  `SymbolRepositoryTests.MarkPendingIfUnfinished_OnlyAnActiveSymbolThatHasNotCompleted`.
+
+### N7
+
+**Tempo was killed 1 s after every `down`** · Regression run · Minor · PR #27
+
+- **Symptom:** `docker compose down` sent SIGTERM to Tempo, then SIGKILL 1 s later (exit 137).
+- **Root cause:** no observability service set a `stop_grace_period`, so Compose gave each 1 s. With 30 s,
+  Tempo was still killed: on SIGTERM its backend worker waits `finish_on_shutdown_timeout` (default 30 s) for its
+  current job, even with none running.
+- **Fix:** 30 s on all five, inherited by production through `extends`, and Tempo's
+  `backend_worker.finish_on_shutdown_timeout` set to 10 s. A live `down` then stopped every container with
+  SIGTERM only, exit 0, Tempo in 10 s.
+- **Test:** `ObservabilityComposeTests` (the grace periods, and Tempo's shutdown wait well inside them).
