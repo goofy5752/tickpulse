@@ -20,7 +20,7 @@
 #      deleted: the running containers keep reading the old files (same inodes) until step 5 recreates them.
 #   5. up -d --remove-orphans, and recreate the observability containers when their config changed
 #      (compose cannot see changes inside bind-mounted files)
-#   6. wait up to READY_TIMEOUT seconds (90) for /health/ready on 127.0.0.1:8085
+#   6. wait up to READY_TIMEOUT seconds (180) for /health/ready on 127.0.0.1:8085
 #   7. ./smoke.sh http://127.0.0.1:8085, retrying for SMOKE_WAIT seconds (120), which covers a first start on an
 #      empty database
 #   8. success: write <tag> to .last_good_tag, delete older api images, exit 0.
@@ -47,7 +47,11 @@ readonly API_URL=http://127.0.0.1:8085
 readonly IMAGE=ghcr.io/goofy5752/tickpulse-api
 readonly SCRIPTS=(smoke.sh deploy.sh)
 readonly OBSERVABILITY_SERVICES=(otel-collector prometheus loki tempo grafana)
-readonly READY_TIMEOUT="${READY_TIMEOUT:-90}"
+# How long a started tag gets to answer /health/ready. It must exceed the api's migration budget,
+# MigrationRetryOptions.Default.Timeout (120 s, src/TickPulse.Api/Hosting/DatabaseMigrator.cs), plus its startup:
+# a start that is still retrying its migrations must not be rolled back as failed.
+# DeployReadyTimeoutTests (tests/TickPulse.Integration.Tests) fails the build when the two drift apart.
+readonly READY_TIMEOUT="${READY_TIMEOUT:-180}"
 readonly SMOKE_WAIT="${SMOKE_WAIT:-120}"
 
 log() { printf '[deploy %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }

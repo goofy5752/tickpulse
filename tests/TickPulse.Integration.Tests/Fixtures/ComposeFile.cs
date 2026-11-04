@@ -14,7 +14,8 @@ public sealed partial class ComposeFile
     public const string Local = "docker-compose.yml";
     public const string Production = "deploy/docker-compose.prod.yml";
 
-    private static readonly string Root = FindRoot();
+    /// <summary>The repository root (the directory that holds <c>TickPulse.slnx</c>).</summary>
+    internal static readonly string Root = FindRoot();
 
     private readonly YamlMappingNode _root;
 

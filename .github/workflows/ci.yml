@@ -219,7 +219,7 @@ jobs:
       cancel-in-progress: false
     env:
       REMOTE_DIR: /srv/tickpulse
-      # How long to wait for deploy.sh on the server: pull, start, ready (90 s) and smoke (120 s), and the same
+      # How long to wait for deploy.sh on the server: pull, start, ready (180 s) and smoke (120 s), and the same
       # again for a rollback, fit with room to spare.
       DEPLOY_WAIT_SECONDS: 1200
     steps:
