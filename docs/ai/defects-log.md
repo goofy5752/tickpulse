@@ -83,6 +83,7 @@ if the final version differs.
 | [N8](#n8) | A tick flashed a lighter band across the price tiles | Owner, local run | Minor | #28 |
 | [N9](#n9) | The host's own real-IP setting would have denied every visitor | First server setup | Critical | #30 |
 | [N10](#n10) | The Grafana vhost became the host's default server for unknown names | First server setup | Important | #30 |
+| [N11](#n11) | The first deploy was refused: the CD job never uploaded `mask-env.sh` | First deploy | Important | TBD |
 
 ---
 
@@ -875,3 +876,16 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
   an unknown name before and after the reload.
 - **Check:** `curl -sk --resolve nope.example:443:127.0.0.1 https://nope.example/` reaches the host default site
   again.
+
+### N11
+
+**The first deploy was refused: the CD job never uploaded `mask-env.sh`** · First deploy · Important · PR TBD
+
+- **Symptom:** the first `deploy` job ended with "deploy.sh refused to deploy …":
+  `.incoming/mask-env.sh is missing from the upload; nothing was changed`.
+- **Root cause:** PR #22 made `deploy.sh` install `mask-env.sh` with the other scripts and refuse an upload
+  without it, but the job's `scp` list in `ci.yml` was not extended. The two lists live in different files and
+  nothing tied them together, and no deploy had run since.
+- **Fix:** the job uploads `deploy/mask-env.sh`. The refusal worked as designed: the server was left untouched.
+- **Test:** `DeployUploadTests.Upload_CarriesEveryScriptDeployShRequires` reads `SCRIPTS` from `deploy.sh` and the
+  job's `scp` upload, and fails when a required script is not sent.

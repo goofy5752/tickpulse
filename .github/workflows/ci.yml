@@ -284,7 +284,7 @@ jobs:
             echo "::error::Could not prepare $REMOTE_DIR/.incoming: SSH failed, or another deploy still holds the lock."
             exit 1
           fi
-          scp -rp deploy/docker-compose.prod.yml deploy/smoke.sh deploy/deploy.sh deploy/observability \
+          scp -rp deploy/docker-compose.prod.yml deploy/smoke.sh deploy/deploy.sh deploy/mask-env.sh deploy/observability \
             "tickpulse-prod:$REMOTE_DIR/.incoming/"
 
       - name: Start the deploy on the server
