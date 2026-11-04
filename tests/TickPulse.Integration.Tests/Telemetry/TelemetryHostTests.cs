@@ -77,6 +77,27 @@ public sealed class TelemetryHostTests(ApiFactory api) : IClassFixture<ApiFactor
     }
 
     [Fact]
+    public async Task SubscribedLog_ListsSymbolsAsPlainText()
+    {
+        var sink = new CapturingSink();
+        await using var host = LoggedHost(sink).WithWorkers().WithSystemClock();
+        await host.InitializeAsync();
+        _ = host.Services; // starts the host and the ingestion worker
+
+        LogEvent? entry = null;
+        await WaitForAsync(
+            () => (entry = sink.Events.FirstOrDefault(e => e.MessageTemplate.Text.StartsWith("Subscribed ", StringComparison.Ordinal))) is not null,
+            "the Subscribed log");
+
+        // "Subscribed 3 symbol(s): ADAUSDT, BTCUSDT, ETHUSDT", not a quoted JSON array.
+        var message = entry!.RenderMessage();
+        message.ShouldMatch(@"^Subscribed \d+ symbol\(s\): [A-Z0-9]{5,20}(, [A-Z0-9]{5,20})*$");
+        message.ShouldContain("BTCUSDT");
+        entry.Properties["Symbols"].ShouldBeOfType<ScalarValue>().Value.ShouldBeOfType<string>();
+        sink.Rendered().ShouldContain(line => line.Contains(message, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task RequestLog_Burst_LogsOrdinaryRequestsUpToTheBudget_AndEveryProblem()
     {
         var sink = new CapturingSink();
