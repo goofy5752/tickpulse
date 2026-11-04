@@ -46,6 +46,7 @@ dotnet tool run reportgenerator -reports:"coverage/**/coverage.cobertura.xml" \
 
 dotnet run --project src/TickPulse.Api                    # API (needs ConnectionStrings:TickPulse)
 dotnet run --project src/TickPulse.Cli -- avg BTCUSDT     # console client
+dotnet pack src/TickPulse.Cli -c Release                   # `tickpulse` dotnet tool; env TICKPULSE_API_URL, TICKPULSE_API_KEY
 
 docker compose up                                          # DB + API + dashboard, migrations, seed
 docker compose --profile observability up                  # plus collector, Loki, Tempo, Prometheus, Grafana

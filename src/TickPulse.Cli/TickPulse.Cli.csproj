@@ -2,7 +2,24 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <AssemblyName>TickPulse.Cli</AssemblyName>
+    <RootNamespace>TickPulse.Cli</RootNamespace>
+    <Description>Console client for the TickPulse market-data API: 24 h averages, simple moving averages, live watch and symbol administration.</Description>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>tickpulse</ToolCommandName>
+    <PackageId>TickPulse.Cli</PackageId>
+    <PackageTags>tickpulse;binance;crypto;cli;sma</PackageTags>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TickPulse.Cli.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Spectre.Console" />
+    <PackageReference Include="Spectre.Console.Json" />
+    <PackageReference Include="System.CommandLine" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\TickPulse.Contracts\TickPulse.Contracts.csproj" />
