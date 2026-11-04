@@ -1,6 +1,7 @@
 using System.Collections.Frozen;
 using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using TickPulse.Application.Results;
 
 namespace TickPulse.Api.Problems;
@@ -13,6 +14,9 @@ public static class ProblemFactory
 
     /// <summary>Name of the extension member that carries the request's trace id.</summary>
     public const string TraceIdKey = "traceId";
+
+    /// <summary>The detail of a <see cref="CreateValidation"/> problem; the <c>errors</c> member names the parameters.</summary>
+    public const string ValidationDetail = "One or more request parameters are invalid.";
 
     private static readonly FrozenDictionary<string, string> Titles = new Dictionary<string, string>(StringComparer.Ordinal)
     {
@@ -48,6 +52,39 @@ public static class ProblemFactory
             Extensions = { [TraceIdKey] = TraceId(httpContext) },
         };
     }
+
+    /// <summary>A problem for a use-case failure, with the HTTP status that the error maps to.</summary>
+    public static ProblemDetails Create(HttpContext httpContext, AppError error, string detail) =>
+        Create(httpContext, error, StatusFor(error), detail);
+
+    /// <summary>
+    /// A 400 <c>validation</c> problem listing the invalid request parameters (<c>errors</c>, keyed by parameter name),
+    /// for parameters that could not be bound or parsed.
+    /// </summary>
+    public static ValidationProblemDetails CreateValidation(HttpContext httpContext, ModelStateDictionary modelState)
+    {
+        ArgumentNullException.ThrowIfNull(httpContext);
+        ArgumentNullException.ThrowIfNull(modelState);
+
+        return new ValidationProblemDetails(modelState)
+        {
+            Type = TypeFor(ProblemSlugs.Validation),
+            Title = TitleFor(ProblemSlugs.Validation),
+            Status = StatusCodes.Status400BadRequest,
+            Detail = ValidationDetail,
+            Extensions = { [TraceIdKey] = TraceId(httpContext) },
+        };
+    }
+
+    /// <summary>The HTTP status of a use-case failure.</summary>
+    public static int StatusFor(AppError error) => error switch
+    {
+        AppError.UnknownSymbol or AppError.NoData => StatusCodes.Status404NotFound,
+        AppError.InvalidSymbol => StatusCodes.Status422UnprocessableEntity,
+        AppError.SymbolLimit => StatusCodes.Status409Conflict,
+        AppError.Validation => StatusCodes.Status400BadRequest,
+        _ => throw new ArgumentOutOfRangeException(nameof(error), error, "No status is defined for this error."),
+    };
 
     /// <summary>The problem slug of a use-case failure.</summary>
     public static string SlugFor(AppError error) => error switch

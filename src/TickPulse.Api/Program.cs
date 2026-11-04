@@ -4,6 +4,7 @@ using TickPulse.Api.Health;
 using TickPulse.Api.Hosting;
 using TickPulse.Api.Problems;
 using TickPulse.Api.Telemetry;
+using TickPulse.Application.Analytics;
 using TickPulse.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -28,7 +29,12 @@ services.AddControllers(o =>
         o.ReturnHttpNotAcceptable = true;
         o.RespectBrowserAcceptHeader = true;
     })
+    // Parameters that cannot be bound (n=abc, a missing p) get the same validation problem, negotiated, as every other error.
+    .ConfigureApiBehaviorOptions(o => o.InvalidModelStateResponseFactory = context =>
+        new ProblemResult(ProblemFactory.CreateValidation(context.HttpContext, context.ModelState)))
     .AddXmlDataContractSerializerFormatters();
+
+services.AddSingleton<AnalyticsService>();
 
 // Every problem (controllers, status code pages, exception handler, rate limiter) goes through these two writers:
 // XML when Accept prefers it, otherwise JSON. They replace the framework's JSON-only writers.
