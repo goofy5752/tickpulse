@@ -152,7 +152,7 @@ function readSymbol(body: unknown): string | null {
   try {
     const parsed: unknown = JSON.parse(body)
     const symbol = (parsed as { symbol?: unknown } | null)?.symbol
-    return typeof symbol === 'string' ? symbol : null
+    return typeof symbol === 'string' && symbol.trim() !== '' ? symbol : null
   } catch {
     return null
   }
@@ -171,8 +171,8 @@ function adminRoute(url: URL, method: string, headers: Headers, body: unknown): 
     if (method !== 'POST') return problem(405, 'validation', 'Method not allowed', `${method} is not supported here.`)
     const raw = readSymbol(body)
     if (raw === null) {
-      return problem(400, 'validation', 'Validation failed', 'The body must be {"symbol": "..."}.', {
-        symbol: ['The symbol field is required.'],
+      return problem(400, 'validation', 'Validation failed', 'symbol is required.', {
+        symbol: ['symbol is required.'],
       })
     }
     const outcome = market.addSymbol(raw)
