@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type FocusEvent as ReactFocusEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
@@ -24,10 +25,24 @@ interface InfoTipProps {
   placement?: TipSide
   /**
    * A custom trigger in place of the ⓘ icon (e.g. a status pill). It is named by its own content,
-   * and `className` then styles the whole trigger.
+   * or by `label`, and `className` then styles the whole trigger.
    */
   children?: ReactNode
+  /** Accessible name of a custom trigger whose visible content is not a good name by itself. */
+  label?: string
   className?: string
+}
+
+const TABBABLE =
+  'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+/** Moves focus to the next tabbable element after `from` in document order, skipping `skip`. */
+function focusAfter(from: HTMLElement, skip: HTMLElement | null) {
+  const all = Array.from(document.querySelectorAll<HTMLElement>(TABBABLE)).filter(
+    (el) => el.tabIndex >= 0 && !skip?.contains(el) && (el === from || typeof el.checkVisibility !== 'function' || el.checkVisibility()),
+  )
+  const next = all[all.indexOf(from) + 1]
+  ;(next ?? from).focus()
 }
 
 /** The ⓘ glyph, for triggers that show it inside their own content. */
@@ -48,7 +63,7 @@ export function InfoIcon({ className }: { className?: string }) {
  * (`aria-describedby` → `role="tooltip"`). The tooltip is portalled to <body>, so no panel's
  * overflow or backdrop-filter clips it, and it is positioned to stay inside the viewport.
  */
-export function InfoTip({ topic, placement = 'top', children, className }: InfoTipProps) {
+export function InfoTip({ topic, placement = 'top', children, label, className }: InfoTipProps) {
   const entry: HelpEntry = HELP[topic]
   const id = useId()
   const [open, setOpen] = useState(false)
@@ -57,6 +72,8 @@ export function InfoTip({ topic, placement = 'top', children, className }: InfoT
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
   /** The pointer type of the press in progress, so focus and click know a tap from a click. */
   const press = useRef<string | null>(null)
+  /** The tooltip's body is taller than the room it got, so keyboard users must be able to scroll it. */
+  const scrollable = useRef(false)
 
   const setNow = useCallback((next: boolean | ((open: boolean) => boolean)) => {
     clearTimeout(timer.current)
@@ -96,6 +113,11 @@ export function InfoTip({ topic, placement = 'top', children, className }: InfoT
       tip.style.maxHeight = `${placed.maxHeight}px`
       tip.style.setProperty('--tip-origin-x', `${placed.arrowX}px`)
       tip.dataset.side = placed.side
+      // Taller than its room: the body scrolls, so it joins the tab order right after the trigger.
+      const body = tip.querySelector<HTMLElement>('.info-tip-body')
+      scrollable.current = body !== null && body.scrollHeight > body.clientHeight + 1
+      if (body && scrollable.current) body.tabIndex = 0
+      else body?.removeAttribute('tabindex')
     }
     update()
     let frame = 0
@@ -115,18 +137,23 @@ export function InfoTip({ topic, placement = 'top', children, className }: InfoT
   // Escape and outside presses dismiss it.
   useEffect(() => {
     if (!open) return
+    // Capture phase, so the open tip handles Escape before anything else on the page (the phone
+    // menu, a confirm step), and only the tip closes.
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setNow(false)
+      if (event.key !== 'Escape') return
+      event.stopPropagation()
+      if (tipRef.current?.contains(document.activeElement)) triggerRef.current?.focus()
+      setNow(false)
     }
     const onPress = (event: PointerEvent) => {
       const target = event.target
       if (target instanceof Node && (triggerRef.current?.contains(target) || tipRef.current?.contains(target))) return
       setNow(false)
     }
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('keydown', onKey, true)
     document.addEventListener('pointerdown', onPress, true)
     return () => {
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('keydown', onKey, true)
       document.removeEventListener('pointerdown', onPress, true)
     }
   }, [open, setNow])
@@ -140,13 +167,20 @@ export function InfoTip({ topic, placement = 'top', children, className }: InfoT
   const stayOpen = (event: ReactPointerEvent) => {
     if (event.pointerType === 'mouse') clearTimeout(timer.current)
   }
+  /** Focus moving between the trigger and the tooltip keeps it open; anywhere else closes it. */
+  const focusLeaves = (event: ReactFocusEvent) => {
+    const next = event.relatedTarget
+    if (next instanceof Node && (triggerRef.current?.contains(next) || tipRef.current?.contains(next))) return
+    press.current = null
+    setNow(false)
+  }
 
   return (
     <>
       <button
         ref={triggerRef}
         type="button"
-        aria-label={children === undefined ? `About ${entry.title}` : undefined}
+        aria-label={children === undefined ? `About ${entry.title}` : label}
         aria-describedby={open ? id : undefined}
         data-help={topic}
         data-open={open ? '' : undefined}
@@ -160,9 +194,14 @@ export function InfoTip({ topic, placement = 'top', children, className }: InfoT
           if (press.current === 'touch' || press.current === 'pen') return
           setNow(true)
         }}
-        onBlur={() => {
-          press.current = null
-          setNow(false)
+        onBlur={focusLeaves}
+        onKeyDown={(event) => {
+          // The tooltip lives at the end of <body>; Tab steps into it when it needs scrolling.
+          if (event.key !== 'Tab' || event.shiftKey || !open || !scrollable.current) return
+          const body = tipRef.current?.querySelector<HTMLElement>('.info-tip-body')
+          if (!body) return
+          event.preventDefault()
+          body.focus()
         }}
         onClick={() => {
           const kind = press.current
@@ -193,6 +232,15 @@ export function InfoTip({ topic, placement = 'top', children, className }: InfoT
             className="info-tip"
             onPointerEnter={stayOpen}
             onPointerLeave={hoverOut}
+            onBlur={focusLeaves}
+            onKeyDown={(event) => {
+              // From the scrollable body, Shift+Tab returns to the trigger and Tab continues after it.
+              const trigger = triggerRef.current
+              if (event.key !== 'Tab' || !trigger) return
+              event.preventDefault()
+              if (event.shiftKey) trigger.focus()
+              else focusAfter(trigger, tipRef.current)
+            }}
           >
             <TipBody entry={entry} />
           </div>,
@@ -204,7 +252,7 @@ export function InfoTip({ topic, placement = 'top', children, className }: InfoT
 
 function TipBody({ entry }: { entry: HelpEntry }) {
   return (
-    <div className="info-tip-body">
+    <div className="info-tip-body" role="group" aria-label={entry.title}>
       <p className="info-tip-title">{entry.title}</p>
       <p className="info-tip-summary">{entry.summary}</p>
       {entry.items && (

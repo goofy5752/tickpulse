@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { HELP } from '@/content/help'
 import { placeTip } from '@/lib/placeTip'
 import { InfoTip } from './InfoTip'
@@ -69,6 +69,65 @@ describe('InfoTip', () => {
     // Enter brings it back for someone who dismissed it.
     await user.keyboard('{Enter}')
     expect(screen.getByRole('tooltip')).toBeTruthy()
+  })
+
+  it('InfoTip_Escape_ClosesOnlyTheTip_WhileItIsOpen', async () => {
+    const escapes = vi.fn()
+    const outer = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') escapes()
+    }
+    window.addEventListener('keydown', outer)
+    try {
+      const { user } = setup()
+      await user.tab()
+      await user.tab()
+      expect(screen.getByRole('tooltip')).toBeTruthy()
+      await user.keyboard('{Escape}')
+      expect(screen.queryByRole('tooltip')).toBeNull()
+      expect(escapes).not.toHaveBeenCalled()
+      // Closed, a second Escape reaches the page (e.g. closes the phone menu).
+      await user.keyboard('{Escape}')
+      expect(escapes).toHaveBeenCalledTimes(1)
+    } finally {
+      window.removeEventListener('keydown', outer)
+    }
+  })
+
+  it('InfoTip_OverflowingBody_IsReachableByKeyboard', async () => {
+    // jsdom has no layout: make every tooltip body report more content than room.
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('info-tip-body') ? 600 : 0
+    })
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('info-tip-body') ? 200 : 0
+    })
+    const { user, trigger } = setup()
+    await user.tab()
+    await user.tab()
+    const body = screen.getByRole('tooltip').querySelector<HTMLElement>('.info-tip-body')
+    expect(body?.tabIndex).toBe(0)
+
+    await user.tab()
+    expect(document.activeElement).toBe(body)
+    expect(screen.getByRole('tooltip')).toBeTruthy()
+
+    await user.tab({ shift: true })
+    expect(document.activeElement).toBe(trigger)
+    expect(screen.getByRole('tooltip')).toBeTruthy()
+
+    await user.tab()
+    await user.tab()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'After' }))
+    expect(screen.queryByRole('tooltip')).toBeNull()
+  })
+
+  it('InfoTip_FittingBody_StaysOutOfTheTabOrder', async () => {
+    const { user } = setup()
+    await user.tab()
+    await user.tab()
+    expect(screen.getByRole('tooltip').querySelector('.info-tip-body')?.hasAttribute('tabindex')).toBe(false)
+    await user.tab()
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'After' }))
   })
 
   it('InfoTip_ClosesWhenFocusLeaves', async () => {

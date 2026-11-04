@@ -59,6 +59,14 @@ describe('StatusPill', () => {
     expect(status()).toBe(expected)
   })
 
+  it('StatusPill_IsATipTrigger_WithTheLiveRegionOutsideIt', () => {
+    render(<StatusPill hubStatus="connected" stats={stats('Connected')} />)
+
+    const trigger = screen.getByRole('button', { name: 'Binance stream live, ingest lag 38 ms' })
+    expect(trigger.dataset.help).toBe('navStatus')
+    expect(trigger.contains(screen.getByRole('status'))).toBe(false)
+  })
+
   it('StatusPill_NotLive_HidesLag', () => {
     const { container } = render(<StatusPill hubStatus="connected" stats={stats('Disconnected')} />)
 

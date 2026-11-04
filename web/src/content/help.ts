@@ -34,9 +34,9 @@ export const HELP = {
     summary: 'Whether TickPulse is receiving Binance trades right now, and how far behind storage is.',
     items: [
       { term: 'Binance live', text: 'The API holds an open WebSocket to Binance and stores trades as they arrive. Phones show "Live".' },
-      { term: '38 ms lag', text: 'Ingest lag: time from a trade on Binance to its row in the database, for the newest trade of the last stored batch. Turns rose above 5 s.' },
+      { term: '… ms lag', text: 'Ingest lag: time from a trade on Binance to its row in the database, for the newest trade of the last stored batch. Turns rose above 5 s.' },
       { term: 'Connecting', text: 'The API is opening its Binance connection, or this page is still connecting to the API.' },
-      { term: 'Standby', text: 'The instance answering is not the ingestion leader; another instance collects the trades.' },
+      { term: 'Standby', text: 'The instance answering does not collect trades itself; another instance does, and this one answers API requests.' },
       { term: 'Feed down', text: 'The Binance stream is disconnected. TickPulse reconnects on its own and fetches the trades it missed from Binance.' },
       { term: 'Reconnecting', text: "This page lost its live connection to the API and is retrying; figures are polled over HTTP meanwhile." },
       { term: 'Offline', text: 'This page cannot reach the API at all.' },
@@ -101,7 +101,7 @@ export const HELP = {
     summary: 'Candles for the selected symbol and period, with the SMA line and its calculation window.',
     details: [
       'Pick the symbol with the tiles above and the period with the buttons on the right. Scroll or pinch to zoom, drag to pan; on a phone a vertical swipe still scrolls the page.',
-      'Each period opens on a sensible range: 6 h of 1m, 24 h of 5m, 7 days of 30m, a year of 1d and five years of 1w candles, more when the SMA window needs it (up to 1,000 candles).',
+      'Each period opens on a sensible range: 6 h of 1m, 24 h of 5m, 7 days of 30m, a year of 1d and five years of 1w candles, more when the SMA window needs it (up to 1,000 candles), shown as far as history reaches: about six months with backfill.',
     ],
   },
 
@@ -132,7 +132,7 @@ export const HELP = {
     summary: 'The rolling simple moving average, with the same n and p as the SMA figure.',
     details: [
       'Each point averages the closes of the n buckets that end at that candle. Buckets without trades are skipped, never filled in. The line starts only where a full n-bucket span lies inside the loaded candles.',
-      'The open candle is left out, so the last point equals the SMA figure in the panel. The "SMA n" label on the price axis marks that value.',
+      'The open candle is left out. At the window\'s last bucket the line takes the panel\'s SMA value exactly; without a start, that is where the line ends. The "SMA n" label on the price axis marks that value.',
     ],
     example: 'n = 20, p = 1d: each point is the mean close of the 20 days ending that day',
   },
@@ -162,7 +162,7 @@ export const HELP = {
     summary: 'The arithmetic mean price of every trade TickPulse collected in [now − 24 h, now].',
     details: [
       'Each trade counts once, whatever its size, so this is not a volume-weighted price and differs from Binance\'s weightedAvgPrice. Rounded to 8 decimals by the API; refreshed every 15 s.',
-      'Only trades collected live count. Backfilled history never enters this figure. With less than a day of data, the mean covers what exists and Coverage says how much.',
+      'Only trades TickPulse stored itself count, including missed trades it fetched again after a reconnect. Backfilled candles never enter this figure. With less than a day of data, the mean covers what exists and Coverage says how much.',
     ],
     example: 'trades at 100, 101 and 105\n(100 + 101 + 105) ÷ 3 = 102',
   },
@@ -205,13 +205,7 @@ export const HELP = {
   smaP: {
     title: 'Period (p)',
     summary: 'The bucket width. It also switches the chart to the same period.',
-    items: [
-      { term: '1m', mono: true, text: 'One-minute buckets.' },
-      { term: '5m', mono: true, text: 'Five-minute buckets, from :00, :05, :10 …' },
-      { term: '30m', mono: true, text: 'Half-hour buckets, from :00 and :30.' },
-      { term: '1d', mono: true, text: 'UTC days, from 00:00.' },
-      { term: '1w', mono: true, text: 'Weeks from Monday 00:00 UTC.' },
-    ],
+    details: ['The same widths as the chart\'s candle period: 1m, 5m, 30m, 1d and 1w, aligned to UTC, with weeks starting on Monday.'],
   },
 
   smaS: {
@@ -234,7 +228,7 @@ export const HELP = {
     title: 'SMA value',
     summary: 'The average of the closes in the window: their sum divided by the points found.',
     details: ['Rounded to 8 decimals by the API. Violet, like the SMA line on the chart, which ends at this value.'],
-    example: 'closes 78,354.00, 76,816.00 and 77,453.86\nsum ÷ 3 = 77,541.29',
+    example: 'closes 78,354.00, 76,816.00 and 77,453.86\nsum ÷ 3 = 77,541.28666667 (shown as 77,541.29)',
   },
 
   smaDots: {
@@ -287,7 +281,7 @@ export const HELP = {
     title: 'Accept header',
     summary: 'Content negotiation: the same request answered as JSON or as XML.',
     details: [
-      'Switching re-sends the request at once so you can compare. Errors follow the same choice, as application/problem+json or application/problem+xml.',
+      'After the first send, switching re-sends the request at once so you can compare. Errors follow the same choice, as application/problem+json or application/problem+xml.',
     ],
     example: 'JSON: {"symbol":"BTCUSDT","averagePrice":78292.65925926,…}\nXML:  <averagePrice xmlns="https://tickpulse.dev/schema/v1"><symbol>BTCUSDT</symbol>…',
   },
@@ -422,7 +416,7 @@ export const HELP = {
     summary: 'Starts collecting the pair: TickPulse subscribes to its trades and loads its history.',
     details: [
       'Live trades start within seconds. Where backfill is on, about six months of 1-minute candles are loaded from Binance, roughly 2 minutes per symbol, one symbol at a time. That history feeds the chart and the SMA, never the 24h average.',
-      'A symbol that was removed before is reactivated, and the stretch it missed is filled in. Adding one that is already active changes nothing.',
+      'A symbol that was removed before is reactivated. Where backfill is on, the stretch it missed is filled with 1-minute candles, which feed the chart and the SMA but not the 24h average. Adding one that is already active changes nothing.',
     ],
   },
 
@@ -439,11 +433,11 @@ export const HELP = {
     title: 'Backfill status',
     summary: 'Whether the historical candles for each symbol are loaded.',
     items: [
-      { term: 'Live only', text: 'Backfill is off on this server; only live trades are collected.' },
+      { term: 'Live only', text: 'No history has been loaded for this symbol yet. This is normal when backfill is off. With backfill on, a symbol from the initial set may show this until its turn comes; it then shows Backfilling.' },
       { term: 'Backfill queued', text: 'Waiting its turn; symbols are loaded one at a time.' },
       { term: 'Backfilling', text: 'Loading 1-minute candles from Binance now.' },
-      { term: 'Backfilled', text: 'History is loaded; long-period SMAs have their points.' },
-      { term: 'Backfill failed', text: 'History could not be loaded. Live trades still arrive, and it is retried when the service restarts.' },
+      { term: 'Backfilled', text: 'History is loaded (about six months by default); long-period SMAs have their points.' },
+      { term: 'Backfill failed', text: 'History could not be loaded. Live trades still arrive, and it is retried automatically when an instance next takes over ingestion (for example after a restart) or when a Binance ban ends.' },
     ],
   },
 
@@ -451,7 +445,7 @@ export const HELP = {
     title: 'Remove',
     summary: 'Stops collecting a pair. Its history is kept.',
     details: [
-      'You confirm in place first. The subscription stops and the tile goes, but stored trades and candles stay, and the API still answers queries for the pair. Adding it again resumes collection and fills the gap.',
+      'You confirm in place first. The subscription stops and the tile goes, but stored trades and candles stay, and the API still answers queries for the pair. Adding it again resumes collection; where backfill is on, the stretch it missed is filled with 1-minute candles, which feed the chart and the SMA but not the 24h average.',
     ],
   },
 
@@ -462,7 +456,7 @@ export const HELP = {
     summary: 'How the ingestion pipeline of the API instance serving this page is doing.',
     items: [
       { term: 'Binance connected', text: 'The trade stream is open. Otherwise connecting, standby or disconnected.' },
-      { term: 'Leader', text: 'This instance holds the leader lock and collects trades. A follower only serves the API.' },
+      { term: 'Leader, Follower', text: 'Only one instance collects trades at a time; the others just answer API requests. The badge says which kind is serving this page.' },
     ],
     details: [
       'Figures arrive every 2 s over the live connection; while it is down they are polled over HTTP every 10 s, as the line at the bottom says.',
@@ -472,7 +466,7 @@ export const HELP = {
   systemTicks: {
     title: 'Ticks per second',
     summary: 'Trades stored per second, averaged over roughly the last 10 seconds.',
-    details: ['The small line shows the last 30 updates, about one minute. It rises and falls with market activity across all active symbols.'],
+    details: ['The small line shows the last 30 updates, about one minute (longer while figures are polled). It rises and falls with market activity across all active symbols.'],
   },
 
   systemLag: {

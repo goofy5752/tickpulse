@@ -59,46 +59,51 @@ export function StatusPill({ hubStatus, stats }: StatusPillProps) {
   const showLag = state.tone === 'live' && stats !== null
   const slow = showLag && stats.ingestLagMs > SLOW_LAG_MS
   const styles = toneStyles[state.tone]
+  // The trigger's name: the state, plus the lag while live. It is read on focus, never announced.
+  const name = showLag ? `${state.description}, ingest lag ${formatLag(stats.ingestLagMs)}` : state.description
 
   return (
-    <InfoTip
-      topic="navStatus"
-      placement="bottom"
-      className={cn(
-        'inline-flex h-9 shrink-0 items-center gap-2 rounded-full border pr-3.5 pl-3 text-[0.8125rem] whitespace-nowrap transition-colors duration-150 focus-visible:rounded-full sm:pr-3',
-        styles.pill,
-        'data-open:border-sma/50',
-      )}
-    >
-      <span aria-hidden="true" className={cn('relative size-2 rounded-full', styles.dot)} />
-      {/* Announce state changes only; the lag ticks every 2 s and would be noise. */}
+    <>
+      {/* Announce state changes only; the lag ticks every 2 s and would be noise. Kept outside the
+          button, so the live region is not part of an interactive control. */}
       <span className="sr-only" role="status">
         {state.description}
       </span>
-      <span aria-hidden="true" className="font-medium text-ink">
-        {state.tone === 'live' ? (
-          <>
-            <span className="sm:hidden">Live</span>
-            <span className="hidden sm:inline">Binance live</span>
-          </>
-        ) : (
-          state.label
+      <InfoTip
+        topic="navStatus"
+        placement="bottom"
+        label={name}
+        className={cn(
+          'inline-flex h-9 shrink-0 items-center gap-2 rounded-full border pr-3.5 pl-3 text-[0.8125rem] whitespace-nowrap transition-colors duration-150 focus-visible:rounded-full sm:pr-3',
+          styles.pill,
+          'data-open:border-sma/50',
         )}
-      </span>
-      {showLag && (
-        <>
-          <span aria-hidden="true" className="h-3.5 w-px bg-glass-border" />
-          <span className={cn('num text-ink-muted', slow && 'text-down')}>
-            <span className="sr-only">ingest lag </span>
-            {formatLag(stats.ingestLagMs)}
-            <span aria-hidden="true" className="hidden sm:inline">
-              {' '}
-              lag
+      >
+        <span aria-hidden="true" className={cn('relative size-2 rounded-full', styles.dot)} />
+        <span aria-hidden="true" className="font-medium text-ink">
+          {state.tone === 'live' ? (
+            <>
+              <span className="sm:hidden">Live</span>
+              <span className="hidden sm:inline">Binance live</span>
+            </>
+          ) : (
+            state.label
+          )}
+        </span>
+        {showLag && (
+          <>
+            <span aria-hidden="true" className="h-3.5 w-px bg-glass-border" />
+            <span className={cn('num text-ink-muted', slow && 'text-down')}>
+              {formatLag(stats.ingestLagMs)}
+              <span aria-hidden="true" className="hidden sm:inline">
+                {' '}
+                lag
+              </span>
             </span>
-          </span>
-        </>
-      )}
-      <InfoIcon className="hidden text-ink-faint sm:block" />
-    </InfoTip>
+          </>
+        )}
+        <InfoIcon className="hidden text-ink-faint sm:block" />
+      </InfoTip>
+    </>
   )
 }
