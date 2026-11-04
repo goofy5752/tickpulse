@@ -19,7 +19,8 @@ public sealed class SymbolResponse
 
     /// <summary>
     /// <c>(latest − close 24 h ago) / close 24 h ago × 100</c>, to 2 decimal places; <see langword="null"/> when
-    /// either price is unknown.
+    /// either price is unknown, or when no close exists within 15 minutes before <c>now − 24 h</c> (for example
+    /// while the history backfill has not reached that far yet).
     /// </summary>
     [DataMember(Name = "change24hPercent", Order = 4)]
     public decimal? Change24hPercent { get; init; }

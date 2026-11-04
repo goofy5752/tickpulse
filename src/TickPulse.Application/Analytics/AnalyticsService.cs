@@ -26,6 +26,13 @@ public sealed class AnalyticsService(
     /// <summary>The largest candle <c>limit</c>; it matches the infrastructure query's bound.</summary>
     public const int MaxCandleLimit = 1000;
 
+    /// <summary>
+    /// How far before the minute of <c>now − 24 h</c> the reference close of the 24 h change may lie. An older
+    /// reference (a backfill that has not reached <c>now − 24 h</c> yet, or a gap in the data) would measure a
+    /// longer stretch than 24 h, so the change is null instead.
+    /// </summary>
+    public static readonly TimeSpan DayAgoCloseTolerance = TimeSpan.FromMinutes(15);
+
     private static readonly TimeSpan AverageWindow = TimeSpan.FromHours(AverageWindowHours);
     /// <summary>The detail of the validation failure for an <c>s</c> after the current time.</summary>
     public const string FutureStartDetail = "s must not be in the future.";
@@ -114,9 +121,10 @@ public sealed class AnalyticsService(
 
     /// <summary>
     /// Every symbol TickPulse monitors or used to monitor. The latest price is the live one, or the last stored
-    /// close; the 24 h change compares it with the close at or before <c>now − 24 h</c>, and is null when the latest
-    /// price is itself that old (it would be compared with itself). Three queries in all, whatever the number of
-    /// symbols.
+    /// close; the 24 h change compares it with the close at or before <c>now − 24 h</c>. The change is null when the
+    /// latest price is itself that old (it would be compared with itself), and when that close lies more than
+    /// <see cref="DayAgoCloseTolerance"/> before the minute of <c>now − 24 h</c> (it would span far more than 24 h,
+    /// as while a backfill is still below <c>now − 24 h</c>). Three queries in all, whatever the number of symbols.
     /// </summary>
     public async Task<AppResult<IReadOnlyList<SymbolSummary>>> ListSymbolsAsync(CancellationToken ct)
     {
@@ -128,6 +136,7 @@ public sealed class AnalyticsService(
 
         var now = Now();
         var dayAgoUtc = now - AverageWindow;
+        var oldestReferenceUtc = Period.OneMinute.AlignDown(dayAgoUtc) - DayAgoCloseTolerance;
         var live = all.ToDictionary(
             s => s.Id,
             s => ingestion.Latest.TryGetValue(s.Name, out var price) ? new PricePoint(price.TradeTimeUtc, price.Price) : (PricePoint?)null);
@@ -142,7 +151,7 @@ public sealed class AnalyticsService(
         foreach (var s in all)
         {
             var latest = live[s.Id] ?? (fallback.TryGetValue(s.Id, out var close) ? close : null);
-            decimal? then = dayAgo.TryGetValue(s.Id, out var old) ? old.Close : null;
+            decimal? then = dayAgo.TryGetValue(s.Id, out var old) && old.BucketStart >= oldestReferenceUtc ? old.Close : null;
             var change = latest is { } current && current.BucketStart > dayAgoUtc ? ChangePercent(current.Close, then) : null;
             summaries.Add(new SymbolSummary(s.Name, s.IsActive, latest?.Close, change, s.BackfillStatus));
         }
