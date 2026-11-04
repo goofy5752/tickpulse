@@ -189,6 +189,19 @@
   backdrop-filter: blur(var(--blur-glass)) saturate(140%);
 }
 
+/*
+ * Glass without the backdrop blur, for surfaces that repaint on every tick (the price tiles).
+ * Chrome re-renders a blurred backdrop over the repainted area, and the blur pulls in light from
+ * beyond the tile's edge, which showed as a lighter band across its top. The tiles sit on the
+ * near-black page, where the blur changed nothing visible anyway.
+ */
+@utility glass-still {
+  background-color: var(--color-glass);
+  border: 1px solid var(--color-glass-border);
+  border-radius: var(--radius-glass);
+  box-shadow: var(--shadow-glass);
+}
+
 /* Any element that shows a number. */
 @utility num {
   font-variant-numeric: tabular-nums;

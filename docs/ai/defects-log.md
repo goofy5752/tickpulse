@@ -839,5 +839,7 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
   start on every tick.
 - **Fix:** the price element stays mounted: the digits take the direction's colour at once and ease back by a
   CSS colour transition, and the glow is a separate layer behind the content (`tile-flash`) that animates
-  opacity only, restarting from its current opacity so quick ticks swell it again. Reduced motion shows neither.
+  opacity only, restarting from its current opacity so quick ticks swell it again. Reduced motion shows neither. The tiles also
+  drop the backdrop blur (`glass-still`): on the near-black page it changed nothing visible, and it was what
+  re-rendered over each repaint.
 - **Test:** `TickerTiles.test.tsx`, `Tile_Tick_KeepsThePriceElement_AndEasesTheTintBack`.

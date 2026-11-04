@@ -193,7 +193,7 @@ const Tile = memo(function Tile({ symbol, live, selected, onSelect }: TileProps)
       }}
       aria-pressed={selected}
       className={cn(
-        'glass group relative isolate flex w-full flex-col p-4 text-left transition-[background-color,border-color] duration-200 hover:bg-glass-strong',
+        'glass-still group relative isolate flex w-full flex-col p-4 text-left transition-[background-color,border-color] duration-200 hover:bg-glass-strong',
         selected && 'tile-selected',
       )}
     >
