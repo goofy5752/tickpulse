@@ -34,10 +34,11 @@ public sealed partial class PostgresLeaderLock : ILeaderLock
 
     /// <param name="connectionString">The TickPulse database; pooling is turned off for the lock's connection.</param>
     /// <param name="logger">Logger for acquisitions and losses.</param>
-    /// <param name="allowGssEncryption">
-    /// <c>Database:AllowGssEncryption</c>: GSS encryption stays off unless it is true (see <see cref="NpgsqlConnectionPolicy"/>).
+    /// <param name="settings">
+    /// The <c>Database</c> settings (see <see cref="NpgsqlConnectionPolicy"/>); defaults when null. The pool size does not
+    /// apply: the lock's connection is unpooled.
     /// </param>
-    public PostgresLeaderLock(string connectionString, ILogger<PostgresLeaderLock>? logger = null, bool allowGssEncryption = false)
+    public PostgresLeaderLock(string connectionString, ILogger<PostgresLeaderLock>? logger = null, NpgsqlPolicySettings? settings = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 
@@ -49,7 +50,7 @@ public sealed partial class PostgresLeaderLock : ILeaderLock
             CommandTimeout = CommandTimeoutSeconds,
             ApplicationName = "tickpulse-leader",
         };
-        NpgsqlConnectionPolicy.Apply(builder, allowGssEncryption);
+        NpgsqlConnectionPolicy.Apply(builder, settings ?? NpgsqlPolicySettings.Default);
         _connectionString = builder.ConnectionString;
         _logger = (ILogger?)logger ?? NullLogger.Instance;
     }

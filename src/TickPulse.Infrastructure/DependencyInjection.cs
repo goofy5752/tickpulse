@@ -40,22 +40,22 @@ public static class DependencyInjection
         services.TryAddSingleton(TimeProvider.System);
 
         // Every connection the app opens comes from these two data sources or the leader lock, and each applies
-        // NpgsqlConnectionPolicy itself (GSS encryption off unless Database:AllowGssEncryption). EF Core, and so the
+        // NpgsqlConnectionPolicy itself (GSS encryption off, a bounded pool: Database:*). EF Core, and so the
         // migrator, run on the shared data source.
         services.AddSingleton(sp =>
         {
             var connectionString = RequiredConnectionString(configuration);
-            var allowGss = NpgsqlConnectionPolicy.AllowGssEncryption(configuration);
+            var settings = NpgsqlConnectionPolicy.Settings(configuration);
             var loggerFactory = sp.GetService<ILoggerFactory>();
-            NpgsqlConnectionPolicy.WarnIfOverridden(connectionString, allowGss, loggerFactory);
-            return BuildDataSource(connectionString, loggerFactory, allowGss);
+            NpgsqlConnectionPolicy.WarnIfOverridden(connectionString, settings, loggerFactory);
+            return BuildDataSource(connectionString, loggerFactory, settings);
         });
         services.AddKeyedSingleton(
             TickWriterDataSourceKey,
             (sp, _) => BuildTickWriterDataSource(
                 RequiredConnectionString(configuration),
                 sp.GetService<ILoggerFactory>(),
-                NpgsqlConnectionPolicy.AllowGssEncryption(configuration)));
+                NpgsqlConnectionPolicy.Settings(configuration)));
 
         services.AddDbContext<TickPulseDbContext>((sp, options) => options.UseNpgsql(sp.GetRequiredService<NpgsqlDataSource>()));
 
@@ -117,7 +117,7 @@ public static class DependencyInjection
             new PostgresLeaderLock(
                 RequiredConnectionString(configuration),
                 sp.GetService<ILogger<PostgresLeaderLock>>(),
-                NpgsqlConnectionPolicy.AllowGssEncryption(configuration)),
+                NpgsqlConnectionPolicy.Settings(configuration)),
             sp.GetRequiredService<IStreamConnectionFactory>(),
             sp.GetRequiredService<SymbolReconciler>(),
             sp.GetRequiredService<TickBatchWriter>(),
@@ -167,11 +167,11 @@ public static class DependencyInjection
     /// <summary>The shared data source used by every component except the tick writer.</summary>
     /// <param name="connectionString">The TickPulse database.</param>
     /// <param name="loggerFactory">Npgsql's logger factory, if any.</param>
-    /// <param name="allowGssEncryption"><c>Database:AllowGssEncryption</c> (see <see cref="NpgsqlConnectionPolicy"/>).</param>
-    public static NpgsqlDataSource BuildDataSource(string connectionString, ILoggerFactory? loggerFactory, bool allowGssEncryption = false)
+    /// <param name="settings">The <c>Database</c> settings (see <see cref="NpgsqlConnectionPolicy"/>); defaults when null.</param>
+    public static NpgsqlDataSource BuildDataSource(string connectionString, ILoggerFactory? loggerFactory, NpgsqlPolicySettings? settings = null)
     {
         var builder = new NpgsqlDataSourceBuilder(connectionString);
-        NpgsqlConnectionPolicy.Apply(builder.ConnectionStringBuilder, allowGssEncryption);
+        NpgsqlConnectionPolicy.Apply(builder.ConnectionStringBuilder, settings ?? NpgsqlPolicySettings.Default);
         if (loggerFactory is not null)
         {
             builder.UseLoggerFactory(loggerFactory);
@@ -192,11 +192,11 @@ public static class DependencyInjection
     /// </remarks>
     /// <param name="connectionString">The TickPulse database.</param>
     /// <param name="loggerFactory">Npgsql's logger factory, if any.</param>
-    /// <param name="allowGssEncryption"><c>Database:AllowGssEncryption</c> (see <see cref="NpgsqlConnectionPolicy"/>).</param>
-    public static NpgsqlDataSource BuildTickWriterDataSource(string connectionString, ILoggerFactory? loggerFactory, bool allowGssEncryption = false)
+    /// <param name="settings">The <c>Database</c> settings (see <see cref="NpgsqlConnectionPolicy"/>); defaults when null.</param>
+    public static NpgsqlDataSource BuildTickWriterDataSource(string connectionString, ILoggerFactory? loggerFactory, NpgsqlPolicySettings? settings = null)
     {
         var builder = new NpgsqlDataSourceBuilder(connectionString);
-        NpgsqlConnectionPolicy.Apply(builder.ConnectionStringBuilder, allowGssEncryption);
+        NpgsqlConnectionPolicy.Apply(builder.ConnectionStringBuilder, settings ?? NpgsqlPolicySettings.Default);
         builder.ConnectionStringBuilder.NoResetOnClose = true;
         builder.ConnectionStringBuilder.MaxPoolSize = TickWriterMaxPoolSize;
         if (loggerFactory is not null)

@@ -1,6 +1,7 @@
 using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using TickPulse.Infrastructure;
 using TickPulse.Infrastructure.Persistence;
 
 namespace TickPulse.Api.Hosting;
@@ -33,7 +34,22 @@ public sealed partial class DatabaseMigrator(
         }
 
         await RunWithRetryAsync(MigrateOnceAsync, MigrationRetryOptions.Default, clock, logger, cancellationToken);
+        await CheckConnectionBudgetAsync(cancellationToken);
     }
+
+    // The database is reachable now. A pool that does not fit the server's max_connections only shows under load, as
+    // refused connections; say so at startup instead.
+    private async Task CheckConnectionBudgetAsync(CancellationToken cancellationToken)
+    {
+        await using var scope = scopes.CreateAsyncScope();
+        var shared = scope.ServiceProvider.GetRequiredService<NpgsqlDataSource>();
+        var writer = scope.ServiceProvider.GetRequiredKeyedService<NpgsqlDataSource>(DependencyInjection.TickWriterDataSourceKey);
+        var budget = NpgsqlConnectionPolicy.ConnectionBudget(MaxPoolSize(shared), MaxPoolSize(writer));
+        await NpgsqlConnectionPolicy.CheckBudgetAsync(shared, budget, logger, cancellationToken);
+    }
+
+    private static int MaxPoolSize(NpgsqlDataSource dataSource) =>
+        new NpgsqlConnectionStringBuilder(dataSource.ConnectionString).MaxPoolSize;
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 

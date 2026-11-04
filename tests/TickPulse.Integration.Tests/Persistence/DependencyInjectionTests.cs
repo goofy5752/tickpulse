@@ -237,7 +237,7 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
     [Fact]
     public async Task PostgresLeaderLock_WithTheOptIn_KeepsAnExplicitGssEncryptionMode()
     {
-        await using var leaderLock = new PostgresLeaderLock(db.ConnectionString + ";GSS Encryption Mode=Require", allowGssEncryption: true);
+        await using var leaderLock = new PostgresLeaderLock(db.ConnectionString + ";GSS Encryption Mode=Require", settings: new NpgsqlPolicySettings(AllowGssEncryption: true));
 
         GssMode(leaderLock.ConnectionString).ShouldBe(GssEncryptionMode.Require);
     }
@@ -252,6 +252,68 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
 
         GssMode(shared.ConnectionString).ShouldBe(GssEncryptionMode.Disable);
         GssMode(writer.ConnectionString).ShouldBe(GssEncryptionMode.Disable);
+    }
+
+    [Theory]
+    [InlineData("", null, 20)]
+    [InlineData("", "7", 7)]
+    [InlineData(";Maximum Pool Size=50", "7", 50)]
+    public void AddTickPulseInfrastructure_SharedPool_IsBounded_WriterKeepsItsOwnSize(string setting, string? configured, int expected)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:TickPulse"] = db.ConnectionString + setting,
+                [NpgsqlConnectionPolicy.MaxPoolSizeKey] = configured,
+            })
+            .Build();
+        using var provider = new ServiceCollection()
+            .AddTickPulseInfrastructure(configuration)
+            .BuildServiceProvider();
+
+        new NpgsqlConnectionStringBuilder(provider.GetRequiredService<NpgsqlDataSource>().ConnectionString).MaxPoolSize.ShouldBe(expected);
+        new NpgsqlConnectionStringBuilder(provider.GetRequiredKeyedService<NpgsqlDataSource>(DependencyInjection.TickWriterDataSourceKey).ConnectionString)
+            .MaxPoolSize.ShouldBe(DependencyInjection.TickWriterMaxPoolSize);
+    }
+
+    [Fact]
+    public void AddTickPulseInfrastructure_InvalidMaxPoolSize_FailsOnResolve()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:TickPulse"] = db.ConnectionString,
+                [NpgsqlConnectionPolicy.MaxPoolSizeKey] = "0",
+            })
+            .Build();
+        using var provider = new ServiceCollection()
+            .AddTickPulseInfrastructure(configuration)
+            .BuildServiceProvider();
+
+        Should.Throw<InvalidOperationException>(provider.GetRequiredService<NpgsqlDataSource>).Message.ShouldContain("Database:MaxPoolSize");
+    }
+
+    // The test server runs PostgreSQL's defaults: max_connections 100, 3 reserved for superusers.
+    [Theory]
+    [InlineData(25, false)]
+    [InlineData(95, true)]
+    public async Task CheckBudgetAsync_WarnsWhenTheApiCouldTakeTheHeadroom(int budget, bool warned)
+    {
+        using var logs = new FakeLoggerProvider();
+        using var factory = LoggerFactory.Create(b => b.AddProvider(logs));
+        await using var dataSource = DependencyInjection.BuildDataSource(db.ConnectionString, null);
+
+        var available = await NpgsqlConnectionPolicy.CheckBudgetAsync(dataSource, budget, factory.CreateLogger("test"), TestContext.Current.CancellationToken);
+
+        available.ShouldBe(97);
+        var warnings = logs.Collector.GetSnapshot().Where(r => r.Level == LogLevel.Warning).ToList();
+        warnings.Count.ShouldBe(warned ? 1 : 0);
+        if (warned)
+        {
+            warnings[0].Message.ShouldBe(
+                "The API may open 95 database connections, but PostgreSQL allows 97 for ordinary roles and 10 should stay free; "
+                + "lower Database:MaxPoolSize (or Maximum Pool Size) or raise max_connections");
+        }
     }
 
     [Fact]

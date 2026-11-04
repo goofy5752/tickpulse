@@ -15,7 +15,7 @@ public sealed class NpgsqlConnectionPolicyTests
     [Fact]
     public void Apply_NoModeInTheConnectionString_Disables()
     {
-        Mode(NpgsqlConnectionPolicy.Apply(Base, allowGssEncryption: false)).ShouldBe(GssEncryptionMode.Disable);
+        Mode(NpgsqlConnectionPolicy.Apply(Base, NpgsqlPolicySettings.Default)).ShouldBe(GssEncryptionMode.Disable);
     }
 
     [Theory]
@@ -26,7 +26,7 @@ public sealed class NpgsqlConnectionPolicyTests
     [InlineData("GSS Encryption Mode=Disable")]
     public void Apply_AnyExplicitMode_WithoutTheOptIn_Disables(string setting)
     {
-        Mode(NpgsqlConnectionPolicy.Apply($"{Base};{setting}", allowGssEncryption: false)).ShouldBe(GssEncryptionMode.Disable);
+        Mode(NpgsqlConnectionPolicy.Apply($"{Base};{setting}", NpgsqlPolicySettings.Default)).ShouldBe(GssEncryptionMode.Disable);
     }
 
     [Theory]
@@ -36,20 +36,20 @@ public sealed class NpgsqlConnectionPolicyTests
     [InlineData("GSS Encryption Mode=Disable", GssEncryptionMode.Disable)]
     public void Apply_ExplicitMode_WithTheOptIn_IsKept(string setting, GssEncryptionMode expected)
     {
-        Mode(NpgsqlConnectionPolicy.Apply($"{Base};{setting}", allowGssEncryption: true)).ShouldBe(expected);
+        Mode(NpgsqlConnectionPolicy.Apply($"{Base};{setting}", new NpgsqlPolicySettings(AllowGssEncryption: true))).ShouldBe(expected);
     }
 
     [Fact]
     public void Apply_NoModeInTheConnectionString_WithTheOptIn_StillDisables()
     {
         // The opt-in only lets an explicit choice through; Npgsql's implicit default (Prefer) is never used.
-        Mode(NpgsqlConnectionPolicy.Apply(Base, allowGssEncryption: true)).ShouldBe(GssEncryptionMode.Disable);
+        Mode(NpgsqlConnectionPolicy.Apply(Base, new NpgsqlPolicySettings(AllowGssEncryption: true))).ShouldBe(GssEncryptionMode.Disable);
     }
 
     [Fact]
     public void Apply_KeepsEveryOtherSetting()
     {
-        var applied = new NpgsqlConnectionStringBuilder(NpgsqlConnectionPolicy.Apply(Base, allowGssEncryption: false));
+        var applied = new NpgsqlConnectionStringBuilder(NpgsqlConnectionPolicy.Apply(Base, NpgsqlPolicySettings.Default));
 
         applied.Host.ShouldBe("db");
         applied.Port.ShouldBe(5432);
@@ -62,9 +62,9 @@ public sealed class NpgsqlConnectionPolicyTests
     [Fact]
     public void Apply_IsIdempotent()
     {
-        var once = NpgsqlConnectionPolicy.Apply($"{Base};GSS Encryption Mode=Require", allowGssEncryption: false);
+        var once = NpgsqlConnectionPolicy.Apply($"{Base};GSS Encryption Mode=Require", NpgsqlPolicySettings.Default);
 
-        NpgsqlConnectionPolicy.Apply(once, allowGssEncryption: false).ShouldBe(once);
+        NpgsqlConnectionPolicy.Apply(once, NpgsqlPolicySettings.Default).ShouldBe(once);
     }
 
     [Theory]
@@ -78,9 +78,68 @@ public sealed class NpgsqlConnectionPolicyTests
             .AddInMemoryCollection(new Dictionary<string, string?> { [NpgsqlConnectionPolicy.AllowGssEncryptionKey] = value })
             .Build();
 
-        NpgsqlConnectionPolicy.AllowGssEncryption(configuration).ShouldBe(expected);
+        NpgsqlConnectionPolicy.Settings(configuration).AllowGssEncryption.ShouldBe(expected);
         NpgsqlConnectionPolicy.AllowGssEncryptionKey.ShouldBe("Database:AllowGssEncryption");
     }
+
+    [Fact]
+    public void Apply_NoPoolSizeInTheConnectionString_UsesTheConfiguredSize()
+    {
+        PoolSize(NpgsqlConnectionPolicy.Apply("Host=db", NpgsqlPolicySettings.Default)).ShouldBe(NpgsqlConnectionPolicy.DefaultMaxPoolSize);
+        PoolSize(NpgsqlConnectionPolicy.Apply("Host=db", new NpgsqlPolicySettings(MaxPoolSize: 7))).ShouldBe(7);
+        NpgsqlConnectionPolicy.DefaultMaxPoolSize.ShouldBe(20);
+    }
+
+    [Theory]
+    [InlineData("Maximum Pool Size=50")]
+    [InlineData("maximum pool size=50")]
+    [InlineData("MaxPoolSize=50")]
+    public void Apply_ExplicitPoolSize_IsKept(string setting)
+    {
+        PoolSize(NpgsqlConnectionPolicy.Apply($"Host=db;{setting}", new NpgsqlPolicySettings(MaxPoolSize: 7))).ShouldBe(50);
+    }
+
+    [Fact]
+    public void Apply_MinimumAboveTheMaximum_Fails()
+    {
+        Should.Throw<InvalidOperationException>(() => NpgsqlConnectionPolicy.Apply("Host=db;Minimum Pool Size=30", NpgsqlPolicySettings.Default))
+            .Message.ShouldContain("Minimum Pool Size (30)");
+    }
+
+    [Theory]
+    [InlineData(null, 20)]
+    [InlineData("", 20)]
+    [InlineData("35", 35)]
+    [InlineData(" 1 ", 1)]
+    [InlineData("1024", 1024)]
+    public void Settings_ReadsTheMaxPoolSize(string? value, int expected)
+    {
+        NpgsqlConnectionPolicy.Settings(Configuration(NpgsqlConnectionPolicy.MaxPoolSizeKey, value)).MaxPoolSize.ShouldBe(expected);
+        NpgsqlConnectionPolicy.MaxPoolSizeKey.ShouldBe("Database:MaxPoolSize");
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("1025")]
+    [InlineData("abc")]
+    [InlineData("2.5")]
+    public void Settings_InvalidMaxPoolSize_FailsWithTheKey(string value)
+    {
+        Should.Throw<InvalidOperationException>(() => NpgsqlConnectionPolicy.Settings(Configuration(NpgsqlConnectionPolicy.MaxPoolSizeKey, value)))
+            .Message.ShouldContain("Database:MaxPoolSize");
+    }
+
+    [Fact]
+    public void ConnectionBudget_IsBothPoolsPlusTheLeaderLock()
+    {
+        NpgsqlConnectionPolicy.ConnectionBudget(20, 4).ShouldBe(25);
+    }
+
+    private static int PoolSize(string connectionString) => new NpgsqlConnectionStringBuilder(connectionString).MaxPoolSize;
+
+    private static IConfiguration Configuration(string key, string? value) =>
+        new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { [key] = value }).Build();
 
     [Theory]
     [InlineData("GSS Encryption Mode=Require", false, true)]
@@ -90,6 +149,6 @@ public sealed class NpgsqlConnectionPolicyTests
     [InlineData("GSS Encryption Mode=Require", true, false)]
     public void OverridesExplicitMode_TellsWhenAConfiguredModeIsIgnored(string setting, bool allow, bool expected)
     {
-        NpgsqlConnectionPolicy.OverridesExplicitMode($"{Base};{setting}", allow).ShouldBe(expected);
+        NpgsqlConnectionPolicy.OverridesExplicitMode($"{Base};{setting}", new NpgsqlPolicySettings(AllowGssEncryption: allow)).ShouldBe(expected);
     }
 }

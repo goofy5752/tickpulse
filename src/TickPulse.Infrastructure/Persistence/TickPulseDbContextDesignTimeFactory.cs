@@ -8,6 +8,6 @@ internal sealed class TickPulseDbContextDesignTimeFactory : IDesignTimeDbContext
 {
     public TickPulseDbContext CreateDbContext(string[] args) =>
         new(new DbContextOptionsBuilder<TickPulseDbContext>()
-            .UseNpgsql(NpgsqlConnectionPolicy.Apply("Host=localhost;Database=tickpulse", allowGssEncryption: false))
+            .UseNpgsql(NpgsqlConnectionPolicy.Apply("Host=localhost;Database=tickpulse", NpgsqlPolicySettings.Default))
             .Options);
 }

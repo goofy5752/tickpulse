@@ -77,9 +77,15 @@ internal sealed class OtlpExport : IDisposable
 
     public MeterProvider? Metrics { get; }
 
-    /// <summary>Flushes what is pending (bounded by the exporters' own timeouts) and stops both pipelines.</summary>
+    /// <summary>
+    /// Flushes what is pending and stops both pipelines in parallel, waiting at most
+    /// <see cref="TelemetrySetup.ShutdownFlushTimeout"/>, so a collector that is down cannot hold the stopping process
+    /// (the providers' own wait is 5 s each, plus whatever an export in flight takes).
+    /// </summary>
     public void Dispose()
     {
+        var timeout = (int)TelemetrySetup.ShutdownFlushTimeout.TotalMilliseconds;
+        Parallel.Invoke(() => Tracing?.Shutdown(timeout), () => Metrics?.Shutdown(timeout));
         Tracing?.Dispose();
         Metrics?.Dispose();
     }
