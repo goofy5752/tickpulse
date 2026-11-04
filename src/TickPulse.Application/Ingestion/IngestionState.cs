@@ -125,7 +125,10 @@ public sealed class IngestionState(TimeProvider clock)
         }
     }
 
-    /// <summary>Time from trade to storage of the newest tick in the last stored batch, in milliseconds.</summary>
+    /// <summary>
+    /// Time from trade to storage of the newest tick in the last stored batch that sampled it (streamed trades, not ones
+    /// recovered over REST), in milliseconds.
+    /// </summary>
     public double LastLagMs
     {
         get
@@ -190,8 +193,15 @@ public sealed class IngestionState(TimeProvider clock)
     /// Records a stored batch: <paramref name="stored"/> newly stored ticks, the lag of its newest tick, and the last
     /// price per symbol in it. A price older than the one already known (e.g. from a gap-fill) is ignored.
     /// </summary>
+    /// <param name="stored">Ticks the batch newly stored.</param>
+    /// <param name="lagMs">
+    /// Trade-to-storage lag of the batch's newest tick, or <see langword="null"/> when the batch says nothing about
+    /// ingest lag (trades recovered over REST long after they traded, or nothing new): <see cref="LastLagMs"/> keeps
+    /// the previous sample.
+    /// </param>
+    /// <param name="latest">The last price per symbol in the batch.</param>
     /// <exception cref="AggregateException">One or more <see cref="PriceUpdated"/> handlers threw; all were still called.</exception>
-    public void RecordBatch(int stored, double lagMs, IEnumerable<LivePrice> latest)
+    public void RecordBatch(int stored, double? lagMs, IEnumerable<LivePrice> latest)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(stored);
         ArgumentNullException.ThrowIfNull(latest);
@@ -201,7 +211,10 @@ public sealed class IngestionState(TimeProvider clock)
             var now = clock.GetTimestamp();
             _rate = (_rate * Decay(now)) + (stored / RateWindow.TotalSeconds);
             _rateTimestamp = now;
-            _lastLagMs = lagMs;
+            if (lagMs is { } lag)
+            {
+                _lastLagMs = lag;
+            }
         }
 
         List<LivePrice>? advanced = null;

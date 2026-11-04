@@ -93,6 +93,19 @@ public sealed class IngestionStateTests
     }
 
     [Fact]
+    public void RecordBatch_WithoutALagSample_KeepsTheLastLag()
+    {
+        var state = new IngestionState(_clock);
+
+        state.RecordBatch(1, 120.5, []);
+        state.RecordBatch(3, null, [new("BTCUSDT", 100m, T0)]); // a recovered batch: its age is not ingest lag
+
+        state.LastLagMs.ShouldBe(120.5);
+        state.TicksPerSecond.ShouldBe(4 / IngestionState.RateWindow.TotalSeconds, 1e-9);
+        state.Latest["BTCUSDT"].Price.ShouldBe(100m);
+    }
+
+    [Fact]
     public void RecordBatch_FailingHandler_StillCallsTheOthers()
     {
         var state = new IngestionState(_clock);
