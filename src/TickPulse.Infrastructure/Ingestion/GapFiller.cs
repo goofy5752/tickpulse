@@ -18,6 +18,10 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// (an empty or short page: from then on the already subscribed stream carries every trade), or
 /// <see cref="MaxPages"/> pages were read. Only trades below the stream's first id are emitted. The result says
 /// whether the gap was closed.
+/// <para>The <c>tickpulse.gapfill.trades</c> counter counts the trades emitted into the channel. That includes any
+/// overlap with trades already stored (a fill that starts below a stored stretch, a replayed range), which the primary
+/// key then skips, so it can exceed the number of trades that were actually missing. The tick writer reports inserted
+/// rows per symbol and batch only, without telling recovered from streamed ticks.</para>
 /// </remarks>
 public sealed partial class GapFiller(
     IAggTradeSource source,
@@ -144,11 +148,14 @@ public sealed partial class GapFiller(
 
     /// <summary>
     /// The id of the first trade of <paramref name="symbol"/> at or after <paramref name="fromUtc"/> (and within the
-    /// hour after it), from REST <c>aggTrades?startTime</c>. <see langword="null"/> when there is none or the request
-    /// failed. A symbol that starts streaming fills from there to its first streamed trade, so the minute it started in
-    /// is complete.
+    /// hour after it), from REST <c>aggTrades?startTime</c>. A symbol that starts streaming fills from there to its first
+    /// streamed trade, so the minute it started in is complete.
     /// </summary>
-    public async Task<long?> FirstTradeIdFromAsync(string symbol, DateTime fromUtc, CancellationToken ct)
+    /// <returns>
+    /// <c>Succeeded</c> is <see langword="false"/> when the request failed (worth trying again later);
+    /// <c>FirstId</c> is <see langword="null"/> when nothing traded in that hour.
+    /// </returns>
+    public async Task<(bool Succeeded, long? FirstId)> FirstTradeIdFromAsync(string symbol, DateTime fromUtc, CancellationToken ct)
     {
         if (!SymbolName.TryCreate(symbol, out var name))
         {
@@ -160,7 +167,7 @@ public sealed partial class GapFiller(
             "time " + fromUtc.ToString("O", CultureInfo.InvariantCulture),
             token => source.GetAggTradesFromTimeAsync(name, fromUtc, 1, token),
             ct).ConfigureAwait(false);
-        return trades is [var first, ..] ? first.Id : null;
+        return trades is null ? (false, null) : (true, trades is [var first, ..] ? first.Id : null);
     }
 
     // Null when the symbol has to be given up: a permanent error, a ban, or transient errors that persisted.

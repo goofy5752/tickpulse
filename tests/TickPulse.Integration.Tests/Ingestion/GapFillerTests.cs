@@ -132,14 +132,14 @@ public sealed class GapFillerTests
         var source = new FakeAggTrades(1, 3000);
         var filler = Filler(source);
 
-        (await filler.FirstTradeIdFromAsync("BTCUSDT", T0.AddMilliseconds(1500), Ct)).ShouldBe(1500);
-        (await filler.FirstTradeIdFromAsync("BTCUSDT", T0.AddTicks(15_005_000), Ct)).ShouldBe(1501);
-        (await filler.FirstTradeIdFromAsync("BTCUSDT", T0.AddSeconds(4), Ct)).ShouldBeNull(); // nothing traded since
+        (await filler.FirstTradeIdFromAsync("BTCUSDT", T0.AddMilliseconds(1500), Ct)).ShouldBe((true, 1500L));
+        (await filler.FirstTradeIdFromAsync("BTCUSDT", T0.AddTicks(15_005_000), Ct)).ShouldBe((true, 1501L));
+        (await filler.FirstTradeIdFromAsync("BTCUSDT", T0.AddSeconds(4), Ct)).ShouldBe((true, (long?)null)); // nothing traded since: done, nothing to fill
         source.TimeRequests.ShouldBe([T0.AddMilliseconds(1500), T0.AddTicks(15_005_000), T0.AddSeconds(4)]);
     }
 
     [Fact]
-    public async Task FirstTradeIdFrom_TransientFailure_Retries_PermanentFailure_ReturnsNull()
+    public async Task FirstTradeIdFrom_TransientFailure_Retries_PermanentFailure_ReportsFailure()
     {
         var source = new FakeAggTrades(1, 3);
         source.Failures.Enqueue(new BinanceApiException("unavailable", HttpStatusCode.ServiceUnavailable, isTransient: true, null));
@@ -151,12 +151,12 @@ public sealed class GapFillerTests
                 return source.TimeRequests.Count == 2;
             },
             "the retry");
-        (await lookup.WaitAsync(IngestionTestHost.WaitTimeout, Ct)).ShouldBe(1);
+        (await lookup.WaitAsync(IngestionTestHost.WaitTimeout, Ct)).ShouldBe((true, 1L));
 
         source.Failures.Enqueue(new BinanceApiException("bad request", HttpStatusCode.BadRequest, isTransient: false, null));
-        (await Filler(source).FirstTradeIdFromAsync("BTCUSDT", T0, Ct)).ShouldBeNull();
+        (await Filler(source).FirstTradeIdFromAsync("BTCUSDT", T0, Ct)).ShouldBe((false, (long?)null)); // failed: worth another try
         source.Failures.Enqueue(new BinanceBannedException(T0.AddHours(2)));
-        (await Filler(source).FirstTradeIdFromAsync("BTCUSDT", T0, Ct)).ShouldBeNull();
+        (await Filler(source).FirstTradeIdFromAsync("BTCUSDT", T0, Ct)).ShouldBe((false, (long?)null));
     }
 
     private GapFiller Filler(IAggTradeSource source, int maxPages = GapFiller.DefaultMaxPages) =>

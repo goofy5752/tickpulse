@@ -16,6 +16,7 @@ internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsync
 {
     private readonly ConcurrentDictionary<string, long> _firstIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _lastIds = new(StringComparer.OrdinalIgnoreCase);
+    private int _end = -1; // a LinkEnd once retired
 
     public BinanceWebSocketConnection Connection { get; } = connection;
 
@@ -45,6 +46,22 @@ internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsync
         _firstIds.TryAdd(symbol, tradeId);
         _lastIds.AddOrUpdate(symbol, static (_, id) => id, static (_, last, id) => Math.Max(last, id), tradeId);
     }
+
+    /// <summary>
+    /// Whether the link broke: retired as <see cref="LinkEnd.Broken"/>, or its connection ended before the control loop
+    /// retired it. A link that a rotation replaced did not break; the new one overlapped it. Thread-safe.
+    /// </summary>
+    public bool EndedBroken
+    {
+        get
+        {
+            var end = Volatile.Read(ref _end);
+            return end == (int)LinkEnd.Broken || (end < 0 && Connection.Completion.IsCompleted);
+        }
+    }
+
+    /// <summary>Records how the link's life ended, before it is disposed. Control loop only.</summary>
+    public void MarkEnded(LinkEnd end) => Volatile.Write(ref _end, (int)end);
 
     /// <summary>The first trade id this link delivered for the symbol, if any yet.</summary>
     public long? FirstId(string symbol) => _firstIds.TryGetValue(symbol, out var id) ? id : null;

@@ -24,7 +24,9 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// <see cref="IngestionState.IsLeader"/> and never touch the lock.</para>
 /// <para>Starting a session seeds <see cref="GapFillWatermarks"/> from the database (each active symbol's last stored
 /// trade id within <see cref="SeedWindow"/>) before anything is subscribed, so the first connection gap-fills the trades
-/// that happened while no instance led: a restart, a redeploy, a crash or a handover loses nothing.</para>
+/// that happened after the last stored one while this process did not lead (a restart, a redeploy, a crash, a
+/// handover). Holes below the last stored trade that only another process knew about are not visible to the seed (see
+/// <see cref="GapFillWatermarks.Seed"/>).</para>
 /// <para>Ending a session (shutdown or lost leadership) clears <see cref="IngestionState.IsLeader"/>, stops accepting
 /// trades (no more commands, the pumps and gap-fills stop), completes the channel and writes what it still holds within
 /// <see cref="FlushDeadline"/>, closes the connections and only then releases the lock. Ticks that could not be written

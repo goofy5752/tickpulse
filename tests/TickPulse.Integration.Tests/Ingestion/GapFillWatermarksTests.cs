@@ -141,15 +141,49 @@ public sealed class GapFillWatermarksTests
     }
 
     [Fact]
-    public void Seed_KeepsWhatTheProcessKnows()
+    public void Seed_RaisesAKnownEntryToTheStoredId_UnlessItHasAHole()
     {
-        _marks.Merge([new("BTCUSDT", 100)], gap: true);
-        _marks.Lower("ETHUSDT", 40); // a dropped batch: the database may already hold later trades
+        // This process led until id 100; another instance led since and stored up to 150.
+        Activate("BTCUSDT", "ETHUSDT", "ADAUSDT");
+        _marks.Merge([new("BTCUSDT", 100), new("ADAUSDT", 70)], gap: true);
+        _marks.Lower("ETHUSDT", 40); // a dropped batch: trades from 40 are missing although later ones may be stored
+        _marks.TryGetStart("BTCUSDT", pendingOnly: true, out _, out var before).ShouldBeTrue();
 
-        _marks.Seed([new("BTCUSDT", 150), new("ETHUSDT", 90)]);
+        _marks.Seed([new("BTCUSDT", 150), new("ETHUSDT", 90), new("ADAUSDT", 60)]);
 
-        Start("BTCUSDT", pendingOnly: true).ShouldBe(100);
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(150);
         Start("ETHUSDT", pendingOnly: true).ShouldBe(39);
+        Start("ADAUSDT", pendingOnly: true).ShouldBe(70); // never lowered by the seed
+
+        // The raise invalidates a fill that started from the old id.
+        _marks.Filled("BTCUSDT", before);
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(150);
+    }
+
+    [Fact]
+    public void Filled_ClearsTheHole_SoALaterSeedRaisesAgain()
+    {
+        _marks.Lower("BTCUSDT", 40);
+        _marks.TryGetStart("BTCUSDT", pendingOnly: true, out _, out var version).ShouldBeTrue();
+        _marks.Filled("BTCUSDT", version);
+
+        _marks.Seed([new("BTCUSDT", 90)]);
+
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(90);
+    }
+
+    [Fact]
+    public void Merge_Gap_InvalidatesAFillThatIsRunning()
+    {
+        _marks.Seed([new("BTCUSDT", 10)]);
+        _marks.TryGetStart("BTCUSDT", pendingOnly: true, out _, out var version).ShouldBeTrue();
+
+        // The connection the fill is bounded by breaks while it runs.
+        _marks.Merge([new("BTCUSDT", 25)], gap: true);
+        _marks.Filled("BTCUSDT", version);
+        _marks.Advance("BTCUSDT", 20, version);
+
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(10); // still open, from where it was
     }
 
     [Fact]

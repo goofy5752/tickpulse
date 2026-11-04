@@ -44,6 +44,7 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     private TaskCompletionSource? _klinesHold;
     private (int Status, int Remaining, int? RetryAfterSeconds)? _klinesFailure;
     private (int Status, int Remaining)? _exchangeInfoFailure;
+    private (int Status, int Remaining)? _aggTradesFailure;
     private (int Code, string Msg)? _rejectNext;
     private bool _suppressNextAck;
     private int _rateLimitDisconnects;
@@ -324,6 +325,19 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         lock (_gate)
         {
             _klinesFailure = (status, count, retryAfterSeconds);
+        }
+    }
+
+    /// <summary>
+    /// The next <paramref name="count"/> <c>aggTrades</c> requests answer <paramref name="status"/> with a Binance error
+    /// body, e.g. <c>400</c> (a permanent error). Later requests are served normally.
+    /// </summary>
+    public void FailNextAggTrades(int status, int count = 1)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
+        lock (_gate)
+        {
+            _aggTradesFailure = (status, count);
         }
     }
 
@@ -882,14 +896,26 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     private async Task HandleAggTradesAsync(HttpContext context)
     {
         Task? hold;
+        (int Status, int Remaining)? failure = null;
         lock (_gate)
         {
             hold = _aggTradesHold?.Task;
+            if (_aggTradesFailure is { } next)
+            {
+                failure = next;
+                _aggTradesFailure = next.Remaining > 1 ? next with { Remaining = next.Remaining - 1 } : null;
+            }
         }
 
         if (hold is not null)
         {
             await hold.WaitAsync(context.RequestAborted);
+        }
+
+        if (failure is { } fail)
+        {
+            await WriteAsync(context, fail.Status, Error(-1000, "Injected failure."));
+            return;
         }
 
         if (!TryResolveSymbol(context, out var symbol, out var error))

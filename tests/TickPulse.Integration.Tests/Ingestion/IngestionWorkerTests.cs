@@ -338,6 +338,145 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task HandoverAndBack_FillsFromTheOtherLeadersLastStoredTrade()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var t0 = Now.AddMinutes(-5);
+        var logs = new LogCapture();
+        await using var services = IngestionServices(logs);
+        var aState = services.GetRequiredService<IngestionState>();
+        var aLock = new YieldingLeaderLock(new PostgresLeaderLock(db.ConnectionString));
+        using var a = NewWorker(services, aLock);
+        await a.StartAsync(ct);
+        try
+        {
+            // Instance A leads and stores 1..5.
+            await _server.WaitUntilAsync(s => s.ActiveConnections == 1 && s.SubscribedStreams.SetEquals(Seeded.Select(Stream)), WaitTimeout, ct);
+            await WaitForAsync(() => aState.Status == WsState.Connected, "A connected");
+            for (var i = 1; i <= 5; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 5);
+
+            // A loses leadership; instance B takes over and stores 6..10, then goes away.
+            await using (var b = await StartAsync(db, _server))
+            {
+                aLock.Yield = true;
+                await WaitForAsync(() => b.State.IsLeader && b.State.Status == WsState.Connected && !aState.IsLeader, "B leads");
+                await _server.WaitUntilAsync(s => s.ActiveConnections == 1 && s.SubscribedStreams.SetEquals(Seeded.Select(Stream)), WaitTimeout, ct);
+                for (var i = 6; i <= 10; i++)
+                {
+                    await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+                }
+
+                await WaitForTradeCountAsync(db, "BTCUSDT", 10);
+            }
+
+            await _server.WaitUntilAsync(s => s.ActiveConnections == 0, WaitTimeout, ct);
+            for (var i = 11; i <= 15; i++)
+            {
+                _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i)); // nobody leads
+            }
+
+            // A leads again. Its own watermark (5, from when it lost leadership) is older than what B stored.
+            var requestsBefore = _server.ReceivedRequests.Count;
+            aLock.Yield = false;
+            await _server.WaitUntilAsync(s => s.ActiveConnections == 1 && s.SubscribedStreams.SetEquals(Seeded.Select(Stream)), WaitTimeout, ct);
+            await WaitForAsync(() => aState.IsLeader && aState.Status == WsState.Connected, "A leads again");
+            for (var i = 16; i <= 20; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 20);
+            (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 20).Select(i => (long)i));
+            (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(20);
+            _server.ReceivedRequests.Skip(requestsBefore).Where(r => r.Contains("symbol=BTCUSDT&fromId=", StringComparison.Ordinal))
+                .ShouldBe(["/api/v3/aggTrades?symbol=BTCUSDT&fromId=11&limit=1000"]); // from B's last stored trade
+        }
+        finally
+        {
+            await a.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task SeededFill_ConnectionBreaksDuringIt_TradesAfterTheDeadConnectionAreRecovered()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var t0 = Now.AddMinutes(-5);
+        await ExecuteSqlAsync(db, string.Create(
+            CultureInfo.InvariantCulture,
+            $"""
+            INSERT INTO price_ticks (symbol_id, agg_trade_id, price, quantity, trade_time, ingested_at)
+            SELECT s.id, i, 100 + i, 1, '{t0:O}'::timestamptz + i * interval '1 millisecond', now()
+              FROM symbols s, generate_series(1, 5) AS i
+             WHERE s.name = 'BTCUSDT'
+            """)); // stored before this process started
+        for (var i = 6; i <= 10; i++)
+        {
+            _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i)); // missed while no instance ran
+        }
+
+        // The seeded fill (fromId=6) is held while the first connection streams 11..15 and then breaks.
+        _server.PauseAggTrades();
+        await using var host = await StartBtcOnlyAsync();
+        await _server.WaitUntilAsync(s => s.ReceivedRequests.Contains("/api/v3/aggTrades?symbol=BTCUSDT&fromId=6&limit=1000"), WaitTimeout, ct);
+        for (var i = 11; i <= 15; i++)
+        {
+            await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+        }
+
+        await WaitForTradeCountAsync(db, "BTCUSDT", 10);
+        _server.RefuseConnections = true;
+        await _server.DropAllConnectionsAsync();
+        await WaitForAsync(() => host.Logs.Count("LogConnectFailed") >= 1, "the dead connection retired, no new one yet");
+        for (var i = 16; i <= 20; i++)
+        {
+            _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i)); // after the dead connection's last trade
+        }
+
+        // The held fill completes up to the dead connection's first id (11) only; that must not close the gap.
+        _server.ResumeAggTrades();
+        await WaitForTradeCountAsync(db, "BTCUSDT", 15);
+        _server.RefuseConnections = false;
+        await _server.WaitUntilAsync(s => s.ActiveConnections == 1 && s.SubscribedStreams.SetEquals([Stream("BTCUSDT")]), WaitTimeout, ct);
+        await WaitForAsync(() => host.State.Status == WsState.Connected, "connected again");
+        for (var i = 21; i <= 25; i++)
+        {
+            await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+        }
+
+        await WaitForTradeCountAsync(db, "BTCUSDT", 25);
+        (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 25).Select(i => (long)i));
+        (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(20); // 1..5 were stored without candles
+    }
+
+    [Fact]
+    public async Task LeadInFailed_IsRetriedOnTheNextConnection()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        _server.FailNextAggTrades(400); // a permanent error: the lookup gives up at once
+        await using var host = await StartBtcOnlyAsync();
+        static bool IsLeadIn(string r) => r.Contains("symbol=BTCUSDT&startTime=", StringComparison.Ordinal);
+        await _server.WaitUntilAsync(s => s.ReceivedRequests.Count(IsLeadIn) == 1, WaitTimeout, ct);
+        var startTime = LeadInStart(_server.ReceivedRequests.Single(IsLeadIn));
+        var minute = DateTimeOffset.FromUnixTimeMilliseconds(startTime).UtcDateTime;
+
+        _server.AddTrade("BTCUSDT", 1, 100m, minute.AddMilliseconds(1)); // before the subscription: REST only
+        await _server.PushTradeAsync("BTCUSDT", 2, 101m, minute.AddMilliseconds(2));
+        await WaitForTradeCountAsync(db, "BTCUSDT", 1);
+
+        // The failed lead-in is still due: the next connection tries it again, for the same minute.
+        await _server.DropAllConnectionsAsync();
+        await WaitForTradeCountAsync(db, "BTCUSDT", 2);
+        (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe([1L, 2L]);
+        _server.ReceivedRequests.Where(IsLeadIn).Select(LeadInStart).ShouldBe([startTime, startTime]);
+    }
+
+    [Fact]
     public async Task Rotation_OverlapsWithoutLossOrDuplicates()
     {
         await using var host = await StartAsync(db, _server, new Dictionary<string, string?> { ["Ingestion:RotationInterval"] = "00:00:02" });
@@ -491,40 +630,11 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
     {
         var ct = TestContext.Current.CancellationToken;
         var logs = new LogCapture();
-        var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ConnectionStrings:TickPulse"] = db.ConnectionString,
-                ["Binance:WsBaseUrl"] = _server.WsBaseUrl.ToString(),
-                ["Binance:RestBaseUrl"] = _server.RestBaseUrl.ToString(),
-                ["Ingestion:BatchMaxDelay"] = "00:00:00.020",
-                ["Ingestion:LeaderRetryInterval"] = "00:00:00.200",
-                ["Ingestion:LeaderCheckInterval"] = "00:00:00.200",
-            })
-            .Build();
-        var services = new ServiceCollection();
-        services.AddLogging(logging => logging.AddProvider(logs).SetMinimumLevel(LogLevel.Debug));
-        services.AddTickPulseInfrastructure(configuration);
-        services.AddTickPulseIngestion(configuration);
-        await using var provider = services.BuildServiceProvider();
+        await using var provider = IngestionServices(logs);
         var state = provider.GetRequiredService<IngestionState>();
 
         // The worker as AddTickPulseIngestion builds it, but with a lock whose first acquire fails unexpectedly.
-        using var worker = new IngestionWorker(
-            new ThrowOnceLeaderLock(new PostgresLeaderLock(db.ConnectionString)),
-            provider.GetRequiredService<IStreamConnectionFactory>(),
-            provider.GetRequiredService<SymbolReconciler>(),
-            provider.GetRequiredService<TickBatchWriter>(),
-            provider.GetRequiredService<GapFiller>(),
-            provider.GetRequiredService<SymbolIdCache>(),
-            provider.GetRequiredService<GapFillWatermarks>(),
-            provider.GetRequiredService<IMarketDataQueries>(),
-            provider.GetRequiredService<ISymbolChangeSignal>(),
-            state,
-            provider.GetRequiredService<IOptions<IngestionOptions>>(),
-            TimeProvider.System,
-            provider.GetRequiredService<ILoggerFactory>(),
-            provider.GetRequiredService<TickPulseMetrics>());
+        using var worker = NewWorker(provider, new ThrowOnceLeaderLock(new PostgresLeaderLock(db.ConnectionString)));
         await worker.StartAsync(ct);
         try
         {
@@ -558,6 +668,66 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
 
     private static SymbolName Symbol(string raw) => SymbolName.TryCreate(raw, out var name) ? name : throw new ArgumentException(raw);
 
+    // The worker exactly as AddTickPulseIngestion builds it, except for the leader lock.
+    private static IngestionWorker NewWorker(IServiceProvider provider, ILeaderLock leaderLock) => new(
+        leaderLock,
+        provider.GetRequiredService<IStreamConnectionFactory>(),
+        provider.GetRequiredService<SymbolReconciler>(),
+        provider.GetRequiredService<TickBatchWriter>(),
+        provider.GetRequiredService<GapFiller>(),
+        provider.GetRequiredService<SymbolIdCache>(),
+        provider.GetRequiredService<GapFillWatermarks>(),
+        provider.GetRequiredService<IMarketDataQueries>(),
+        provider.GetRequiredService<ISymbolChangeSignal>(),
+        provider.GetRequiredService<IngestionState>(),
+        provider.GetRequiredService<IOptions<IngestionOptions>>(),
+        TimeProvider.System,
+        provider.GetRequiredService<ILoggerFactory>(),
+        provider.GetRequiredService<TickPulseMetrics>());
+
+    private static async Task ExecuteSqlAsync(TimescaleFixture db, string sql)
+    {
+        await using var connection = new NpgsqlConnection(db.ConnectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    private static long LeadInStart(string request) =>
+        long.Parse(Regex.Match(request, @"startTime=(\d+)").Groups[1].Value, CultureInfo.InvariantCulture);
+
+    // One process's ingestion services, as the API registers them (its own symbol cache, watermarks and state).
+    private ServiceProvider IngestionServices(LogCapture logs)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:TickPulse"] = db.ConnectionString,
+                ["Binance:WsBaseUrl"] = _server.WsBaseUrl.ToString(),
+                ["Binance:RestBaseUrl"] = _server.RestBaseUrl.ToString(),
+                ["Ingestion:BatchMaxDelay"] = "00:00:00.020",
+                ["Ingestion:LeaderRetryInterval"] = "00:00:00.200",
+                ["Ingestion:LeaderCheckInterval"] = "00:00:00.200",
+            })
+            .Build();
+        var services = new ServiceCollection();
+        services.AddLogging(logging => logging.AddProvider(logs).SetMinimumLevel(LogLevel.Debug));
+        services.AddTickPulseInfrastructure(configuration);
+        services.AddTickPulseIngestion(configuration);
+        return services.BuildServiceProvider();
+    }
+
+    // Only BTCUSDT stays active, so its gap-fill is the only REST traffic.
+    private async Task<IngestionTestHost> StartBtcOnlyAsync()
+    {
+        await ExecuteSqlAsync(db, "UPDATE symbols SET is_active = false WHERE name <> 'BTCUSDT'");
+        var host = await StartAsync(db, _server);
+        await _server.WaitUntilAsync(
+            s => s.ActiveConnections == 1 && s.SubscribedStreams.SetEquals([Stream("BTCUSDT")]), WaitTimeout, TestContext.Current.CancellationToken);
+        await WaitForAsync(() => host.State.Status == WsState.Connected, "the worker connected");
+        return host;
+    }
+
     private static IEnumerable<long> LongRange(long from, long to)
     {
         for (var i = from; i <= to; i++)
@@ -586,6 +756,28 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
                 : inner.TryAcquireAsync(cancellationToken);
 
         public Task<bool> CheckAsync(CancellationToken cancellationToken) => inner.CheckAsync(cancellationToken);
+
+        public Task ReleaseAsync() => inner.ReleaseAsync();
+
+        public ValueTask DisposeAsync() => inner.DisposeAsync();
+    }
+
+    /// <summary>A real lock that can be made to give leadership up and refuse it until told otherwise.</summary>
+    private sealed class YieldingLeaderLock(PostgresLeaderLock inner) : ILeaderLock
+    {
+        private volatile bool _yield;
+
+        public bool Yield
+        {
+            get => _yield;
+            set => _yield = value;
+        }
+
+        public Task<bool> TryAcquireAsync(CancellationToken cancellationToken) =>
+            _yield ? Task.FromResult(false) : inner.TryAcquireAsync(cancellationToken);
+
+        public Task<bool> CheckAsync(CancellationToken cancellationToken) =>
+            _yield ? Task.FromResult(false) : inner.CheckAsync(cancellationToken);
 
         public Task ReleaseAsync() => inner.ReleaseAsync();
 

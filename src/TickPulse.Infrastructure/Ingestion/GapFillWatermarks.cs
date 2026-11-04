@@ -16,14 +16,18 @@ public interface IGapFillWatermark
 /// <list type="bullet">
 /// <item><see cref="Merge"/> raises a symbol's last id to what an ended connection delivered, but never while a gap is
 /// open: a newer id would skip the trades in the gap.</item>
-/// <item>A connection that ended unexpectedly (and a session that ended) opens a gap for every known symbol.</item>
-/// <item><see cref="Lower"/> moves the last id back below trades the writer dropped, and opens a gap.</item>
+/// <item>A connection that ended unexpectedly (and a session that ended) opens a gap for every known symbol and changes
+/// every entry's version, so a fill that is still running (bounded by the connection that broke) cannot close it.</item>
+/// <item><see cref="Lower"/> moves the last id back below trades known to be missing (a batch the writer dropped, the
+/// start of a symbol's first minute), opens a gap and marks the entry as having a hole there.</item>
 /// <item>Only a gap-fill that completed, and saw no change to the entry while it ran, closes the gap
-/// (<see cref="Filled"/>); the version detects such changes.</item>
+/// (<see cref="Filled"/>); the version detects such changes. Closing the gap also clears the hole.</item>
 /// <item>Only active symbols are tracked; <see cref="Forget"/> drops a removed one.</item>
-/// <item><see cref="Seed"/> opens a gap after the last stored trade id of every symbol the process does not know yet,
-/// so trades that traded while no instance was leader (restart, redeploy, handover) are recovered too.</item>
+/// <item><see cref="Seed"/>, at the start of a session, opens a gap after each symbol's last stored trade id, so the
+/// trades that happened while this process did not lead (restart, redeploy, handover) are recovered too.</item>
 /// </list>
+/// <para>One entry holds one gap. An entry with a hole that also gets a later gap (a handover) fills from the hole, so
+/// a long handover may take several connections (each fill is capped) to be recovered completely.</para>
 /// <para>Lives for the whole process, so gaps survive leadership sessions. Thread-safe.</para>
 /// </remarks>
 public sealed class GapFillWatermarks(SymbolIdCache symbols) : IGapFillWatermark
@@ -61,7 +65,9 @@ public sealed class GapFillWatermarks(SymbolIdCache symbols) : IGapFillWatermark
 
             if (gap)
             {
-                foreach (var entry in _entries.Values.Where(e => !e.Pending))
+                // Pending entries too: a fill running for one was bounded by the broken connection's first id, and
+                // the trades after that connection's last id are missing as well.
+                foreach (var entry in _entries.Values)
                 {
                     entry.Pending = true;
                     entry.Version = ++_version;
@@ -72,19 +78,35 @@ public sealed class GapFillWatermarks(SymbolIdCache symbols) : IGapFillWatermark
 
     /// <summary>
     /// Opens a gap after the last trade id the database holds for each symbol, at the start of a leadership session:
-    /// the stream was not received while no instance led (a restart, a redeploy, a handover), so gap-fill has to
-    /// recover the trades after that id. A symbol that already has an entry keeps it: what this process knows (a
-    /// dropped batch, an open gap) is never ahead of what is stored, and raising it could skip trades.
+    /// no stream reached this process while it did not lead (a restart, a redeploy, a handover), so gap-fill has to
+    /// recover the trades after that id.
     /// </summary>
+    /// <remarks>
+    /// <para>An entry this process already has is raised to the stored id when that is higher: another instance may
+    /// have led and stored trades since, and filling from the old id would only walk through them (up to the page cap)
+    /// before the real gap. An entry with a hole (<see cref="Lower"/>) is kept as it is: its missing trades lie below
+    /// the stored maximum.</para>
+    /// <para>The highest stored id says nothing about holes below it. A hole that only the process which had it knew
+    /// about (a dropped batch before a crash, a capped fill in another instance) is not seen here.</para>
+    /// </remarks>
     /// <param name="lastStoredIds">Last stored trade id per symbol; the caller passes only active symbols.</param>
     public void Seed(IEnumerable<KeyValuePair<string, long>> lastStoredIds)
     {
         ArgumentNullException.ThrowIfNull(lastStoredIds);
         lock (_gate)
         {
-            foreach (var (symbol, lastId) in lastStoredIds)
+            foreach (var (symbol, stored) in lastStoredIds)
             {
-                _entries.TryAdd(symbol, new Entry { LastId = lastId, Pending = true, Version = ++_version });
+                if (!_entries.TryGetValue(symbol, out var entry))
+                {
+                    _entries[symbol] = new Entry { LastId = stored, Pending = true, Version = ++_version };
+                }
+                else if (!entry.Hole)
+                {
+                    entry.LastId = Math.Max(entry.LastId, stored);
+                    entry.Pending = true;
+                    entry.Version = ++_version;
+                }
             }
         }
     }
@@ -120,6 +142,7 @@ public sealed class GapFillWatermarks(SymbolIdCache symbols) : IGapFillWatermark
             }
 
             entry.Pending = true;
+            entry.Hole = true;
             entry.Version = ++_version;
         }
     }
@@ -146,7 +169,10 @@ public sealed class GapFillWatermarks(SymbolIdCache symbols) : IGapFillWatermark
         return false;
     }
 
-    /// <summary>A gap-fill reached the stream or the end of the data: the gap is closed, unless it changed meanwhile.</summary>
+    /// <summary>
+    /// A gap-fill reached the stream of a connection that is still up, or the end of the data: the gap (and any hole) is
+    /// closed, unless the entry changed meanwhile.
+    /// </summary>
     public void Filled(string symbol, long version)
     {
         lock (_gate)
@@ -154,6 +180,7 @@ public sealed class GapFillWatermarks(SymbolIdCache symbols) : IGapFillWatermark
             if (_entries.TryGetValue(symbol, out var entry) && entry.Version == version)
             {
                 entry.Pending = false;
+                entry.Hole = false;
             }
         }
     }
@@ -185,6 +212,10 @@ public sealed class GapFillWatermarks(SymbolIdCache symbols) : IGapFillWatermark
         public long LastId { get; set; }
 
         public bool Pending { get; set; }
+
+        // Trades right after LastId are known to be missing (dropped batch, first-minute lead-in), so the entry must
+        // not be raised to a later stored id.
+        public bool Hole { get; set; }
 
         public long Version { get; set; }
     }

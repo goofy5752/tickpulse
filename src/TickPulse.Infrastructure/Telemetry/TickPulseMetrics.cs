@@ -125,7 +125,7 @@ public sealed class TickPulseMetrics
         _backfillCandles = meter.CreateCounter<long>(
             "tickpulse.backfill.candles", "{candle}", "1-minute klines stored by the backfill.");
         _gapFillTrades = meter.CreateCounter<long>(
-            "tickpulse.gapfill.trades", "{trade}", "Trades recovered over REST after a reconnect.");
+            "tickpulse.gapfill.trades", "{trade}", "Trades fetched over REST by gap-fill and handed to the writer (reconnects, session starts, a symbol's first minute); includes overlap that the primary key skips.");
         _apiResponses = meter.CreateCounter<long>(
             "tickpulse.api.responses", "{response}", "API responses by route template, status code and negotiated media type.");
     }

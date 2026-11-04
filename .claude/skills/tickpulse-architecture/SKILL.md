@@ -82,9 +82,15 @@ Rules of thumb:
 5. **One WebSocket connection**, runtime `SUBSCRIBE`/`UNSUBSCRIBE` at ≤ 5 messages/s, rotation at
    ~23 h make-before-break, reconnect with jittered exponential backoff (cap 30 s), gap-fill via
    REST `aggTrades?fromId=last+1`. Every leadership session seeds the gap-fill watermarks from
-   the DB (max `agg_trade_id` per active symbol, last 24 h) before it subscribes, so restarts and
-   handovers lose nothing. A symbol that starts streaming with no watermark gets a lead-in from
-   the start of its first minute (`aggTrades?startTime`), so that candle is never partial.
+   the DB (max `agg_trade_id` per active symbol, last 24 h) before it subscribes, so the gap
+   after the last stored trade is filled after a restart or handover. The seed raises an older
+   in-memory watermark to the stored id unless that watermark marks a known hole (a dropped
+   batch, a lead-in). The max cannot see holes *below* it: one that only a crashed or other
+   process knew about (its dropped batch, its capped fill) is not recovered by the seed. A gap
+   closes only when the fill finished on a connection that is still up. A symbol that starts
+   streaming with no watermark gets a lead-in from the start of its first minute
+   (`aggTrades?startTime`), so that candle is not partial; a failed lead-in is retried on the
+   next connection.
    Symbol changes signal ingestion in-process and are also reconciled against the DB every 30 s.
 6. **Bounded channel** with `FullMode=Wait` (backpressure, never drop). Batches flush at 500 ms or
    5,000 ticks.
