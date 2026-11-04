@@ -242,6 +242,88 @@ public sealed class HealthTests(ApiFactory api) : IClassFixture<ApiFactory>
         response.Headers.GetValues("X-Frame-Options").ShouldBe(["DENY"]);
     }
 
+    private const string StrictPolicy =
+        "default-src 'self'; connect-src 'self' wss: ws:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
+        "script-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+
+    [Theory]
+    [InlineData("/")]
+    [InlineData("/symbols/BTCUSDT")]
+    [InlineData("/favicon.svg")]
+    [InlineData("/api/probe/BTCUSDT")]
+    [InlineData("/api/does/not/exist")]
+    [InlineData("/health/live")]
+    [InlineData("/openapi/v1.json")]
+    [InlineData("/docsx")]
+    public async Task DashboardAndApiResponses_CarryTheStrictContentSecurityPolicy(string path)
+    {
+        var index = Path.Combine(api.WebRoot, "index.html");
+        var favicon = Path.Combine(api.WebRoot, "favicon.svg");
+        await File.WriteAllTextAsync(index, "<!doctype html><title>csp</title>", Ct);
+        await File.WriteAllTextAsync(favicon, "<svg xmlns=\"http://www.w3.org/2000/svg\"/>", Ct);
+        try
+        {
+            using var client = api.CreateClient();
+
+            using var response = await client.GetAsync(new Uri(path, UriKind.Relative), Ct);
+
+            response.Headers.GetValues("Content-Security-Policy").ShouldBe([StrictPolicy], path);
+        }
+        finally
+        {
+            File.Delete(index);
+            File.Delete(favicon);
+        }
+    }
+
+    [Theory]
+    [InlineData("/docs")]
+    [InlineData("/docs/")]
+    [InlineData("/docs/scalar.js")]
+    public async Task Docs_CarryTheirOwnSelfHostedContentSecurityPolicy(string path)
+    {
+        using var client = new HttpClient(api.Server.CreateHandler()) { BaseAddress = api.Server.BaseAddress };
+
+        using var response = await client.GetAsync(new Uri(path, UriKind.Relative), Ct);
+
+        // Scalar's page boots from one inline script, so only /docs allows inline scripts; every source is still
+        // this origin, and framing, <base> and form targets stay locked down.
+        response.Headers.GetValues("Content-Security-Policy").ShouldBe(
+        [
+            "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
+            "script-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; " +
+            "base-uri 'self'; form-action 'self'",
+        ], path);
+    }
+
+    [Fact]
+    public async Task Docs_LoadNothingFromOtherOrigins()
+    {
+        using var client = api.CreateClient();
+
+        var html = await client.GetStringAsync(new Uri("/docs/", UriKind.Relative), Ct);
+
+        // No CDN fonts, telemetry or AI agent: the page needs nothing outside this origin.
+        html.ShouldNotContain("fonts.scalar.com");
+        html.ShouldContain("\"withDefaultFonts\":false");
+        html.ShouldContain("\"telemetry\":false");
+        html.ShouldContain("\"agent\":{\"disabled\":true}");
+    }
+
+    [Fact]
+    public async Task Docs_SwitchZodToJitlessBeforeScalarLoads()
+    {
+        using var client = api.CreateClient();
+
+        var html = await client.GetStringAsync(new Uri("/docs/", UriKind.Relative), Ct);
+
+        // Scalar bundles Zod, whose first schema probes eval with Function(""). The policy has no 'unsafe-eval', so
+        // the probe would be reported as a violation; jitless mode skips it. It must run before scalar.js.
+        var config = html.IndexOf("globalThis.__zod_globalConfig = { jitless: true }", StringComparison.Ordinal);
+        config.ShouldBeGreaterThan(0);
+        config.ShouldBeLessThan(html.IndexOf("<script src=\"scalar.js\"></script>", StringComparison.Ordinal));
+    }
+
     private static async Task ExecuteAsync(string connectionString, string sql)
     {
         await using var connection = new NpgsqlConnection(connectionString);

@@ -204,6 +204,12 @@ Symbols are case-insensitive (`btcusdt` works). Responses are JSON by default an
 prefers it; a request that accepts neither gets `406`. Admin routes need `X-Api-Key`. `HEAD` works
 wherever `GET` does.
 
+Every response carries `nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a
+`Content-Security-Policy` that allows only this origin and no inline script. The one exception is
+`/docs`: Scalar boots from an inline script, so its policy allows inline scripts, still from this
+origin only (Scalar's CDN fonts, telemetry and AI agent are switched off). See
+`src/TickPulse.Api/Hosting/SecurityHeaders.cs`.
+
 ### 24h average
 
 ```bash

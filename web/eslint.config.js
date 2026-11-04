@@ -40,13 +40,18 @@ export default tseslint.config(
     },
   },
   {
-    // Plain JavaScript (today only this file): core rules, no type information.
+    // Plain JavaScript (this file and public/theme-init.js): core rules, no type information.
     files: ['**/*.js'],
     extends: [js.configs.recommended],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'module',
     },
+  },
+  {
+    // Served as is and run by the browser as a classic script.
+    files: ['public/**/*.js'],
+    languageOptions: { globals: globals.browser, sourceType: 'script' },
   },
   {
     files: ['*.config.{js,ts}'],
