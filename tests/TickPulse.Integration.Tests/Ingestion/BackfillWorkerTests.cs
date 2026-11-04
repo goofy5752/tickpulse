@@ -662,6 +662,7 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         (await CandleStatsAsync(Btc)).Count.ShouldBe(DepthMinutes);
         _logs.Count("LogRetrying").ShouldBe(1);
         _logs.Count("LogFailed").ShouldBe(0);
+        PollyEvents().ShouldBeGreaterThan(0); // the pipeline's own retries are visible to the stretch tests' check
     }
 
     [Fact]
