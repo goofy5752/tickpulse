@@ -2,6 +2,7 @@ import { lazy, memo, Suspense, useId, useState, type ReactNode } from 'react'
 import { ApiError } from '@/api/client'
 import { isValidSmaN, SMA_MAX_POINTS, useCandles, useSma } from '@/api/queries'
 import { PERIODS, type CandleResponse, type LivePrice, type Period } from '@/api/types'
+import { InfoTip } from '@/components/InfoTip'
 import { Skeleton } from '@/components/Skeleton'
 import { formatPrice, splitSymbol } from '@/lib/format'
 import { SECTION_IDS } from '@/lib/links'
@@ -76,7 +77,7 @@ export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsCha
   return (
     <section id={SECTION_IDS.chart} aria-labelledby="chart-title" className="glass flex min-w-0 flex-col p-4 sm:p-6">
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
-        <div className="flex min-w-0 items-baseline gap-3">
+        <div className="flex min-w-0 items-center gap-3">
           <h2 id="chart-title" className="text-[1.25rem] leading-none font-semibold tracking-tight">
             {symbol ? (
               <>
@@ -93,13 +94,17 @@ export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsCha
               {formatPrice(headlinePrice, symbol)}
             </p>
           )}
+          <InfoTip topic="chartSection" />
         </div>
-        <PeriodPicker
-          value={params.p}
-          onChange={(p) => {
-            onParamsChange({ ...params, p })
-          }}
-        />
+        <div className="flex items-center gap-2">
+          <PeriodPicker
+            value={params.p}
+            onChange={(p) => {
+              onParamsChange({ ...params, p })
+            }}
+          />
+          <InfoTip topic="chartPeriod" />
+        </div>
       </div>
 
       <div className="relative mt-4 flex h-[19rem] sm:h-[23rem] lg:h-auto lg:min-h-[26rem] lg:flex-1">
@@ -214,16 +219,19 @@ function Legend({ period, n, note }: { period: Period; n: number | undefined; no
             <span className="h-3.5 w-[5px] rounded-[1px] bg-down" />
           </span>
           {period} candles
+          <InfoTip topic="chartCandles" className="-ml-0.5" />
         </li>
         {n !== undefined && (
           <>
             <li className="flex items-center gap-2">
               <span aria-hidden="true" className="h-0.5 w-4 rounded-full bg-sma" />
               SMA, n = {n}
+              <InfoTip topic="chartSma" className="-ml-0.5" />
             </li>
             <li className="flex items-center gap-2">
               <span aria-hidden="true" className="h-3.5 w-4 rounded-[3px] border border-dashed border-sma/60 bg-sma-soft" />
               Calculation window
+              <InfoTip topic="chartWindow" className="-ml-0.5" />
             </li>
           </>
         )}

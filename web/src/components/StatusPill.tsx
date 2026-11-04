@@ -1,4 +1,5 @@
 import type { SystemStatsResponse } from '@/api/types'
+import { InfoIcon, InfoTip } from '@/components/InfoTip'
 import type { HubStatus } from '@/hooks/useMarketHub'
 import { formatLag } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -50,6 +51,8 @@ interface StatusPillProps {
 /**
  * The ingestion status at a glance: is the Binance stream live, and how far behind are we.
  * Below 640 px the pill drops the "Binance" prefix and the word "lag" to fit the compact nav.
+ * The pill is its own tooltip trigger (hover, focus or tap explains every state), so the nav needs
+ * no extra icon; from 640 px a small ⓘ inside it hints at that.
  */
 export function StatusPill({ hubStatus, stats }: StatusPillProps) {
   const state = describe(hubStatus, stats)
@@ -58,10 +61,13 @@ export function StatusPill({ hubStatus, stats }: StatusPillProps) {
   const styles = toneStyles[state.tone]
 
   return (
-    <p
+    <InfoTip
+      topic="navStatus"
+      placement="bottom"
       className={cn(
-        'inline-flex h-9 shrink-0 items-center gap-2 rounded-full border pr-3.5 pl-3 text-[0.8125rem] whitespace-nowrap',
+        'inline-flex h-9 shrink-0 items-center gap-2 rounded-full border pr-3.5 pl-3 text-[0.8125rem] whitespace-nowrap transition-colors duration-150 focus-visible:rounded-full sm:pr-3',
         styles.pill,
+        'data-open:border-sma/50',
       )}
     >
       <span aria-hidden="true" className={cn('relative size-2 rounded-full', styles.dot)} />
@@ -92,6 +98,7 @@ export function StatusPill({ hubStatus, stats }: StatusPillProps) {
           </span>
         </>
       )}
-    </p>
+      <InfoIcon className="hidden text-ink-faint sm:block" />
+    </InfoTip>
   )
 }

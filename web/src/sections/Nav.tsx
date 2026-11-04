@@ -1,5 +1,6 @@
 import { memo, useEffect, useId, useState } from 'react'
 import type { SystemStatsResponse } from '@/api/types'
+import { InfoTip } from '@/components/InfoTip'
 import { PulseMark } from '@/components/PulseMark'
 import { StatusPill } from '@/components/StatusPill'
 import type { HubStatus } from '@/hooks/useMarketHub'
@@ -14,7 +15,7 @@ function ThemeToggle() {
   const { theme, toggle } = useTheme()
   const next = theme === 'dark' ? 'light' : 'dark'
   return (
-    <button type="button" onClick={toggle} aria-label={`Switch to ${next} theme`} title={`Switch to ${next} theme`} className={iconButton}>
+    <button type="button" onClick={toggle} aria-label={`Switch to ${next} theme`} className={iconButton}>
       <svg viewBox="0 0 24 24" aria-hidden="true" className="size-4.5" fill="none" stroke="currentColor" strokeWidth="1.8">
         {theme === 'dark' ? (
           <path strokeLinecap="round" strokeLinejoin="round" d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" />
@@ -116,7 +117,13 @@ export const Nav = memo(function Nav({ hubStatus, stats }: NavProps) {
 
         <div className="ml-auto flex items-center gap-2">
           <StatusPill hubStatus={hubStatus} stats={stats} />
-          <ThemeToggle />
+          <span className="flex items-center gap-1.5">
+            <ThemeToggle />
+            {/* Below 640 px the nav has no room for it; the menu carries it instead. */}
+            <span className="hidden sm:contents">
+              <InfoTip topic="navTheme" placement="bottom" />
+            </span>
+          </span>
           <button
             type="button"
             aria-expanded={open}
@@ -148,6 +155,14 @@ export const Nav = memo(function Nav({ hubStatus, stats }: NavProps) {
             </li>
           ))}
         </ul>
+        <p className="mt-1 flex items-center gap-4 border-t border-glass-border px-3 pt-2.5 pb-1 text-[0.75rem] text-ink-faint sm:hidden">
+          <span className="flex items-center gap-1.5">
+            Live status <InfoTip topic="navStatus" />
+          </span>
+          <span className="flex items-center gap-1.5">
+            Theme <InfoTip topic="navTheme" />
+          </span>
+        </p>
       </nav>
     </header>
   )
