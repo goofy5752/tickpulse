@@ -7,6 +7,8 @@ import { InfoTip } from '@/components/InfoTip'
 import { Segmented, type SegmentedOption } from '@/components/Segmented'
 import { Select } from '@/components/Select'
 import { SuggestInput } from '@/components/SuggestInput'
+import { TitleWithTip } from '@/components/TitleWithTip'
+import type { HelpKey } from '@/content/help'
 import { highlightBody, type TokenKind } from '@/lib/highlight'
 import { SECTION_IDS } from '@/lib/links'
 import { PERIOD_OPTIONS } from '@/lib/periodOptions'
@@ -161,9 +163,11 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
     <section id={SECTION_IDS.playground} aria-labelledby={`${ids}-title`} className="glass p-5 sm:p-6">
       <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
         <div>
-          <h2 id={`${ids}-title`} className={sectionTitle}>
-            API playground
-          </h2>
+          <TitleWithTip help="playSection">
+            <h2 id={`${ids}-title`} className={sectionTitle}>
+              API playground
+            </h2>
+          </TitleWithTip>
           <p className={sectionLead}>Send a real request to the public API and read the answer exactly as it arrives.</p>
         </div>
         <div className="flex min-w-0 items-center gap-2">
@@ -175,12 +179,13 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
         <form onSubmit={send} className="flex min-w-0 flex-col gap-4" aria-label="Request">
           <div className="flex min-w-0 items-start gap-2">
             <Segmented legend="Endpoint" options={ENDPOINTS} value={endpoint} onChange={setEndpoint} />
+            <InfoTip topic="playEndpoint" className="mt-[0.4375rem]" />
           </div>
 
           <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-2 xl:grid-cols-4">
             {needsSymbol && (
               <div className={cn(endpoint === 'average' ? 'col-span-2' : 'col-span-2 sm:col-span-1 lg:col-span-2 xl:col-span-1')}>
-                <FieldLabel htmlFor={`${ids}-symbol`}>
+                <FieldLabel htmlFor={`${ids}-symbol`} help="playSymbol">
                   Symbol
                 </FieldLabel>
                 <SuggestInput
@@ -197,12 +202,13 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
             )}
             {endpoint === 'sma' && (
               <>
-                <TextField id={`${ids}-n`} label="n" value={n} onChange={setN} numeric />
-                <PeriodField id={`${ids}-p`} label="p" value={smaP} onChange={setSmaP} />
+                <TextField id={`${ids}-n`} label="n" help="playN" value={n} onChange={setN} numeric />
+                <PeriodField id={`${ids}-p`} label="p" help="playP" value={smaP} onChange={setSmaP} />
                 <div className="col-span-2 sm:col-span-4 lg:col-span-2 xl:col-span-4">
                   <TextField
                     id={`${ids}-s`}
                     label="s (optional, ISO-8601)"
+                    help="playS"
                     value={s}
                     onChange={setS}
                     placeholder="2026-10-01T00:00:00Z"
@@ -212,8 +218,8 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
             )}
             {endpoint === 'candles' && (
               <>
-                <PeriodField id={`${ids}-cp`} label="p" value={candlesP} onChange={setCandlesP} />
-                <TextField id={`${ids}-limit`} label="limit" value={limit} onChange={setLimit} numeric />
+                <PeriodField id={`${ids}-cp`} label="p" help="playCandlesP" value={candlesP} onChange={setCandlesP} />
+                <TextField id={`${ids}-limit`} label="limit" help="playLimit" value={limit} onChange={setLimit} numeric />
               </>
             )}
           </div>
@@ -261,6 +267,7 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
 function TextField({
   id,
   label,
+  help,
   value,
   onChange,
   numeric = false,
@@ -268,6 +275,7 @@ function TextField({
 }: {
   id: string
   label: string
+  help: HelpKey
   value: string
   onChange: (value: string) => void
   numeric?: boolean
@@ -275,7 +283,7 @@ function TextField({
 }) {
   return (
     <div>
-      <FieldLabel htmlFor={id}>
+      <FieldLabel htmlFor={id} help={help}>
         {label}
       </FieldLabel>
       <input
@@ -297,17 +305,19 @@ function TextField({
 function PeriodField({
   id,
   label,
+  help,
   value,
   onChange,
 }: {
   id: string
   label: string
+  help: HelpKey
   value: Period
   onChange: (p: Period) => void
 }) {
   return (
     <div>
-      <FieldLabel htmlFor={id}>
+      <FieldLabel htmlFor={id} help={help}>
         {label}
       </FieldLabel>
       <Select id={id} value={value} options={PERIOD_OPTIONS} onChange={onChange} mono />

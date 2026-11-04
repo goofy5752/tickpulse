@@ -140,9 +140,9 @@ const SECTIONS: Record<string, readonly HelpKey[]> = {
     'smaPoints',
     'smaWindow',
   ],
-  playground: ['playStatus'],
-  playgroundSma: [],
-  playgroundCandles: [],
+  playground: ['playSection', 'playEndpoint', 'playSymbol', 'playStatus'],
+  playgroundSma: ['playN', 'playP', 'playS'],
+  playgroundCandles: ['playCandlesP', 'playLimit'],
   admin: ['adminSection', 'adminKey', 'adminSymbol', 'adminAdd', 'adminBackfill', 'adminRemove'],
   system: [
     'systemSection',
