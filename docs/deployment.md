@@ -59,7 +59,12 @@ flowchart LR
 - **The host nginx** serves only its two `server_name`-scoped vhosts and changes nothing else on the
   host. It admits only Cloudflare's published ranges and redirects port 80 to HTTPS. It forwards
   `CF-Connecting-IP` and upgrades WebSockets: SignalR on `/hubs/` and Grafana Live on `/api/live/`. It
-  also sets HSTS and rate-limits Grafana's query endpoints.
+  also sets HSTS and rate-limits two groups of paths.
+  - Rate limits are per visitor (`CF-Connecting-IP`) and answer 429. Grafana's query endpoints get 5
+    requests per second with a burst of 40 (a whole dashboard at once). The api paths that its own rate
+    limiter does not cover get 10 per second with a burst of 20: `/health/*` (`/health/ready` opens a
+    database connection on every hit), `/docs` and `/openapi/*`. `deploy.sh` and its smoke test call the
+    api on `127.0.0.1:8085`, past nginx, so they are not limited.
   - The vhosts listen with plain `listen 443 ssl`, without `http2`. On nginx 1.18, `http2` is a property
     of the shared listening socket and would switch HTTP/2 on for every site on 443. Visitors still get
     HTTP/2 and HTTP/3 from Cloudflare; only the hop from Cloudflare to the origin is HTTP/1.1.
@@ -116,7 +121,7 @@ to a development default.
 | — | `/srv/tickpulse/.failed-<time>/` | the files of a deploy that was rolled back, deleted after the next successful deploy |
 | `deploy/nginx/tickpulse.conf` | `/etc/nginx/sites-available/tickpulse.dev` | API and dashboard vhost |
 | `deploy/nginx/grafana.tickpulse.conf` | `/etc/nginx/sites-available/grafana.tickpulse.dev` | Grafana vhost |
-| `deploy/nginx/tickpulse-http.conf` | `/etc/nginx/conf.d/tickpulse.conf` | http-level maps and the rate-limit zone |
+| `deploy/nginx/tickpulse-http.conf` | `/etc/nginx/conf.d/tickpulse.conf` | http-level maps and the rate-limit zones |
 | `deploy/nginx/cloudflare-allow.conf` | `/etc/nginx/snippets/tickpulse-cloudflare-allow.conf` | Cloudflare ranges (allow), everything else denied |
 | — | `/etc/ssl/tickpulse/origin.pem`, `origin.key` | Cloudflare Origin certificate (root-only) |
 
