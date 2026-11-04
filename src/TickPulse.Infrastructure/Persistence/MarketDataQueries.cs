@@ -118,6 +118,11 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     internal const string BackfillRangeSql =
         "SELECT min(bucket_start), max(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 2 AND bucket_start < $2";
 
+    // Runs before LatestTradeIdsSql in its transaction. The ordered plan below is cost-based: with few rows per chunk a
+    // top-N sort over every chunk looks as cheap, and stale statistics after an outage could pick it with real
+    // volumes, decompressing every compressed chunk. With sorts disabled only the ordered path is left.
+    internal const string LatestTradeIdsSettingsSql = "SET LOCAL enable_sort = off";
+
     // $1 the lower trade-time bound (exclusive). Per active symbol, the newest trade: an ordered ChunkAppend reads
     // the chunks newest first through (symbol_id, trade_time DESC), or the compressed batches' trade-time metadata,
     // and stops at the first row, so older chunks are never read and compressed ones never decompressed. A
@@ -355,15 +360,25 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     public async Task<IReadOnlyDictionary<string, long>> GetLatestTradeIdsAsync(DateTime sinceUtc, CancellationToken ct)
     {
         RequireUtc(sinceUtc, nameof(sinceUtc));
-        await using var command = dataSource.CreateCommand(LatestTradeIdsSql);
-        command.Parameters.Add(TimestampTz(sinceUtc));
-        var ids = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await using (var settings = new NpgsqlCommand(LatestTradeIdsSettingsSql, connection, transaction))
         {
-            ids[reader.GetString(0)] = reader.GetInt64(1);
+            await settings.ExecuteNonQueryAsync(ct);
         }
 
+        var ids = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        await using (var command = new NpgsqlCommand(LatestTradeIdsSql, connection, transaction))
+        {
+            command.Parameters.Add(TimestampTz(sinceUtc));
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                ids[reader.GetString(0)] = reader.GetInt64(1);
+            }
+        }
+
+        await transaction.CommitAsync(ct);
         return ids;
     }
 

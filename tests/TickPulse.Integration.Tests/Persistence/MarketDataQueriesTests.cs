@@ -649,7 +649,8 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
     public async Task LatestTradeIdsQuery_ReadsOnlyTheNewestChunkWithTrades_EvenWhenOlderOnesAreCompressed()
     {
         // Ticks in three daily chunks inside a 13-day bound; the two older chunks are compressed, as they are after a
-        // restart that follows an outage of days.
+        // restart that follows an outage of days. The table is analyzed with a handful of rows, where a top-N sort over
+        // every chunk would look as cheap: the plan must not depend on that.
         await Writer().WriteBatchAsync(
         [
             NewTick(Btc, 1, 1m, 1m, Start.AddDays(-3)),
@@ -662,6 +663,7 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
             await ExecuteAsync(string.Create(
                 CultureInfo.InvariantCulture,
                 $"SELECT compress_chunk(c) FROM show_chunks('price_ticks', older_than => '{Start.AddDays(-1):O}'::timestamptz) AS c"));
+            await ExecuteAsync("ANALYZE price_ticks");
             var compressed = new List<string>();
             await using (var command = _dataSource.CreateCommand(
                 "SELECT chunk_name FROM timescaledb_information.chunks WHERE hypertable_name = 'price_ticks' AND is_compressed"))
@@ -675,13 +677,14 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
 
             compressed.Count.ShouldBeGreaterThanOrEqualTo(2);
 
-            var plan = await ExplainAsync(MarketDataQueries.LatestTradeIdsSql, analyze: true, Ts(Start.AddDays(-13)));
+            var plan = await ExplainAsync(
+                MarketDataQueries.LatestTradeIdsSql, analyze: true, settings: MarketDataQueries.LatestTradeIdsSettingsSql, Ts(Start.AddDays(-13)));
 
             // Chunks are read newest first and the scan stops at the first trade: one index probe of the newest chunk.
             // The older, compressed chunks are never decompressed (no sort over their rows either).
-            plan.ShouldContain("ChunkAppend");
-            plan.ShouldContain("Order: price_ticks.trade_time DESC");
-            plan.ShouldNotContain("Sort Key");
+            plan.ShouldContain("ChunkAppend", customMessage: plan);
+            plan.ShouldContain("Order: price_ticks.trade_time DESC", customMessage: plan);
+            plan.ShouldNotContain("Sort Key", customMessage: plan);
             plan.ShouldNotContain("Seq Scan on _hyper");
             plan.ShouldMatch(@"Index (Only )?Scan using \S*ix_price_ticks_symbol_id_trade_time\S* on _hyper_\d+_\d+_chunk \(actual rows=1");
             var lines = plan.Split('\n');
@@ -741,16 +744,25 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
     /// The plan of <paramref name="sql"/> with sequential scans disabled, so the test data can stay small and the
     /// assertion pins which index a query is able to use rather than a data-size-dependent cost choice.
     /// </summary>
-    private Task<string> ExplainAsync(string sql, params NpgsqlParameter[] parameters) => ExplainAsync(sql, analyze: false, parameters);
+    private Task<string> ExplainAsync(string sql, params NpgsqlParameter[] parameters) => ExplainAsync(sql, analyze: false, settings: null, parameters);
 
-    /// <summary>As above; with <paramref name="analyze"/> the query runs, and the plan shows which nodes executed.</summary>
-    private async Task<string> ExplainAsync(string sql, bool analyze, params NpgsqlParameter[] parameters)
+    /// <summary>
+    /// As above; with <paramref name="analyze"/> the query runs, and the plan shows which nodes executed.
+    /// <paramref name="settings"/> (a SET LOCAL statement) runs first, as the production code runs it.
+    /// </summary>
+    private async Task<string> ExplainAsync(string sql, bool analyze, string? settings, params NpgsqlParameter[] parameters)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(Ct);
         await using var transaction = await connection.BeginTransactionAsync(Ct);
         await using (var off = new NpgsqlCommand("SET LOCAL enable_seqscan = off", connection, transaction))
         {
             await off.ExecuteNonQueryAsync(Ct);
+        }
+
+        if (settings is not null)
+        {
+            await using var set = new NpgsqlCommand(settings, connection, transaction);
+            await set.ExecuteNonQueryAsync(Ct);
         }
 
         var explain = analyze ? "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) " : "EXPLAIN ";
