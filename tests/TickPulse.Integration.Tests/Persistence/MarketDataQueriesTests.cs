@@ -219,8 +219,11 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
 
         // The anchor is an InitPlan (evaluated once); the outer scan is a primary-key range scan bounded by it.
         plan.ShouldContain("InitPlan");
-        // A plain or a bitmap scan of the primary key are both a range scan bounded by the anchor.
-        plan.ShouldMatch(@"(Index|Index Only|Bitmap Index) Scan using pk_candles_1m on candles_1m\b[\s\S]*Index Cond: \(\(symbol_id = [^)]+\) AND \(bucket_start >= \(\(InitPlan \d+\)");
+        // A plain or a bitmap scan of the primary key are both a range scan bounded by the anchor. The first prints
+        // "Scan using <index> on <table>", the second "Bitmap Index Scan on <index>".
+        plan.ShouldMatch(
+            @"(?:(?:Index|Index Only) Scan using pk_candles_1m on candles_1m|Bitmap Index Scan on pk_candles_1m)\b[\s\S]*Index Cond: \(\(symbol_id = [^)]+\) AND \(bucket_start >= \(\(InitPlan \d+\)",
+            customMessage: plan);
         plan.ShouldNotContain("Seq Scan");
     }
 
