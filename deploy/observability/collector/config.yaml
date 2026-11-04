@@ -32,6 +32,23 @@ processors:
         statements:
           - keep_keys(attributes, ["service.name", "service.namespace", "service.version", "service.instance.id", "deployment.environment", "deployment.environment.name"])
 
+  # Defence in depth: never store client addresses, HTTP headers, user agents or query strings,
+  # even if an instrumentation library starts emitting them. The logs and traces are publicly viewable.
+  attributes/scrub:
+    actions:
+      - key: client.address
+        action: delete
+      - key: network.peer.address
+        action: delete
+      - key: user_agent.original
+        action: delete
+      - key: url.query
+        action: delete
+      - pattern: ^http\.request\.header\..+
+        action: delete
+      - pattern: ^http\.response\.header\..+
+        action: delete
+
   batch:
     send_batch_size: 4096
     send_batch_max_size: 8192
@@ -75,7 +92,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, attributes/scrub, batch]
       exporters: [otlp_grpc/tempo]
     metrics:
       receivers: [otlp]
@@ -83,5 +100,5 @@ service:
       exporters: [prometheus_remote_write]
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, attributes/scrub, batch]
       exporters: [otlp_http/loki]

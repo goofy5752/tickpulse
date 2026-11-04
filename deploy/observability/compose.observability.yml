@@ -46,6 +46,9 @@ services:
       - --storage.tsdb.retention.time=30d
       - --storage.tsdb.retention.size=4GB
       - --web.enable-remote-write-receiver
+      # Grafana is publicly viewable: bound the cost of any single query.
+      - --query.max-samples=5000000
+      - --query.timeout=30s
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -115,13 +118,17 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     environment:
-      GOMEMLIMIT: 110MiB
+      GOMEMLIMIT: 150MiB
       GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3000}
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      # Local development default only; deployments must set GRAFANA_ADMIN_PASSWORD.
+      # Local development default only. Grafana applies it on the FIRST start (empty grafana-data
+      # volume) and ignores it afterwards; production requires GRAFANA_ADMIN_PASSWORD (prod override).
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-tickpulse-dev}
       GF_SECURITY_COOKIE_SECURE: ${GRAFANA_COOKIE_SECURE:-false}
       GF_SECURITY_DISABLE_GRAVATAR: "true"
+      # No snapshots or public dashboards: anonymous visitors must not be able to publish data.
+      GF_SNAPSHOTS_ENABLED: "false"
+      GF_PUBLIC_DASHBOARDS_ENABLED: "false"
       # Anyone can view the TickPulse dashboards; Explore and editing stay admin-only.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
@@ -146,7 +153,7 @@ services:
       GF_NEWS_NEWS_FEED_ENABLED: "false"
       GF_PLUGINS_PREINSTALL_DISABLED: "true"
       # Each bundled datasource runs as its own ~15 MiB backend process; only Prometheus, Loki
-      # and Tempo are used, so the rest are disabled to stay well inside the 192 MiB limit.
+      # and Tempo are used, so the rest are disabled to keep memory well inside the container limit.
       GF_PLUGINS_DISABLE_PLUGINS: cloudwatch,elasticsearch,grafana-postgresql-datasource,grafana-pyroscope-datasource,influxdb,jaeger,mssql,mysql,opentsdb,stackdriver,zipkin
       GF_LOG_LEVEL: warn
     ports:
@@ -167,7 +174,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 192M
+          memory: 256M
     restart: unless-stopped
     logging: *logging
     networks: [tickpulse]

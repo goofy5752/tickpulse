@@ -14,13 +14,20 @@ groups:
         condition: C
         data:
           - refId: A
-            relativeTimeRange: { from: 300, to: 0 }
+            relativeTimeRange: { from: 900, to: 0 }
             datasourceUid: prom
             model:
               refId: A
-              # 1 while some instance is Connected (WsState 2). Missing series (the API is down
-              # or not exporting) count as disconnected.
-              expr: max(tickpulse_ws_state{service_name="tickpulse-api"} == bool 2) or vector(0)
+              # Seconds since any instance last reported Connected (WsState 2), using the sample's
+              # own timestamp. Remote-written series get no staleness markers, so a plain instant
+              # query would keep returning the last value for 5 minutes after the API dies; this
+              # measures the age of the last Connected sample instead. It therefore fires about 60 s
+              # after a live disconnect *or* after the API stops exporting. Never connected in the
+              # last 15 minutes counts as disconnected (or vector(0) -> age = now).
+              expr: >-
+                time() - (max(max_over_time(
+                (timestamp(tickpulse_ws_state{service_name="tickpulse-api"}) and tickpulse_ws_state{service_name="tickpulse-api"} == 2)[15m:15s]
+                )) or vector(0))
               instant: true
               range: false
               intervalMs: 15000
@@ -32,8 +39,8 @@ groups:
               type: threshold
               expression: A
               conditions:
-                - evaluator: { type: lt, params: [1] }
-        for: 1m
+                - evaluator: { type: gt, params: [60] }
+        for: 0s
         noDataState: Alerting
         execErrState: Error
         labels:
@@ -84,16 +91,22 @@ groups:
         condition: C
         data:
           - refId: A
-            relativeTimeRange: { from: 1800, to: 0 }
+            relativeTimeRange: { from: 300, to: 0 }
             datasourceUid: prom
             model:
               refId: A
-              # Ticks in the last minute, for symbols that received ticks in the last 30 minutes
-              # (a symbol removed by an admin stops alerting once it has been quiet for 30 minutes).
+              # Ticks in the last minute for every symbol the API reports as active
+              # (tickpulse_ingest_symbol_active == 1). An active symbol that has never received a
+              # tick counts as 0. Removed symbols drop out of the gate immediately; when the API
+              # stops exporting, the gate empties within 45 s and the WebSocket alert takes over.
               expr: >-
+                (
                 sum by (symbol) (increase(tickpulse_ingest_ticks_received_total{service_name="tickpulse-api"}[1m]))
+                or on (symbol)
+                0 * max by (symbol) (last_over_time(tickpulse_ingest_symbol_active{service_name="tickpulse-api"}[45s]))
+                )
                 and on (symbol)
-                (sum by (symbol) (increase(tickpulse_ingest_ticks_received_total{service_name="tickpulse-api"}[30m])) > 0)
+                (max by (symbol) (last_over_time(tickpulse_ingest_symbol_active{service_name="tickpulse-api"}[45s])) == 1)
               instant: true
               range: false
               intervalMs: 15000
@@ -132,9 +145,14 @@ groups:
             datasourceUid: prom
             model:
               refId: A
+              # Only with real traffic (> 0.1 req/s): a single 500 among a handful of requests is not an outage.
               expr: >-
+                (
                 sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api", http_response_status_code=~"5.."}[5m]))
                 / sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api"}[5m]))
+                )
+                and
+                sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api"}[5m])) > 0.1
               instant: true
               range: false
               intervalMs: 15000

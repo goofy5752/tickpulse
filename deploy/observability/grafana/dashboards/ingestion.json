@@ -155,7 +155,7 @@
       "id": 2,
       "type": "stat",
       "title": "WebSocket",
-      "description": "Current state of the Binance WebSocket connection (Standby = this instance is not the leader).",
+      "description": "Current state of the Binance WebSocket connection (Standby = this instance is not the leader; Offline = no report from the API in the last 45 s).",
       "targets": [
         {
           "refId": "A",
@@ -164,7 +164,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "max(tickpulse_ws_state{service_name=\"tickpulse-api\"})",
+          "expr": "max(last_over_time(tickpulse_ws_state{service_name=\"tickpulse-api\"}[45s]))",
           "legendFormat": "",
           "range": false,
           "instant": true
@@ -212,7 +212,7 @@
               }
             ]
           },
-          "noValue": "No data"
+          "noValue": "Offline"
         },
         "overrides": []
       },
@@ -257,7 +257,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "max(tickpulse_leader_is_leader{service_name=\"tickpulse-api\"})",
+          "expr": "max(last_over_time(tickpulse_leader_is_leader{service_name=\"tickpulse-api\"}[45s]))",
           "legendFormat": "",
           "range": false,
           "instant": true
@@ -295,7 +295,7 @@
               }
             ]
           },
-          "noValue": "No data"
+          "noValue": "Offline"
         },
         "overrides": []
       },
@@ -1658,7 +1658,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "max(tickpulse_ws_state{service_name=\"tickpulse-api\"})",
+          "expr": "max(last_over_time(tickpulse_ws_state{service_name=\"tickpulse-api\"}[45s]))",
           "legendFormat": "WebSocket",
           "range": true,
           "instant": false
@@ -1670,7 +1670,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "max(tickpulse_leader_is_leader{service_name=\"tickpulse-api\"})",
+          "expr": "max(last_over_time(tickpulse_leader_is_leader{service_name=\"tickpulse-api\"}[45s]))",
           "legendFormat": "Leader",
           "range": true,
           "instant": false
@@ -1801,7 +1801,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "sum by (reason) (increase(tickpulse_ws_connections_total{service_name=\"tickpulse-api\"}[$__interval]))",
+          "expr": "sum by (reason) (increase(tickpulse_ws_connections_total{service_name=\"tickpulse-api\"}[$__rate_interval]))",
           "legendFormat": "{{reason}}",
           "range": true,
           "instant": false
@@ -2123,7 +2123,7 @@
                 "uid": "prom"
               },
               "editorMode": "code",
-              "expr": "sum by (symbol) (increase(tickpulse_gapfill_trades_total{service_name=\"tickpulse-api\", symbol=~\"$symbol\"}[$__interval]))",
+              "expr": "sum by (symbol) (increase(tickpulse_gapfill_trades_total{service_name=\"tickpulse-api\", symbol=~\"$symbol\"}[$__rate_interval]))",
               "legendFormat": "{{symbol}}",
               "range": true,
               "instant": false

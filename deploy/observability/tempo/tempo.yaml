@@ -15,6 +15,20 @@ distributor:
         grpc:
           endpoint: 0.0.0.0:4317
 
+# Grafana is publicly viewable, so bound what any single query may cost.
+query_frontend:
+  api_timeout: 30s
+  max_outstanding_per_tenant: 200
+  search:
+    default_result_limit: 20
+    max_result_limit: 200
+    max_duration: 168h
+
+querier:
+  max_concurrent_queries: 8
+  search:
+    query_timeout: 30s
+
 backend_scheduler:
   provider:
     compaction:

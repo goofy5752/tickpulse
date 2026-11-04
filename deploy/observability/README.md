@@ -36,11 +36,12 @@ flowchart LR
 | `prometheus` | `prom/prometheus:v3.15.1` | 256M | 30 d (and at most 4 GB) | — |
 | `loki` | `grafana/loki:3.7.9` | 256M | 14 d (compactor) | — |
 | `tempo` | `grafana/tempo:3.1.1` | 256M | 14 d (`block_retention: 336h`) | — |
-| `grafana` | `grafana/grafana:13.3.0` | 192M | — | `127.0.0.1:3000` |
+| `grafana` | `grafana/grafana:13.3.0` | 256M | — | `127.0.0.1:3000` |
 
 Every image is pinned to an exact release. Go services also get a `GOMEMLIMIT` below their container
 limit, so the runtime collects garbage before the kernel kills the container. The collector's
-`memory_limiter` refuses data at 96 MiB instead of crashing.
+`memory_limiter` (limit 96 MiB, spike 24 MiB) starts refusing data at its 72 MiB soft limit and
+forces garbage collection at the 96 MiB hard limit, instead of letting the container be killed.
 
 ```
 deploy/observability/
@@ -74,7 +75,18 @@ docker compose -f deploy/observability/compose.observability.yml --profile obser
 ```
 
 Then open <http://localhost:3000>. The home page is **TickPulse Ingestion**. Anonymous visitors
-can view everything, and the admin login is `admin` / `GRAFANA_ADMIN_PASSWORD`.
+can view everything, and the admin login is `admin` / `${GRAFANA_ADMIN_PASSWORD:-tickpulse-dev}`.
+
+> **The admin password only takes effect on first boot.** Grafana creates the admin user from
+> `GF_SECURITY_ADMIN_PASSWORD` when the `grafana-data` volume is empty. Afterwards the stored password
+> wins, and changing the variable does nothing. So:
+>
+> - **Production must set `GRAFANA_ADMIN_PASSWORD` before the very first start.** The production
+>   compose override requires it (`${GRAFANA_ADMIN_PASSWORD:?}`), so a deployment without it fails to start
+>   instead of silently getting the local default `tickpulse-dev`.
+> - To change it later, run
+>   `docker compose exec grafana grafana cli admin reset-admin-password '<new>'`, or recreate the
+>   `grafana-data` volume. Nothing else is stored there; everything else is provisioned.
 
 To point an API that runs on the host (`dotnet run`) at the stack, set
 `Otel__Endpoint=http://localhost:4317`. Inside the compose network, use `http://otel-collector:4317`.
@@ -85,7 +97,7 @@ Tear the stack down and delete its data with `down -v`.
 
 | Variable | Default (local only) | Purpose |
 |---|---|---|
-| `GRAFANA_ADMIN_PASSWORD` | `tickpulse-dev` | Grafana admin password. **Always set it outside local development.** |
+| `GRAFANA_ADMIN_PASSWORD` | `tickpulse-dev` | Grafana admin password, applied on first boot only (see above). **Required in production.** |
 | `GRAFANA_ADMIN_USER` | `admin` | Grafana admin user |
 | `GRAFANA_ROOT_URL` | `http://localhost:3000` | `GF_SERVER_ROOT_URL`; `https://grafana.tickpulse.dev` in production |
 | `GRAFANA_COOKIE_SECURE` | `false` | `true` behind HTTPS |
@@ -106,7 +118,39 @@ Without SMTP, everything still provisions; Grafana only logs a delivery error wh
 - Provisioned dashboards cannot be saved from the UI (`allowUiUpdates: false`). The JSON in this
   folder is the source of truth.
 - Unused bundled datasource plugins are disabled (`GF_PLUGINS_DISABLE_PLUGINS`). Each one would
-  run as its own ~15 MiB process inside Grafana's 192M limit.
+  run as its own ~15 MiB process inside Grafana's memory limit.
+- Snapshots and public dashboards are off (`GF_SNAPSHOTS_ENABLED=false`,
+  `GF_PUBLIC_DASHBOARDS_ENABLED=false`), so a visitor cannot publish data out of Grafana.
+
+### Query cost and data exposure
+
+Anonymous Viewers can do anything a dashboard does. In Grafana OSS that includes sending their own
+queries to `/api/ds/query`. The stack therefore treats every datasource as public-facing.
+
+**Bounded query cost:**
+
+| Backend | Limits |
+|---|---|
+| Prometheus | `--query.max-samples=5000000`, `--query.timeout=30s` |
+| Loki | `max_query_parallelism: 4`, `max_query_length: 14d`, `max_entries_limit_per_query: 1000`, `query_timeout: 30s` |
+| Tempo | `api_timeout: 30s`, search `query_timeout: 30s`, `max_result_limit: 200`, `max_duration: 168h`, `max_concurrent_queries: 8` |
+
+**Read-only data.** The datasource proxy refuses write and delete calls from Viewers (403), and Loki
+has `deletion_mode: disabled` anyway. None of the backends is published on a host port.
+
+**No sensitive attributes are stored.** The collector's `attributes/scrub` processor deletes the
+following from every span and log record before export:
+
+- `client.address`, `network.peer.address`
+- `http.request.header.*`, `http.response.header.*`
+- `user_agent.original`
+- `url.query`
+
+The API logs IPs only as `client_ip_hash`.
+
+**Rate limiting.** In production, the host nginx in front of `grafana.tickpulse.dev` rate-limits
+`/api/ds/query` (and the other `/api/` query paths) per client IP. This bounds how fast anyone can
+spend the per-query budgets above.
 
 ## What gets provisioned
 
@@ -141,14 +185,19 @@ Thresholds are the same everywhere:
 
 | UID | Condition | Pending | Severity |
 |---|---|---|---|
-| `tp-ws-disconnected` | no instance reports `tickpulse_ws_state == 2` (Connected); missing series count as disconnected | 1 m (> 60 s) | critical |
+| `tp-ws-disconnected` | the newest `tickpulse_ws_state == 2` (Connected) sample is more than 60 s old, measured by sample timestamp, so it also fires when the API stops exporting | 0 s (fires 60–80 s after the last Connected report) | critical |
 | `tp-ingest-lag-p95` | p95 of `tickpulse_ingest_lag_milliseconds` over 5 m > 5000 | 2 m | warning |
-| `tp-zero-ticks` | a symbol that had ticks in the last 30 m received none in the last minute | 1 m (= 2 min of silence) | warning |
-| `tp-api-5xx-ratio` | 5xx share of `http_server_request_duration_seconds_count` over 5 m > 2 % | 5 m | critical |
+| `tp-zero-ticks` | a symbol with `tickpulse_ingest_symbol_active == 1` received no ticks in the last minute (never-ticked active symbols count as 0) | 1 m (= 2 min of silence) | warning |
+| `tp-api-5xx-ratio` | 5xx share of `http_server_request_duration_seconds_count` over 5 m > 2 %, only while traffic > 0.1 req/s | 5 m | critical |
 
-`tp-zero-ticks` cannot tell a symbol an admin just removed from a silent one, because the API keeps
-exporting the cumulative counter of a removed symbol. It stops firing once the symbol has been quiet
-for 30 minutes.
+Remote-written series carry **no staleness markers**, so Prometheus keeps answering instant queries
+with the last value for 5 minutes after the API stops exporting. Liveness-sensitive queries
+therefore never read a bare gauge:
+
+- the WebSocket and leader panels use `last_over_time(…[45s])` (three export intervals), so they
+  turn to *Offline* when reports stop;
+- the WebSocket alert measures the age of the last Connected sample;
+- `tp-zero-ticks` gates on `last_over_time(tickpulse_ingest_symbol_active[45s])`.
 
 ## Telemetry contract (exact series names)
 
@@ -182,6 +231,7 @@ with the same name, type and unit.
 | `tickpulse.backfill.candles` | Counter | `{candle}` | `symbol` | `tickpulse_backfill_candles_total` |
 | `tickpulse.gapfill.trades` | Counter | `{trade}` | `symbol` | `tickpulse_gapfill_trades_total` |
 | `tickpulse.api.responses` | Counter | `{response}` | `route`, `status`, `content_type` | `tickpulse_api_responses_total` |
+| `tickpulse.ingest.symbol.active` | ObservableGauge | none | `symbol` | `tickpulse_ingest_symbol_active` (1 while the symbol is monitored; removed symbols report 0 or stop being reported) |
 
 Conventions the dashboards rely on:
 
@@ -198,7 +248,11 @@ Conventions the dashboards rely on:
 - **Ingest lag buckets**: pick explicit boundaries around the 5 s alert threshold, e.g.
   `[50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000]` ms.
 - **Export interval 15 s** (`OTEL_METRIC_EXPORT_INTERVAL=15000`, or the equivalent reader option).
-  The SDK default is 60 s, which is too coarse for 1-minute rate windows and for the 60 s WebSocket alert.
+  The SDK default is 60 s, which is too coarse for 1-minute rate windows, the 45 s liveness windows
+  and the 60 s WebSocket alert.
+- **`tickpulse.ingest.symbol.active`** reports one series per symbol the instance knows about:
+  `1` while the symbol is subscribed and `0` once an admin removes it. Dropping the series also works.
+  The zero-ticks alert only considers symbols at `1`.
 
 ### Standard instruments used
 
@@ -255,9 +309,9 @@ linked panel: `tp-ingestion` panels 9, 13 and 19, and `tp-api` panel 10.
 F=deploy/observability/compose.observability.yml
 docker compose -f $F --profile observability ps            # prometheus, tempo, grafana report (healthy)
 
-curl -s -u admin:$GRAFANA_ADMIN_PASSWORD localhost:3000/api/datasources | jq -r '.[].uid'          # loki prom tempo
-curl -s -u admin:$GRAFANA_ADMIN_PASSWORD 'localhost:3000/api/search?type=dash-db' | jq -r '.[].uid' # 4 dashboards
-curl -s -u admin:$GRAFANA_ADMIN_PASSWORD localhost:3000/api/v1/provisioning/alert-rules | jq length # 4
+curl -s -u "admin:${GRAFANA_ADMIN_PASSWORD:-tickpulse-dev}" localhost:3000/api/datasources | jq -r '.[].uid'          # loki prom tempo
+curl -s -u "admin:${GRAFANA_ADMIN_PASSWORD:-tickpulse-dev}" 'localhost:3000/api/search?type=dash-db' | jq -r '.[].uid' # 4 dashboards
+curl -s -u "admin:${GRAFANA_ADMIN_PASSWORD:-tickpulse-dev}" localhost:3000/api/v1/provisioning/alert-rules | jq length # 4
 
 # Synthetic traces, logs and metrics straight into the collector:
 TG=ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.164.0
