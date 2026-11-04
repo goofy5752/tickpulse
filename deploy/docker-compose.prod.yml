@@ -1,7 +1,7 @@
 # TickPulse, production stack: db + api + the observability services, as one compose project.
 #
 # Lives in /srv/tickpulse on the server, next to observability/ (deploy/observability in the repository),
-# smoke.sh, deploy.sh and the git-ignored .env (chmod 600). The CD job copies the files and runs deploy.sh;
+# smoke.sh, deploy.sh, mask-env.sh and the git-ignored .env (chmod 600). The CD job copies the files and runs deploy.sh;
 # by hand:
 #
 #   export TICKPULSE_TAG=$(cat .last_good_tag)

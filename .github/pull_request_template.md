@@ -15,5 +15,10 @@
 ## Risks
 
 <!-- Migrations, config changes, behaviour changes, rollback notes. "None" is a valid answer. -->
+<!-- Migrations are expand-only: a rollback starts the previous image on the migrated schema. A contracting
+     migration (drop, rename, NOT NULL, narrower type) ships one release after the code stops using the object.
+     See docs/deployment.md, "Migrations and rollback". -->
+
+- [ ] No migration, or every migration is expand-only (a contracting one ships a release after its code is gone)
 
 -
