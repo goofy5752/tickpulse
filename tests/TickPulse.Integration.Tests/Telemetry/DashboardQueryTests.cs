@@ -70,17 +70,22 @@ public sealed partial class DashboardQueryTests : IAsyncLifetime
     }
 
     [Theory]
-    [InlineData(10, 10, 0)] // idle: every request in flight is a dashboard's live hub connection
-    [InlineData(12, 10, 2)]
-    [InlineData(3, -1, 3)] // no hub connection series at all
-    [InlineData(0, 1, 0)] // a transport counted a moment before its request: never negative
-    public async Task InFlight_LeavesOutTheLiveHubConnections(long activeRequests, long hubConnections, long expected)
+    [InlineData(10, 10, -1, 0)] // idle: every request in flight is a dashboard's live hub WebSocket
+    [InlineData(12, 10, -1, 2)]
+    [InlineData(3, -1, -1, 3)] // no hub connection series at all
+    [InlineData(0, 1, -1, 0)] // a transport counted a moment before its request: never negative
+    [InlineData(5, 3, 4, 2)] // long polling holds no request open between polls: only WebSockets are subtracted
+    [InlineData(2, -1, 4, 2)]
+    public async Task InFlight_LeavesOutTheLiveHubConnections(long activeRequests, long webSockets, long longPolling, long expected)
     {
         var end = DateTimeOffset.FromUnixTimeSeconds(TimeProvider.System.GetUtcNow().ToUnixTimeSeconds() - 30);
         await PushGaugeAsync("http.server.active_requests", "{request}", "Microsoft.AspNetCore.Hosting", end, activeRequests);
-        if (hubConnections >= 0)
+        foreach (var (transport, connections) in new[] { ("web_sockets", webSockets), ("long_polling", longPolling) })
         {
-            await PushGaugeAsync("signalr.server.active_connections", "{connection}", "Microsoft.AspNetCore.Http.Connections", end, hubConnections);
+            if (connections >= 0)
+            {
+                await PushGaugeAsync("signalr.server.active_connections", "{connection}", "Microsoft.AspNetCore.Http.Connections", end, connections, transport);
+            }
         }
 
         var inFlight = await QueryScalarAsync(PanelExpression("api.json", "In-flight"), end);
@@ -89,7 +94,7 @@ public sealed partial class DashboardQueryTests : IAsyncLifetime
     }
 
     /// <summary>Sends one value of an up-down counter (a non-monotonic cumulative OTLP sum, a Prometheus gauge).</summary>
-    private async Task PushGaugeAsync(string name, string unit, string scope, DateTimeOffset at, long value)
+    private async Task PushGaugeAsync(string name, string unit, string scope, DateTimeOffset at, long value, string? transport = null)
     {
         var request = new JsonObject
         {
@@ -109,7 +114,9 @@ public sealed partial class DashboardQueryTests : IAsyncLifetime
                             ["isMonotonic"] = false,
                             ["dataPoints"] = new JsonArray(new JsonObject
                             {
-                                ["attributes"] = Attributes(("service_name", "tickpulse-api"), ("service_instance_id", "p1")),
+                                ["attributes"] = transport is null
+                                    ? Attributes(("service_name", "tickpulse-api"), ("service_instance_id", "p1"))
+                                    : Attributes(("service_name", "tickpulse-api"), ("service_instance_id", "p1"), ("signalr.transport", transport)),
                                 ["timeUnixNano"] = (at.ToUnixTimeMilliseconds() * 1_000_000).ToString(CultureInfo.InvariantCulture),
                                 ["asInt"] = value.ToString(CultureInfo.InvariantCulture),
                             }),

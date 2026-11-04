@@ -519,7 +519,7 @@
       "id": 7,
       "type": "stat",
       "title": "In-flight",
-      "description": "Requests currently being processed. The live SignalR hub connections of open dashboards are left out: each one holds a request open for as long as the page is open, so they are subtracted (signalr.server.active_connections). About 0 at idle.",
+      "description": "Requests currently being processed. The live SignalR hub WebSockets of open dashboards are left out: each one holds a request open for as long as the page is open, so they are subtracted (signalr.server.active_connections with transport web_sockets; long polling holds no request open between polls and is not subtracted). About 0 at idle.",
       "targets": [
         {
           "refId": "A",
@@ -528,7 +528,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "clamp_min(sum(http_server_active_requests{service_name=\"tickpulse-api\"}) - (sum(signalr_server_active_connections{service_name=\"tickpulse-api\"}) or vector(0)), 0)",
+          "expr": "clamp_min(sum(http_server_active_requests{service_name=\"tickpulse-api\"}) - (sum(signalr_server_active_connections{service_name=\"tickpulse-api\", signalr_transport=\"web_sockets\"}) or vector(0)), 0)",
           "legendFormat": "",
           "range": true,
           "instant": false
