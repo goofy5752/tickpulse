@@ -2,10 +2,14 @@ import { useMutation } from '@tanstack/react-query'
 import { Fragment, memo, useEffect, useId, useMemo, useRef, useState, type SyntheticEvent } from 'react'
 import { apiPaths, apiUrl, getRaw, type RawResponse } from '@/api/client'
 import { isPeriod, PERIODS, type Period } from '@/api/types'
+import { FieldLabel } from '@/components/FieldLabel'
+import { InfoTip } from '@/components/InfoTip'
 import { Segmented, type SegmentedOption } from '@/components/Segmented'
+import { TitleWithTip } from '@/components/TitleWithTip'
+import type { HelpKey } from '@/content/help'
 import { highlightBody, type TokenKind } from '@/lib/highlight'
 import { SECTION_IDS } from '@/lib/links'
-import { control, fieldLabel, primaryButton, sectionLead, sectionTitle, selectControl } from '@/lib/styles'
+import { control, primaryButton, sectionLead, sectionTitle, selectControl } from '@/lib/styles'
 import { cn } from '@/lib/utils'
 
 type Endpoint = 'average' | 'sma' | 'symbols' | 'candles'
@@ -156,24 +160,32 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
     <section id={SECTION_IDS.playground} aria-labelledby={`${ids}-title`} className="glass p-5 sm:p-6">
       <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
         <div>
-          <h2 id={`${ids}-title`} className={sectionTitle}>
-            API playground
-          </h2>
+          <TitleWithTip help="playSection">
+            <h2 id={`${ids}-title`} className={sectionTitle}>
+              API playground
+            </h2>
+          </TitleWithTip>
           <p className={sectionLead}>Send a real request to the public API and read the answer exactly as it arrives.</p>
         </div>
-        <Segmented legend="Accept header" visibleLabel="Accept" mono options={ACCEPTS} value={accept} onChange={changeAccept} />
+        <div className="flex min-w-0 items-center gap-2">
+          <Segmented legend="Accept header" visibleLabel="Accept" mono options={ACCEPTS} value={accept} onChange={changeAccept} />
+          <InfoTip topic="playAccept" />
+        </div>
       </div>
 
       <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-6">
         <form onSubmit={send} className="flex min-w-0 flex-col gap-4" aria-label="Request">
-          <Segmented legend="Endpoint" options={ENDPOINTS} value={endpoint} onChange={setEndpoint} />
+          <div className="flex min-w-0 items-start gap-2">
+            <Segmented legend="Endpoint" options={ENDPOINTS} value={endpoint} onChange={setEndpoint} />
+            <InfoTip topic="playEndpoint" className="mt-[0.4375rem]" />
+          </div>
 
           <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-2 xl:grid-cols-4">
             {needsSymbol && (
               <div className={cn(endpoint === 'average' ? 'col-span-2' : 'col-span-2 sm:col-span-1 lg:col-span-2 xl:col-span-1')}>
-                <label htmlFor={`${ids}-symbol`} className={fieldLabel}>
+                <FieldLabel htmlFor={`${ids}-symbol`} help="playSymbol">
                   Symbol
-                </label>
+                </FieldLabel>
                 <input
                   id={`${ids}-symbol`}
                   list={`${ids}-symbols`}
@@ -195,12 +207,13 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
             )}
             {endpoint === 'sma' && (
               <>
-                <TextField id={`${ids}-n`} label="n" value={n} onChange={setN} numeric />
-                <PeriodField id={`${ids}-p`} label="p" value={smaP} onChange={setSmaP} />
+                <TextField id={`${ids}-n`} label="n" help="playN" value={n} onChange={setN} numeric />
+                <PeriodField id={`${ids}-p`} label="p" help="playP" value={smaP} onChange={setSmaP} />
                 <div className="col-span-2 sm:col-span-4 lg:col-span-2 xl:col-span-4">
                   <TextField
                     id={`${ids}-s`}
                     label="s (optional, ISO-8601)"
+                    help="playS"
                     value={s}
                     onChange={setS}
                     placeholder="2026-10-01T00:00:00Z"
@@ -210,14 +223,14 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
             )}
             {endpoint === 'candles' && (
               <>
-                <PeriodField id={`${ids}-cp`} label="p" value={candlesP} onChange={setCandlesP} />
-                <TextField id={`${ids}-limit`} label="limit" value={limit} onChange={setLimit} numeric />
+                <PeriodField id={`${ids}-cp`} label="p" help="playCandlesP" value={candlesP} onChange={setCandlesP} />
+                <TextField id={`${ids}-limit`} label="limit" help="playLimit" value={limit} onChange={setLimit} numeric />
               </>
             )}
           </div>
 
           <div className="min-w-0">
-            <p className={fieldLabel}>Request</p>
+            <FieldLabel help="playRequest">Request</FieldLabel>
             <p className="font-mono text-[0.75rem] leading-relaxed [overflow-wrap:anywhere] text-ink">
               <span className="mr-2 rounded-[0.3rem] bg-up-soft px-1.5 py-0.5 font-medium text-up">GET</span>
               {url}
@@ -226,7 +239,10 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
 
           <div className="min-w-0">
             <div className="mb-1.5 flex items-center justify-between gap-2">
-              <span className="text-[0.75rem] font-medium text-ink-muted">curl</span>
+              <span className="flex items-center gap-1.5">
+                <span className="text-[0.75rem] font-medium text-ink-muted">curl</span>
+                <InfoTip topic="playCurl" />
+              </span>
               <CopyButton text={curl} />
             </div>
             <pre className="rounded-(--radius-control) border border-glass-border bg-glass-strong px-3 py-2.5 text-[0.75rem] leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap text-ink">
@@ -256,6 +272,7 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
 function TextField({
   id,
   label,
+  help,
   value,
   onChange,
   numeric = false,
@@ -263,6 +280,7 @@ function TextField({
 }: {
   id: string
   label: string
+  help: HelpKey
   value: string
   onChange: (value: string) => void
   numeric?: boolean
@@ -270,9 +288,9 @@ function TextField({
 }) {
   return (
     <div>
-      <label htmlFor={id} className={fieldLabel}>
+      <FieldLabel htmlFor={id} help={help}>
         {label}
-      </label>
+      </FieldLabel>
       <input
         id={id}
         value={value}
@@ -289,12 +307,24 @@ function TextField({
   )
 }
 
-function PeriodField({ id, label, value, onChange }: { id: string; label: string; value: Period; onChange: (p: Period) => void }) {
+function PeriodField({
+  id,
+  label,
+  help,
+  value,
+  onChange,
+}: {
+  id: string
+  label: string
+  help: HelpKey
+  value: Period
+  onChange: (p: Period) => void
+}) {
   return (
     <div>
-      <label htmlFor={id} className={fieldLabel}>
+      <FieldLabel htmlFor={id} help={help}>
         {label}
-      </label>
+      </FieldLabel>
       <select
         id={id}
         value={value}
@@ -392,25 +422,36 @@ function ResponseView({ result, error, pending, stale }: ResponseViewProps) {
               >
                 {`${result.status} ${REASONS[result.status] ?? ''}`.trim()}
               </span>
+              <InfoTip topic="playStatus" />
             </p>
             <dl className="ml-auto flex items-center gap-4 font-mono text-[0.75rem]">
               <div className="flex gap-1.5">
-                <dt className="text-ink-faint">time</dt>
+                <dt className="flex items-center gap-1 text-ink-faint">
+                  time <InfoTip topic="playDuration" />
+                </dt>
                 <dd className="num text-ink">{`${Math.round(result.durationMs)} ms`}</dd>
               </div>
               <div className="flex gap-1.5">
-                <dt className="text-ink-faint">size</dt>
+                <dt className="flex items-center gap-1 text-ink-faint">
+                  size <InfoTip topic="playSize" />
+                </dt>
                 <dd className="num text-ink">{formatBytes(size)}</dd>
               </div>
             </dl>
-            <dl className="w-full font-mono text-[0.75rem]">
-              <div className="flex min-w-0 gap-1.5">
-                <dt className="shrink-0 text-code-name">Content-Type:</dt>
-                <dd className="min-w-0 truncate text-ink" title={result.contentType}>
-                  {result.contentType || '(none)'}
-                </dd>
-              </div>
-            </dl>
+            <div className="flex w-full min-w-0 items-center gap-1.5 font-mono text-[0.75rem]">
+              <dl className="min-w-0">
+                <div className="flex min-w-0 gap-1.5">
+                  <dt className="shrink-0 text-code-name">Content-Type:</dt>
+                  <dd className="min-w-0 truncate text-ink" title={result.contentType}>
+                    {result.contentType || '(none)'}
+                  </dd>
+                </div>
+              </dl>
+              <InfoTip topic="playContentType" />
+              <span className="ml-auto flex shrink-0 items-center gap-1 pl-3 text-ink-faint">
+                body <InfoTip topic="playBody" />
+              </span>
+            </div>
           </>
         ) : (
           <p className="font-mono text-[0.75rem] text-ink-faint">{pending ? 'Sending…' : 'No response yet'}</p>

@@ -16,6 +16,8 @@ being fixed. Style nits and refactors are not listed.
 - **Load test:** findings that showed up only under the heavier load that followed the E2E run (`F18`,
   and `F19`, which F18's crashes had hidden). They count with the E2E findings: 19 in all, `F1`–`F19`.
 - **Security scan:** the automated security review of the CD pipeline.
+- **Regression run:** a later end-to-end pass over the dashboard in headless Chrome against the full
+  local stack. Its findings are `N1` onwards.
 
 **Updating an entry.** When a fix merges, put its PR number on the entry and adjust the fix and test lines
 if the final version differs.
@@ -70,6 +72,7 @@ if the final version differs.
 | [F17](#f17) | Symbol lists logged as quoted JSON arrays | E2E run | Minor | #16 |
 | [F18](#f18) | The API segfaulted (exit 139) under load | Load test | Critical | #18 |
 | [F19](#f19) | The local connection pool exceeded `max_connections`: 20–35 % 500s under load | Load test | Important | #18 |
+| [N1](#n1) | Fast symbol switches broke the chart's time scale: `Value is null` on every repaint | Regression run | Important | — |
 
 ---
 
@@ -688,3 +691,36 @@ Found once [F18](#f18) stopped the crashes, which had hidden it. Fixed in the sa
   `NpgsqlConnectionPolicyTests.ConnectionBudget_*` and `Apply_NoPoolSizeInTheConnectionString_UsesTheConfiguredSize`,
   `DependencyInjectionTests.Startup_WithMigrationsOff_StillChecksTheConnectionBudget`,
   `HostShutdownTests` (the worst-case stop fits the host timeout and the stop grace period).
+
+## Found by the regression run
+
+### N1
+
+**Fast symbol switches broke the chart's time scale: `Value is null` on every repaint** · Regression run · Important · PR pending
+
+- **Symptom:**
+  - On the 1w or 1m chart, switching symbols quickly (ADA, then BTC before ADA's candles arrive)
+    threw an uncaught `Error: Value is null` from lightweight-charts' candlestick renderer. It
+    repeated on every repaint, about once a second with live trades: 10 errors in a short session.
+  - The chart still looked right, so only the console showed it.
+- **Root cause:** a bug in lightweight-charts 5.2.1, reached through the order of our `setData` calls.
+  - The library has a shortcut for when the series being re-set is the only one holding data: it
+    rebuilds its time points as new objects. When the times are unchanged, it keeps its old sorted
+    point list, so the list and the point map now hold different objects.
+  - The next `setData` on the other series cleans up through the stale list and deletes the live
+    points.
+  - The time scale then shrank to the SMA's points (8 of 27 weeks), while the candle rows kept their
+    old indices, so the renderer looked up rows that were no longer on the scale.
+  - The dashboard reached that shortcut during a switch:
+    1. While the next symbol loads, the chart redraws the current one without an SMA, so
+       `smaSeries.setData([])` left the candles as the only series with data.
+    2. The next symbol's candles then arrived on the same week grid, with empty weeks as whitespace.
+    3. When the SMA came back, the time scale broke.
+  - 5.2.1 is the latest release.
+- **Fix:** `setSeriesData` (`web/src/lib/chartSeries.ts`) feeds both series and never leaves the
+  SMA series empty while there are candles. Without a line it gets one whitespace point at the first
+  candle's time, which draws nothing, so the shortcut is never taken.
+- **Test:** `chartSeries.test.ts` drives the real lightweight-charts in jsdom through the exact
+  sequence and checks that every candle is still found at its index: `SetSeriesData_FastSymbolSwitch_KeepsEveryCandleOnTheTimeScale`
+  failed before the fix (week 25 was lost) and passes after it. Verified in Chrome against the full
+  stack: 0 console errors across fast switches on all five periods, against 3–10 before.

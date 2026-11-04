@@ -1,8 +1,10 @@
 import { memo, useMemo, useState } from 'react'
 import { useCandles } from '@/api/queries'
 import type { LivePrice, SymbolResponse } from '@/api/types'
+import { InfoTip } from '@/components/InfoTip'
 import { Skeleton } from '@/components/Skeleton'
 import { Sparkline } from '@/components/Sparkline'
+import { TitleWithTip } from '@/components/TitleWithTip'
 import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
 import { formatDuration, formatPercent, formatPrice, splitSymbol } from '@/lib/format'
 import { SECTION_IDS } from '@/lib/links'
@@ -28,9 +30,25 @@ interface TickerTilesProps {
 export const TickerTiles = memo(function TickerTiles({ symbols, isLoading, error, prices, selected, onSelect }: TickerTilesProps) {
   return (
     <section id={SECTION_IDS.markets} aria-labelledby="markets-title">
-      <h2 id="markets-title" className="sr-only">
-        Live prices
-      </h2>
+      <div className="mb-1 flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-0.5">
+        <TitleWithTip help="tilesSection">
+          <h2 id="markets-title" className="text-[0.8125rem] font-medium text-ink-muted">
+            Live prices
+          </h2>
+        </TitleWithTip>
+        {/* What each figure on a tile means. A tile is a button, so its tips cannot live inside it. */}
+        <ul aria-label="On each tile" className="flex items-center gap-3.5 text-[0.75rem] text-ink-faint">
+          <li className="flex items-center gap-1">
+            Price <InfoTip topic="tilePrice" />
+          </li>
+          <li className="flex items-center gap-1">
+            24h change <InfoTip topic="tileChange" />
+          </li>
+          <li className="flex items-center gap-1">
+            Trend <InfoTip topic="tileSparkline" />
+          </li>
+        </ul>
+      </div>
       <ul className="tile-rail -mx-4 flex snap-x snap-mandatory scroll-px-4 gap-3 overflow-x-auto px-4 py-1.5 sm:-mx-1.5 sm:scroll-px-1.5 sm:px-1.5">
         {symbols?.map((symbol) => (
           <li key={symbol.symbol} className="flex shrink-0 grow basis-[13.75rem] snap-start">
@@ -68,7 +86,8 @@ export const TickerTiles = memo(function TickerTiles({ symbols, isLoading, error
           </li>
         )}
 
-        <li className="flex shrink-0 basis-[8.5rem] snap-start">
+        <li className="relative flex shrink-0 basis-[8.5rem] snap-start">
+          <InfoTip topic="tileAdd" className="absolute top-2.5 right-2.5 z-10" />
           <a
             href={`#${SECTION_IDS.admin}`}
             className="flex w-full flex-col items-center justify-center gap-2 rounded-(--radius-glass) border border-dashed border-glass-border p-4 text-center text-[0.8125rem] text-ink-muted transition-colors duration-200 hover:border-sma/50 hover:bg-glass hover:text-ink"

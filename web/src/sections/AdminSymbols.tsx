@@ -3,11 +3,14 @@ import { memo, useEffect, useId, useMemo, useRef, useState, type SyntheticEvent 
 import { adminRequest, ApiError, apiPaths, MissingApiKeyError } from '@/api/client'
 import { BACKFILL_POLL_MS, queryKeys, useSymbols } from '@/api/queries'
 import type { BackfillStatus, SymbolResponse } from '@/api/types'
+import { FieldLabel } from '@/components/FieldLabel'
+import { InfoTip } from '@/components/InfoTip'
 import { Skeleton } from '@/components/Skeleton'
+import { TitleWithTip } from '@/components/TitleWithTip'
 import { useSessionStorage } from '@/hooks/useSessionStorage'
 import { splitSymbol } from '@/lib/format'
 import { SECTION_IDS } from '@/lib/links'
-import { control, fieldLabel, primaryButton, quietButton, sectionLead, sectionTitle } from '@/lib/styles'
+import { control, primaryButton, quietButton, sectionLead, sectionTitle } from '@/lib/styles'
 import { cn } from '@/lib/utils'
 
 /** Looks like `disabled` but keeps the button focusable. */
@@ -58,32 +61,27 @@ function describeError(error: unknown, symbol: string): Notice {
   }
 }
 
-const BACKFILL: Record<BackfillStatus, { label: string; hint: string; className: string; dot?: string }> = {
+const BACKFILL: Record<BackfillStatus, { label: string; className: string; dot?: string }> = {
   NotRequested: {
     label: 'Live only',
-    hint: 'Collecting live trades; no history was requested.',
     className: 'border-glass-border text-ink-faint',
   },
   Pending: {
     label: 'Backfill queued',
-    hint: 'Waiting for the backfill worker.',
     className: 'border-glass-border bg-glass-strong text-ink-muted',
     dot: 'bg-ink-faint status-dot-wait',
   },
   Running: {
     label: 'Backfilling',
-    hint: 'Loading recent history from Binance.',
     className: 'border-glass-border bg-glass-strong text-ink',
     dot: 'bg-up status-dot-wait',
   },
   Completed: {
     label: 'Backfilled',
-    hint: 'Recent history is loaded.',
     className: 'border-up/30 bg-up-soft text-up',
   },
   Failed: {
     label: 'Backfill failed',
-    hint: 'Live trades still arrive; history could not be loaded.',
     className: 'border-down/35 bg-down-soft text-down',
   },
 }
@@ -92,7 +90,6 @@ function BackfillBadge({ status }: { status: BackfillStatus }) {
   const style = BACKFILL[status]
   return (
     <span
-      title={style.hint}
       className={cn('inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[0.75rem] whitespace-nowrap', style.className)}
     >
       {style.dot && <span aria-hidden="true" className={cn('relative size-1.5 rounded-full', style.dot)} />}
@@ -213,16 +210,18 @@ export const AdminSymbols = memo(function AdminSymbols() {
 
   return (
     <section id={SECTION_IDS.admin} aria-labelledby={`${ids}-title`} className="glass flex flex-col p-5 sm:p-6">
-      <h2 id={`${ids}-title`} className={sectionTitle}>
-        Monitored symbols
-      </h2>
+      <TitleWithTip help="adminSection">
+        <h2 id={`${ids}-title`} className={sectionTitle}>
+          Monitored symbols
+        </h2>
+      </TitleWithTip>
       <p className={sectionLead}>Choose which Binance pairs TickPulse collects. Changes need the admin API key.</p>
 
       <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="min-w-0">
-          <label htmlFor={`${ids}-key`} className={fieldLabel}>
+          <FieldLabel htmlFor={`${ids}-key`} help="adminKey">
             Admin API key
-          </label>
+          </FieldLabel>
           <div className="flex gap-2">
             <input
               ref={keyInput}
@@ -271,10 +270,10 @@ export const AdminSymbols = memo(function AdminSymbols() {
         </div>
 
         <form onSubmit={submitAdd} className="min-w-0" aria-label="Add a symbol">
-          <label htmlFor={`${ids}-symbol`} className={fieldLabel}>
+          <FieldLabel htmlFor={`${ids}-symbol`} help="adminSymbol">
             Symbol to add
-          </label>
-          <div className="flex gap-2">
+          </FieldLabel>
+          <div className="flex items-center gap-2">
             <input
               ref={symbolInput}
               id={`${ids}-symbol`}
@@ -292,6 +291,7 @@ export const AdminSymbols = memo(function AdminSymbols() {
             <button type="submit" disabled={add.isPending} className={primaryButton}>
               {add.isPending ? 'Adding…' : 'Add symbol'}
             </button>
+            <InfoTip topic="adminAdd" />
           </div>
           <p id={`${ids}-symbol-hint`} className="mt-1.5 text-[0.75rem] text-ink-faint">
             Any Binance spot pair that is trading.
@@ -316,9 +316,20 @@ export const AdminSymbols = memo(function AdminSymbols() {
         </div>
       </div>
 
-      <div className="mt-4 flex items-baseline justify-between gap-3 border-b border-glass-border pb-2">
-        <h3 className="text-[0.8125rem] font-medium text-ink-muted">Active</h3>
-        {symbols.data && <span className="num text-[0.75rem] text-ink-faint">{active.length}</span>}
+      <div className="mt-4 flex items-center justify-between gap-3 border-b border-glass-border pb-2">
+        <div className="flex items-center gap-1.5">
+          <h3 className="text-[0.8125rem] font-medium text-ink-muted">Active</h3>
+          {symbols.data && <span className="num text-[0.75rem] text-ink-faint">{active.length}</span>}
+          <InfoTip topic="adminActive" />
+        </div>
+        <div className="flex items-center gap-3.5 text-[0.75rem] text-ink-faint">
+          <span className="flex items-center gap-1">
+            Backfill <InfoTip topic="adminBackfill" />
+          </span>
+          <span className="flex items-center gap-1">
+            Remove <InfoTip topic="adminRemove" />
+          </span>
+        </div>
       </div>
 
       {symbols.isPending ? (
