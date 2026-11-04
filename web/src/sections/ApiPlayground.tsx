@@ -230,7 +230,7 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
           </div>
 
           <div className="min-w-0">
-            <FieldLabel help="playRequest">Request</FieldLabel>
+            <FieldLabel>Request</FieldLabel>
             <p className="font-mono text-[0.75rem] leading-relaxed [overflow-wrap:anywhere] text-ink">
               <span className="mr-2 rounded-[0.3rem] bg-up-soft px-1.5 py-0.5 font-medium text-up">GET</span>
               {url}
@@ -241,7 +241,7 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
             <div className="mb-1.5 flex items-center justify-between gap-2">
               <span className="flex items-center gap-1.5">
                 <span className="text-[0.75rem] font-medium text-ink-muted">curl</span>
-                <InfoTip topic="playCurl" />
+                
               </span>
               <CopyButton text={curl} />
             </div>
@@ -427,13 +427,13 @@ function ResponseView({ result, error, pending, stale }: ResponseViewProps) {
             <dl className="ml-auto flex items-center gap-4 font-mono text-[0.75rem]">
               <div className="flex gap-1.5">
                 <dt className="flex items-center gap-1 text-ink-faint">
-                  time <InfoTip topic="playDuration" />
+                  time
                 </dt>
                 <dd className="num text-ink">{`${Math.round(result.durationMs)} ms`}</dd>
               </div>
               <div className="flex gap-1.5">
                 <dt className="flex items-center gap-1 text-ink-faint">
-                  size <InfoTip topic="playSize" />
+                  size
                 </dt>
                 <dd className="num text-ink">{formatBytes(size)}</dd>
               </div>
@@ -449,7 +449,7 @@ function ResponseView({ result, error, pending, stale }: ResponseViewProps) {
               </dl>
               <InfoTip topic="playContentType" />
               <span className="ml-auto flex shrink-0 items-center gap-1 pl-3 text-ink-faint">
-                body <InfoTip topic="playBody" />
+                body
               </span>
             </div>
           </>

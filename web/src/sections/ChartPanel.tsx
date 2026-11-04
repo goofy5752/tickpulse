@@ -219,7 +219,7 @@ function Legend({ period, n, note }: { period: Period; n: number | undefined; no
             <span className="h-3.5 w-[5px] rounded-[1px] bg-down" />
           </span>
           {period} candles
-          <InfoTip topic="chartCandles" className="-ml-0.5" />
+          
         </li>
         {n !== undefined && (
           <>

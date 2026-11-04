@@ -121,7 +121,10 @@ export function InfoTip({ topic, placement = 'top', children, label, className }
     }
     update()
     let frame = 0
-    const schedule = () => {
+    const schedule = (event: Event) => {
+      // Scrolling the tooltip's own body moves nothing; re-placing it would reset its height and
+      // snap the scroll back to the top.
+      if (event.target instanceof Node && tipRef.current?.contains(event.target)) return
       cancelAnimationFrame(frame)
       frame = requestAnimationFrame(update)
     }

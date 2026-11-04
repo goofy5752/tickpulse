@@ -29,6 +29,26 @@ describe('InfoTip', () => {
     expect(trigger.dataset.help).toBe('smaN')
   })
 
+  it('InfoTip_ScrollingItsOwnBody_DoesNotReplaceIt', async () => {
+    const { user, trigger } = setup()
+    await user.hover(trigger)
+    const tip = await screen.findByRole('tooltip')
+    const body = tip.querySelector<HTMLElement>('.info-tip-body')
+    if (!body) throw new Error('no body')
+    const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve))
+
+    // A marker the placement would overwrite: re-placing resets the height and snaps the scroll back.
+    tip.style.maxHeight = '77px'
+    body.dispatchEvent(new Event('scroll'))
+    await nextFrame()
+    expect(tip.style.maxHeight).toBe('77px')
+
+    // Scrolling the page still re-places it.
+    window.dispatchEvent(new Event('scroll'))
+    await nextFrame()
+    expect(tip.style.maxHeight).not.toBe('77px')
+  })
+
   it('InfoTip_OpensOnHover_WiresAriaDescribedby_AndClosesOnLeave', async () => {
     const { user, trigger } = setup()
     await user.hover(trigger)

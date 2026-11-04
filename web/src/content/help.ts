@@ -43,11 +43,6 @@ export const HELP = {
     ],
   },
 
-  navTheme: {
-    title: 'Theme',
-    summary: 'Switches between the dark and the light theme.',
-    details: ['Dark is the default. Your choice is remembered in this browser and applied before the page draws, so it never flashes.'],
-  },
 
   // ---- Ticker tiles ----------------------------------------------------------------------------
 
@@ -60,14 +55,6 @@ export const HELP = {
     ],
   },
 
-  tilePrice: {
-    title: 'Price',
-    summary: 'The latest trade price for the pair.',
-    details: [
-      'It comes from the live stream. Until the first live trade arrives, the tile shows the latest price the API knows, which can be the last stored close.',
-      'The figure briefly glows teal after an uptick and rose after a downtick. "Waiting" means no price is known yet. Pairs quoted in a dollar stablecoin such as USDT get a $ sign.',
-    ],
-  },
 
   tileChange: {
     title: '24h change',
@@ -79,20 +66,7 @@ export const HELP = {
     example: 'close a day ago 76,000, latest 77,520\n(77,520 − 76,000) ÷ 76,000 × 100 = +2.00%',
   },
 
-  tileSparkline: {
-    title: 'Trend line',
-    summary: 'The closes of the last 60 one-minute candles, ending at the newest trade.',
-    details: [
-      'Minutes without trades have no candle, so for a quiet pair the line covers more than an hour. Screen readers hear the real span and change, for example "Past 59m, +0.03%".',
-      'Teal when the line ends higher than it starts, rose when lower. It shows that span only, not the 24h change.',
-    ],
-  },
 
-  tileAdd: {
-    title: 'Add symbol',
-    summary: 'Jumps to Monitored symbols, where you add a Binance pair with the admin API key.',
-    details: ['A new symbol gets its own tile as soon as the API confirms it.'],
-  },
 
   // ---- Chart -----------------------------------------------------------------------------------
 
@@ -118,14 +92,6 @@ export const HELP = {
     ],
   },
 
-  chartCandles: {
-    title: 'Candles',
-    summary: 'One candle per bucket: the first, highest, lowest and last trade price in it.',
-    details: [
-      'Teal when the bucket closed above its open, rose when below. The newest candle is still open and moves with live trades.',
-      'A gap is a bucket without trades. Where backfill is on, history from before collection began comes from 1-minute klines loaded from Binance.',
-    ],
-  },
 
   chartSma: {
     title: 'SMA line',
@@ -146,14 +112,6 @@ export const HELP = {
     ],
   },
 
-  chartOhlc: {
-    title: 'Candle readout',
-    summary: 'Open, high, low and close of the candle under the cursor, with its change and the SMA there.',
-    details: [
-      'The date is the start of the candle\'s bucket, in UTC. The percentage is close against open. Without a cursor, the readout follows the newest candle as trades arrive.',
-    ],
-    example: 'Nov 3  O 76,816.01  H 78,063.30  L 76,388.88  C 77,453.86  +0.83%',
-  },
 
   // ---- Analytics: 24h average -----------------------------------------------------------------
 
@@ -218,11 +176,6 @@ export const HELP = {
     example: 'n = 3, p = 1d, s = Oct 1, 09:30\nfirst bucket at or after s: Oct 2, 00:00\naverages the closes of Oct 2, 3 and 4\nwindow end: Oct 5, 00:00 (exclusive)',
   },
 
-  smaNow: {
-    title: 'Now',
-    summary: 'Clears the start, so the window is the last n complete buckets ending now.',
-    details: ['Highlighted while no start is set. The window then moves forward by itself as buckets close.'],
-  },
 
   smaValue: {
     title: 'SMA value',
@@ -259,12 +212,6 @@ export const HELP = {
     example: 'Oct 15 → Nov 4 UTC with n = 20, p = 1d\nthe 20 days Oct 15 to Nov 3; Nov 4 is still open',
   },
 
-  smaRequest: {
-    title: 'Request',
-    summary: 'The exact API request behind the figures above.',
-    details: ['Run it yourself against the same server, or open it in the API playground below. Answers are JSON by default and XML when you ask for it.'],
-    example: 'GET /api/BTCUSDT/SimpleMovingAverage?n=20&p=1d',
-  },
 
   // ---- API playground --------------------------------------------------------------------------
 
@@ -338,16 +285,7 @@ export const HELP = {
     example: 'p=1d&limit=2 → yesterday\'s candle and today\'s open one',
   },
 
-  playRequest: {
-    title: 'Request',
-    summary: 'The full URL the playground sends, built from the fields above.',
-  },
 
-  playCurl: {
-    title: 'curl',
-    summary: 'The same request as a command for a terminal, with the chosen Accept header.',
-    details: ['The URL is single-quoted, so the shell leaves characters such as & and ? alone. Copy puts it on the clipboard.'],
-  },
 
   playStatus: {
     title: 'Status',
@@ -360,16 +298,7 @@ export const HELP = {
     ],
   },
 
-  playDuration: {
-    title: 'Time',
-    summary: 'Measured in this browser, from sending the request until the whole body arrived.',
-    details: ['It includes the network, so it is longer than the time the API spent.'],
-  },
 
-  playSize: {
-    title: 'Size',
-    summary: 'The size of the response body as text, after any compression on the wire was undone.',
-  },
 
   playContentType: {
     title: 'Content-Type',
@@ -377,13 +306,6 @@ export const HELP = {
     example: 'application/json; charset=utf-8\napplication/xml; charset=utf-8\napplication/problem+json (errors)',
   },
 
-  playBody: {
-    title: 'Body',
-    summary: 'The raw response, indented for reading but never re-encoded.',
-    details: [
-      'Numbers keep every digit the API sent, such as 8 decimals on prices. When a field changes after sending, the answer dims until you send again.',
-    ],
-  },
 
   // ---- Admin -----------------------------------------------------------------------------------
 
@@ -420,14 +342,6 @@ export const HELP = {
     ],
   },
 
-  adminActive: {
-    title: 'Active symbols',
-    summary: 'The pairs being collected now, with how many there are.',
-    details: [
-      'At most 20 can be active at once by default (the server\'s Admin:MaxActiveSymbols). One more is refused with 409 symbol-limit; remove one first.',
-      'While a backfill is queued or running, the list checks its progress every 2 s.',
-    ],
-  },
 
   adminBackfill: {
     title: 'Backfill status',
@@ -477,16 +391,7 @@ export const HELP = {
     ],
   },
 
-  systemStored: {
-    title: 'Ticks stored',
-    summary: 'About how many raw trades are in the database, from table statistics rather than an exact count.',
-    details: ['Raw trades are kept for 14 days; the 1-minute candles built from them are kept for good. Hover the figure for the full number.'],
-  },
 
-  systemUptime: {
-    title: 'Uptime',
-    summary: 'How long this API instance has been running since it last started.',
-  },
 
   systemConnection: {
     title: 'Binance connection',
@@ -497,13 +402,6 @@ export const HELP = {
     ],
   },
 
-  systemLastReconnect: {
-    title: 'Last reconnect',
-    summary: 'How long ago a lost connection was last re-established.',
-    details: [
-      'Planned rotations do not count. "None yet" means the connection has not dropped since the instance started. Trades missed while it was down are fetched from Binance after reconnecting. Hover for the UTC time.',
-    ],
-  },
 
   systemNextRotation: {
     title: 'Next rotation',
@@ -513,26 +411,7 @@ export const HELP = {
 
   // ---- Footer ----------------------------------------------------------------------------------
 
-  footerRead: {
-    title: 'Read',
-    summary: 'The project documentation on GitHub.',
-    items: [
-      { term: 'README', text: 'Quick start, configuration and the full API reference.' },
-      { term: 'Engineering notes', text: 'The approach, the main decisions and their trade-offs.' },
-      { term: 'Architecture decisions', text: 'One short record per design decision.' },
-      { term: 'Deployment', text: 'The hosting setup, continuous delivery and the runbook.' },
-    ],
-  },
 
-  footerUse: {
-    title: 'Use',
-    summary: 'Tools that work against the running service.',
-    items: [
-      { term: 'API reference', text: 'Interactive reference for every endpoint, served by the API at /docs.' },
-      { term: 'Grafana', text: 'Read-only dashboards for ingestion, the API, logs and traces.' },
-      { term: 'Source on GitHub', text: 'The code, tests and pull requests.' },
-    ],
-  },
 } as const satisfies Record<string, HelpEntry>
 
 export type HelpKey = keyof typeof HELP

@@ -20,7 +20,7 @@ import { HELP, HELP_KEYS, type HelpKey } from './help'
 vi.mock('@/components/PriceChart', () => ({ PriceChart: () => <div data-testid="chart" /> }))
 
 /** Tips that only render inside the canvas chart. */
-const CHART_ONLY: readonly HelpKey[] = ['chartOhlc']
+const CHART_ONLY: readonly HelpKey[] = []
 
 // ---- Fixtures -------------------------------------------------------------------------------------
 
@@ -124,9 +124,9 @@ async function expectTips(keys: readonly HelpKey[]) {
 // ---- What every section must explain -------------------------------------------------------------
 
 const SECTIONS: Record<string, readonly HelpKey[]> = {
-  nav: ['navStatus', 'navTheme'],
-  tiles: ['tilesSection', 'tilePrice', 'tileChange', 'tileSparkline', 'tileAdd'],
-  chart: ['chartSection', 'chartPeriod', 'chartCandles', 'chartSma', 'chartWindow'],
+  nav: ['navStatus'],
+  tiles: ['tilesSection', 'tileChange'],
+  chart: ['chartSection', 'chartPeriod', 'chartSma', 'chartWindow'],
   analytics: [
     'avgPrice',
     'avgCoverage',
@@ -135,40 +135,30 @@ const SECTIONS: Record<string, readonly HelpKey[]> = {
     'smaN',
     'smaP',
     'smaS',
-    'smaNow',
     'smaValue',
     'smaDots',
     'smaPoints',
     'smaWindow',
-    'smaRequest',
   ],
   playground: [
     'playSection',
     'playAccept',
     'playEndpoint',
     'playSymbol',
-    'playRequest',
-    'playCurl',
     'playStatus',
-    'playDuration',
-    'playSize',
     'playContentType',
-    'playBody',
   ],
   playgroundSma: ['playN', 'playP', 'playS'],
   playgroundCandles: ['playCandlesP', 'playLimit'],
-  admin: ['adminSection', 'adminKey', 'adminSymbol', 'adminAdd', 'adminActive', 'adminBackfill', 'adminRemove'],
+  admin: ['adminSection', 'adminKey', 'adminSymbol', 'adminAdd', 'adminBackfill', 'adminRemove'],
   system: [
     'systemSection',
     'systemTicks',
     'systemLag',
-    'systemStored',
-    'systemUptime',
     'systemConnection',
-    'systemLastReconnect',
     'systemNextRotation',
   ],
-  footer: ['footerRead', 'footerUse'],
+  footer: [],
 }
 
 const sectionTips = (name: string): readonly HelpKey[] => SECTIONS[name] ?? []

@@ -233,7 +233,7 @@ function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
             >
               Now
             </button>
-            <InfoTip topic="smaNow" />
+            
           </div>
           <p id={`${ids}-s-hint`} className="mt-1.5 text-[0.75rem] text-ink-faint">
             {params.s === '' ? 'Leave empty for the window that ends now.' : 'The window starts at this bucket.'}
@@ -269,7 +269,7 @@ function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
           <p className="min-w-0 truncate">
             <code>GET {decodeURIComponent(apiPaths.sma(symbol, params.n, params.p, startIso))}</code>
           </p>
-          <InfoTip topic="smaRequest" />
+          
         </div>
       )}
     </div>

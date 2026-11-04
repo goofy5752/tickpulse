@@ -91,10 +91,10 @@ export const SystemPanel = memo(function SystemPanel({ stats, hubStatus }: Syste
             <Metric label="Ingest lag" help="systemLag">
               <span className={cn(stats.ingestLagMs > SLOW_LAG_MS && 'text-down')}>{formatLag(stats.ingestLagMs)}</span>
             </Metric>
-            <Metric label="Ticks stored" help="systemStored">
+            <Metric label="Ticks stored">
               <span title={`About ${formatCount(stats.storedTicksApprox)} ticks`}>{formatCompact(stats.storedTicksApprox)}</span>
             </Metric>
-            <Metric label="Uptime" help="systemUptime">{formatDuration(stats.uptimeSeconds)}</Metric>
+            <Metric label="Uptime">{formatDuration(stats.uptimeSeconds)}</Metric>
           </dl>
 
           <Rotation stats={stats} now={now} />
@@ -120,12 +120,12 @@ export const SystemPanel = memo(function SystemPanel({ stats, hubStatus }: Syste
   )
 })
 
-function Metric({ label, help, children }: { label: string; help: HelpKey; children: ReactNode }) {
+function Metric({ label, help, children }: { label: string; help?: HelpKey; children: ReactNode }) {
   return (
     <div className="min-w-0">
       <dt className="flex items-center gap-1.5 text-[0.75rem] text-ink-faint">
         {label}
-        <InfoTip topic={help} />
+        {help && <InfoTip topic={help} />}
       </dt>
       <dd className="num mt-1 text-[1.375rem] leading-none font-semibold tracking-[-0.02em] text-ink">{children}</dd>
     </div>
@@ -167,7 +167,7 @@ function Rotation({ stats, now }: { stats: SystemStatsResponse; now: number }) {
       <dl className="mt-3 grid grid-cols-1 gap-2 text-[0.8125rem] sm:grid-cols-2">
         <div className="flex justify-between gap-3 sm:block">
           <dt className="flex items-center gap-1.5 text-ink-faint">
-            Last reconnect <InfoTip topic="systemLastReconnect" />
+            Last reconnect
           </dt>
           <dd className="num text-ink">
             {Number.isFinite(reconnect) ? (

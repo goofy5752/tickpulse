@@ -320,7 +320,7 @@ export const AdminSymbols = memo(function AdminSymbols() {
         <div className="flex items-center gap-1.5">
           <h3 className="text-[0.8125rem] font-medium text-ink-muted">Active</h3>
           {symbols.data && <span className="num text-[0.75rem] text-ink-faint">{active.length}</span>}
-          <InfoTip topic="adminActive" />
+          
         </div>
         <div className="flex items-center gap-3.5 text-[0.75rem] text-ink-faint">
           <span className="flex items-center gap-1">
