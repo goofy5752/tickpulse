@@ -4,10 +4,12 @@ using System.Xml.Linq;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
 using TickPulse.Api.Hosting;
 using TickPulse.Api.Problems;
 using TickPulse.Integration.Tests.Fixtures;
+using TickPulse.Integration.Tests.Ingestion;
 using static TickPulse.Integration.Tests.Api.ProblemReader;
 
 namespace TickPulse.Integration.Tests.Api;
@@ -209,6 +211,69 @@ public sealed class NegotiationTests(ApiFactory api) : IClassFixture<ApiFactory>
         // Health and docs are not rate limited.
         using var health = await client.GetAsync(new Uri("/health/live", UriKind.Relative), Ct);
         health.StatusCode.ShouldBe(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task RateLimit_RetryAfter_IsTheTimeLeftInTheWindow()
+    {
+        await using var limited = new ApiFactory(api.Database)
+            .WithSetting("RateLimiting:PermitLimit", "1")
+            .WithSetting("RateLimiting:WindowSeconds", "60");
+        await limited.InitializeAsync();
+        using var client = limited.CreateClient();
+        var probe = new Uri("/api/probe/BTCUSDT", UriKind.Relative);
+
+        (await client.GetAsync(probe, Ct)).StatusCode.ShouldBe(HttpStatusCode.OK);
+        limited.Clock.Advance(TimeSpan.FromSeconds(25));
+        using var early = await client.GetAsync(probe, Ct);
+        limited.Clock.Advance(TimeSpan.FromSeconds(34.5));
+        using var late = await client.GetAsync(probe, Ct);
+        limited.Clock.Advance(TimeSpan.FromSeconds(0.5));
+        using var next = await client.GetAsync(probe, Ct);
+
+        early.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+        early.Headers.RetryAfter.ShouldNotBeNull().Delta.ShouldBe(TimeSpan.FromSeconds(35));
+        (await ReadAsync(early)).Detail.ShouldBe("Too many requests from this client; retry after 35 s.");
+        late.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+        late.Headers.RetryAfter.ShouldNotBeNull().Delta.ShouldBe(TimeSpan.FromSeconds(1), "rounded up, never 0");
+        next.StatusCode.ShouldBe(HttpStatusCode.OK, "a new window has started");
+    }
+
+    [Fact]
+    public async Task RateLimit_Rejections_LogOneWarningPerClientPerWindow()
+    {
+        var logs = new IngestionTestHost.LogCapture();
+        await using var limited = new ApiFactory(api.Database)
+            .WithSetting("RateLimiting:PermitLimit", "1")
+            .WithSetting("RateLimiting:WindowSeconds", "60")
+            .WithLogging(logs);
+        await limited.InitializeAsync();
+        var first = IPAddress.Parse("203.0.113.61");
+        var second = IPAddress.Parse("203.0.113.62");
+
+        (await SendAsync(limited, first, visitor: null)).ShouldBe(200);
+        for (var i = 0; i < 5; i++)
+        {
+            (await SendAsync(limited, first, visitor: null)).ShouldBe(429);
+        }
+
+        Warnings().Count.ShouldBe(1);
+
+        // Another client gets its own warning; the first client's next window gets a new one.
+        (await SendAsync(limited, second, visitor: null)).ShouldBe(200);
+        (await SendAsync(limited, second, visitor: null)).ShouldBe(429);
+        limited.Clock.Advance(TimeSpan.FromSeconds(60));
+        (await SendAsync(limited, first, visitor: null)).ShouldBe(200);
+        (await SendAsync(limited, first, visitor: null)).ShouldBe(429);
+        (await SendAsync(limited, first, visitor: null)).ShouldBe(429);
+
+        var warnings = Warnings();
+        warnings.Count.ShouldBe(3);
+        warnings.ShouldAllBe(e => e.Message.Contains("/api/probe/BTCUSDT", StringComparison.Ordinal));
+        warnings.ShouldNotContain(e => e.Message.Contains(first.ToString(), StringComparison.Ordinal));
+
+        List<(string Category, LogLevel Level, string EventName, string Message)> Warnings() =>
+            [.. logs.Entries.Where(e => e.Category == "TickPulse.Api.Hosting.ApiRateLimiting" && e.Level >= LogLevel.Warning)];
     }
 
     [Fact]
