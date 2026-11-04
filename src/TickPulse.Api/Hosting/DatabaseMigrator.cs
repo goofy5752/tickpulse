@@ -1,5 +1,8 @@
 using System.Globalization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Storage;
 using Npgsql;
 using TickPulse.Infrastructure.Persistence;
 
@@ -97,6 +100,15 @@ public sealed partial class DatabaseMigrator(
     {
         await using var scope = scopes.CreateAsyncScope();
         var database = scope.ServiceProvider.GetRequiredService<TickPulseDbContext>().Database;
+
+        // Npgsql tells whether the history table exists by querying it, and EF Core logs that failed query at Error,
+        // so a first start on an empty database would log two errors. Creating the table first (as MigrateAsync does
+        // anyway) makes both checks succeed. A database that does not exist yet is left to MigrateAsync to create.
+        if (await database.GetService<IRelationalDatabaseCreator>().ExistsAsync(cancellationToken))
+        {
+            await database.GetService<IHistoryRepository>().CreateIfNotExistsAsync(cancellationToken);
+        }
+
         var pending = (await database.GetPendingMigrationsAsync(cancellationToken)).ToList();
         await database.MigrateAsync(cancellationToken);
         LogMigrated(logger, pending.Count);
