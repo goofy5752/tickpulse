@@ -64,7 +64,8 @@ npm --prefix web run dev | build | lint | typecheck
   Tests use `FakeTimeProvider`.
 - **DTO timestamps** are `DateTime` with `Kind=Utc` (not `DateTimeOffset`, which
   `DataContractSerializer` renders as a complex type). JSON is ISO-8601 with `Z`.
-- **Symbols** are case-insensitive, normalised to upper case, regex `^[A-Z0-9]{5,20}$`.
+- **Symbols** are case-insensitive: trimmed, checked against `^[A-Za-z0-9]{5,20}$` (ASCII), then
+  upper-cased (`SymbolName.TryCreate`).
 - **Week buckets** start Monday 00:00 UTC, origin `2000-01-03T00:00:00Z`, identical in C# and
   SQL (`time_bucket(width, ts, origin)`).
 - **Errors** are RFC 9457 ProblemDetails, negotiated as JSON or XML on every path. Type URIs are
@@ -83,12 +84,23 @@ npm --prefix web run dev | build | lint | typecheck
   `ForwardedHeaders:KnownProxies` (IPs) and `ForwardedHeaders:KnownNetworks` (CIDRs, e.g. the
   Docker bridge `172.16.0.0/12`), each an array or comma-separated and added to loopback: the
   proxies whose `CF-Connecting-IP` is trusted as the client IP (`X-Forwarded-For` is never read);
-  `Otel:IpSalt`, the salt of the logged client-IP hash (random per process when unset).
+  `Otel:IpSalt`, the salt of the logged client-IP hash (random per process when unset);
+  `Otel:SampledRequestsPerSecond` (`10`, see Telemetry).
+  Hub and stats keys: `MarketHub:ConnectPermitLimit` (`60`) and `MarketHub:ConnectWindowSeconds`
+  (`60`), hub connection attempts per client IP; `SystemStats:CacheTtl` (`00:00:02`) and
+  `SystemStats:ReadTimeout` (`00:00:01`), the cache and read timeout of the stored-row counts.
+  The README's configuration table lists every key with its default; keep it in step when adding one.
 - **Telemetry**: the `TickPulse` meter and activity source live in
   `Infrastructure/Telemetry/TickPulseMetrics.cs`; their names, units and tags are a contract with
   the dashboards and alerts (`deploy/observability/README.md`). Record per batch, never per tick.
-  `Otel:FlushSampleRatio` (default 0.1) is the share of `ingest.flush` traces kept; requests,
-  backfill pages and gap-fills are always traced, other parentless spans never.
+  `Otel:FlushSampleRatio` (default 0.1) is the share of `ingest.flush` traces kept; backfill pages
+  and gap-fills are always traced, other parentless spans never.
+  Requests are sampled at the source (`RequestSampleBudget`, `RequestLogPolicy`): a token bucket of
+  `Otel:SampledRequestsPerSecond` (default 10) decides which ordinary requests keep their trace and
+  Information log line; the rest are Debug and counted only by the metrics. Unhandled exceptions and
+  5xx outside `/health` log at Error, `/health` 503 at Warning, 4xx and requests slower than 250 ms at
+  Information, always. **429 is the exception**: it is sampled like a 2xx, because rejections arrive
+  in floods (ADR 0016). Every request logged at Information or above keeps its trace.
   Logging is Serilog only (JSON console, plus OTLP when `Otel:Endpoint` is set; empty = off); levels
   live under `Serilog:MinimumLevel`. Never log raw IPs, keys or secrets: use `client_ip_hash`.
 - **Error negotiation**: problems go through `IProblemDetailsService` with two writers, XML
@@ -133,4 +145,7 @@ commits to `main`. Full procedure: skill `tickpulse-pr-workflow`.
 - Plan: `docs/superpowers/plans/2026-11-03-tickpulse.md` (Global Constraints, task order)
 - Skills: `.claude/skills/tickpulse-pr-workflow`, `.claude/skills/tickpulse-architecture`,
   `.claude/skills/tickpulse-testing`
-- ADRs: `docs/adr/` · Deployment: `docs/deployment.md` · Defects log: `docs/ai/defects-log.md`
+- ADRs: `docs/adr/` (index in `docs/adr/README.md`; add a record for every new design decision)
+- Deployment and scale-out design: `docs/deployment.md` · Defects log: `docs/ai/defects-log.md`
+  (add an entry for every real defect a review or live check finds) · Engineering notes:
+  `engineering-notes.md`

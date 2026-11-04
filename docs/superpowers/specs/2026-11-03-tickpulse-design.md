@@ -270,7 +270,7 @@ Binance WS (combined stream, dynamic SUBSCRIBE)
 - **Alert rules (provisioned):**
   - WS disconnected > 60 s (alert after a 30 s pending period)
   - ingest lag p95 > 5 s
-  - zero ticks for an active symbol for 2 min
+  - zero ticks for an active symbol (a 5 min pending period, so it fires after about 6 min without ticks)
   - API 5xx ratio > 2%
   - Contact point: the maintainer's email (configured via env, not committed).
 - **Access:** Grafana is served behind the host nginx + Cloudflare like the API.
