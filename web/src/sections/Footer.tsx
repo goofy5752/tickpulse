@@ -1,6 +1,4 @@
 import { PulseMark } from '@/components/PulseMark'
-import { TitleWithTip } from '@/components/TitleWithTip'
-import type { HelpKey } from '@/content/help'
 import { DOCS_PATH, GITHUB_URL, GRAFANA_URL, repoUrl } from '@/lib/links'
 
 interface FooterLink {
@@ -9,10 +7,9 @@ interface FooterLink {
   external: boolean
 }
 
-const groups: readonly { title: string; help: HelpKey; links: readonly FooterLink[] }[] = [
+const groups: readonly { title: string; links: readonly FooterLink[] }[] = [
   {
     title: 'Read',
-    help: 'footerRead',
     links: [
       { label: 'README', href: repoUrl('README.md'), external: true },
       { label: 'Engineering notes', href: repoUrl('engineering-notes.md'), external: true },
@@ -22,7 +19,6 @@ const groups: readonly { title: string; help: HelpKey; links: readonly FooterLin
   },
   {
     title: 'Use',
-    help: 'footerUse',
     links: [
       { label: 'API reference', href: DOCS_PATH, external: false },
       { label: 'Grafana', href: GRAFANA_URL, external: true },
@@ -58,9 +54,7 @@ export function Footer() {
         <nav aria-label="Project links" className="grid grid-cols-2 gap-x-10 gap-y-6">
           {groups.map((group) => (
             <div key={group.title}>
-              <TitleWithTip help={group.help}>
-                <h2 className="text-[0.75rem] font-medium text-ink-faint">{group.title}</h2>
-              </TitleWithTip>
+              <h2 className="text-[0.75rem] font-medium text-ink-faint">{group.title}</h2>
               <ul className="mt-2 space-y-1.5">
                 {group.links.map((link) => (
                   <li key={link.label}>

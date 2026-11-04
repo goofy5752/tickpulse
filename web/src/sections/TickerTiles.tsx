@@ -44,13 +44,13 @@ export const TickerTiles = memo(function TickerTiles({ symbols, isLoading, error
         {/* What each figure on a tile means. A tile is a button, so its tips cannot live inside it. */}
         <ul aria-label="On each tile" className="flex items-center gap-3.5 text-[0.75rem] text-ink-faint">
           <li className="flex items-center gap-1">
-            Price <InfoTip topic="tilePrice" />
+            Price
           </li>
           <li className="flex items-center gap-1">
             24h change <InfoTip topic="tileChange" />
           </li>
           <li className="flex items-center gap-1">
-            Trend <InfoTip topic="tileSparkline" />
+            Trend
           </li>
         </ul>
       </div>
@@ -92,7 +92,7 @@ export const TickerTiles = memo(function TickerTiles({ symbols, isLoading, error
         )}
 
         <li className="relative flex shrink-0 basis-[8.5rem] snap-start">
-          <InfoTip topic="tileAdd" className="absolute top-2.5 right-2.5 z-10" />
+          
           <a
             href={`#${SECTION_IDS.admin}`}
             className="flex w-full flex-col items-center justify-center gap-2 rounded-(--radius-glass) border border-dashed border-glass-border p-4 text-center text-[0.8125rem] text-ink-muted transition-colors duration-200 hover:border-sma/50 hover:bg-glass hover:text-ink"

@@ -323,7 +323,6 @@ function Legend({
             </span>
           )}
           {type === 'line' ? `${period} closes` : `${period} candles`}
-          <InfoTip topic="chartCandles" className="-ml-0.5" />
         </li>
         {n !== undefined && (
           <>

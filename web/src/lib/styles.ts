@@ -5,7 +5,6 @@ export const fieldLabel = 'mb-1.5 block text-[0.75rem] font-medium text-ink-mute
 export const control =
   'num h-9 w-full rounded-(--radius-control) border border-glass-border bg-glass-strong px-3 text-[0.875rem] text-ink transition-colors duration-150 hover:border-ink-faint/40'
 
-export const selectControl = `${control} select-chevron cursor-pointer appearance-none pr-8`
 
 /** The one filled button per panel. */
 export const primaryButton =

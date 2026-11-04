@@ -7,7 +7,7 @@ interface FieldLabelProps {
   htmlFor?: string
   children: ReactNode
   /** The tooltip next to the label. It sits beside the <label>, so it never joins the field's name. */
-  help: HelpKey
+  help?: HelpKey
   className?: string
 }
 
@@ -23,7 +23,7 @@ export function FieldLabel({ htmlFor, children, help, className }: FieldLabelPro
       ) : (
         <span className={text}>{children}</span>
       )}
-      <InfoTip topic={help} />
+      {help && <InfoTip topic={help} />}
     </div>
   )
 }

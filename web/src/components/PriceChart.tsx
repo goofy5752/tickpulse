@@ -20,7 +20,6 @@ import {
 } from 'lightweight-charts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CandleResponse, IsoDateTime, LivePrice, Period, SmaResponse } from '@/api/types'
-import { InfoTip } from '@/components/InfoTip'
 import { setSeriesData, toCloseRow, type CandleRow } from '@/lib/chartSeries'
 import { fillGaps, windowIndexRange, type WindowRange } from '@/lib/chartData'
 import { mergeTrade, reconcileBar, type OhlcBar } from '@/lib/liveBar'
@@ -563,7 +562,7 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
             </>
           )}
         </div>
-        {shown && <InfoTip topic="chartOhlc" className="mt-0.5" />}
+        
       </div>
       <div ref={containerRef} className="relative mt-3 min-h-0 w-full flex-1 overflow-hidden" />
       <figcaption className="sr-only">

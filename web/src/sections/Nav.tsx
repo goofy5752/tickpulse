@@ -119,10 +119,6 @@ export const Nav = memo(function Nav({ hubStatus, stats }: NavProps) {
           <StatusPill hubStatus={hubStatus} stats={stats} />
           <span className="flex items-center gap-1.5">
             <ThemeToggle />
-            {/* Below 640 px the nav has no room for it; the menu carries it instead. */}
-            <span className="hidden sm:contents">
-              <InfoTip topic="navTheme" placement="bottom" />
-            </span>
           </span>
           <button
             type="button"
@@ -158,9 +154,6 @@ export const Nav = memo(function Nav({ hubStatus, stats }: NavProps) {
         <p className="mt-1 flex items-center gap-4 border-t border-glass-border px-3 pt-2.5 pb-1 text-[0.75rem] text-ink-faint sm:hidden">
           <span className="flex items-center gap-1.5">
             Live status <InfoTip topic="navStatus" />
-          </span>
-          <span className="flex items-center gap-1.5">
-            Theme <InfoTip topic="navTheme" />
           </span>
         </p>
       </nav>

@@ -1,15 +1,18 @@
 import { useMutation } from '@tanstack/react-query'
 import { Fragment, memo, useEffect, useId, useMemo, useRef, useState, type SyntheticEvent } from 'react'
 import { apiPaths, apiUrl, getRaw, type RawResponse } from '@/api/client'
-import { isPeriod, PERIODS, type Period } from '@/api/types'
+import type { Period } from '@/api/types'
 import { FieldLabel } from '@/components/FieldLabel'
 import { InfoTip } from '@/components/InfoTip'
 import { Segmented, type SegmentedOption } from '@/components/Segmented'
+import { Select } from '@/components/Select'
+import { SuggestInput } from '@/components/SuggestInput'
 import { TitleWithTip } from '@/components/TitleWithTip'
 import type { HelpKey } from '@/content/help'
 import { highlightBody, type TokenKind } from '@/lib/highlight'
 import { SECTION_IDS } from '@/lib/links'
-import { control, primaryButton, sectionLead, sectionTitle, selectControl } from '@/lib/styles'
+import { PERIOD_OPTIONS } from '@/lib/periodOptions'
+import { control, primaryButton, sectionLead, sectionTitle } from '@/lib/styles'
 import { cn } from '@/lib/utils'
 
 type Endpoint = 'average' | 'sma' | 'symbols' | 'candles'
@@ -169,7 +172,6 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
         </div>
         <div className="flex min-w-0 items-center gap-2">
           <Segmented legend="Accept header" visibleLabel="Accept" mono options={ACCEPTS} value={accept} onChange={changeAccept} />
-          <InfoTip topic="playAccept" />
         </div>
       </div>
 
@@ -186,23 +188,16 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
                 <FieldLabel htmlFor={`${ids}-symbol`} help="playSymbol">
                   Symbol
                 </FieldLabel>
-                <input
+                <SuggestInput
                   id={`${ids}-symbol`}
-                  list={`${ids}-symbols`}
                   value={symbolText}
-                  onChange={(event) => {
-                    setTypedSymbol(event.target.value)
-                  }}
+                  onChange={setTypedSymbol}
+                  suggestions={symbols}
                   autoComplete="off"
                   spellCheck={false}
                   autoCapitalize="characters"
                   className={cn(control, 'font-mono text-[0.8125rem] uppercase')}
                 />
-                <datalist id={`${ids}-symbols`}>
-                  {symbols.map((name) => (
-                    <option key={name} value={name} />
-                  ))}
-                </datalist>
               </div>
             )}
             {endpoint === 'sma' && (
@@ -230,7 +225,7 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
           </div>
 
           <div className="min-w-0">
-            <FieldLabel help="playRequest">Request</FieldLabel>
+            <FieldLabel>Request</FieldLabel>
             <p className="font-mono text-[0.75rem] leading-relaxed [overflow-wrap:anywhere] text-ink">
               <span className="mr-2 rounded-[0.3rem] bg-up-soft px-1.5 py-0.5 font-medium text-up">GET</span>
               {url}
@@ -241,7 +236,7 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
             <div className="mb-1.5 flex items-center justify-between gap-2">
               <span className="flex items-center gap-1.5">
                 <span className="text-[0.75rem] font-medium text-ink-muted">curl</span>
-                <InfoTip topic="playCurl" />
+                
               </span>
               <CopyButton text={curl} />
             </div>
@@ -325,20 +320,7 @@ function PeriodField({
       <FieldLabel htmlFor={id} help={help}>
         {label}
       </FieldLabel>
-      <select
-        id={id}
-        value={value}
-        onChange={(event) => {
-          if (isPeriod(event.target.value)) onChange(event.target.value)
-        }}
-        className={cn(selectControl, 'font-mono text-[0.8125rem]')}
-      >
-        {PERIODS.map((period) => (
-          <option key={period} value={period}>
-            {period}
-          </option>
-        ))}
-      </select>
+      <Select id={id} value={value} options={PERIOD_OPTIONS} onChange={onChange} mono />
     </div>
   )
 }
@@ -427,13 +409,13 @@ function ResponseView({ result, error, pending, stale }: ResponseViewProps) {
             <dl className="ml-auto flex items-center gap-4 font-mono text-[0.75rem]">
               <div className="flex gap-1.5">
                 <dt className="flex items-center gap-1 text-ink-faint">
-                  time <InfoTip topic="playDuration" />
+                  time
                 </dt>
                 <dd className="num text-ink">{`${Math.round(result.durationMs)} ms`}</dd>
               </div>
               <div className="flex gap-1.5">
                 <dt className="flex items-center gap-1 text-ink-faint">
-                  size <InfoTip topic="playSize" />
+                  size
                 </dt>
                 <dd className="num text-ink">{formatBytes(size)}</dd>
               </div>
@@ -447,9 +429,8 @@ function ResponseView({ result, error, pending, stale }: ResponseViewProps) {
                   </dd>
                 </div>
               </dl>
-              <InfoTip topic="playContentType" />
               <span className="ml-auto flex shrink-0 items-center gap-1 pl-3 text-ink-faint">
-                body <InfoTip topic="playBody" />
+                body
               </span>
             </div>
           </>
