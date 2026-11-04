@@ -163,7 +163,10 @@ On the server, `deploy.sh` works through these steps and stops at the first fail
    Compose cannot see changes inside bind-mounted files, which is why `deploy.sh` does this itself.
 5. **Start.** `up -d --remove-orphans`, and when `observability/` changed,
    `up -d --no-deps --force-recreate` of its five services.
-6. **Ready.** It waits up to 90 s for `/health/ready` on `127.0.0.1:8085` to return 200.
+6. **Ready.** It waits up to 180 s (`READY_TIMEOUT`) for `/health/ready` on `127.0.0.1:8085` to return 200.
+   The api applies its migrations before it serves anything and retries them for up to 120 s
+   (`MigrationRetryOptions.Timeout`), so this wait must stay above that. `DeployReadyTimeoutTests` fails
+   the build if the two drift apart.
 7. **Smoke.** It runs `./smoke.sh http://127.0.0.1:8085`, retrying for up to 120 s, so a first start on an
    empty database has time for its first complete 1-minute candle.
 8. **Done.** On success, it writes the sha to `.last_good_tag`, deletes leftover `.failed-*` directories,
@@ -174,9 +177,12 @@ On the server, `deploy.sh` works through these steps and stops at the first fail
 1. The failed files are renamed into `.failed-<time>/`.
 2. The files in `.previous/` are put back: the compose file, the scripts, and `observability/` if it
    differs, whose containers are then recreated again.
-3. The tag in `.last_good_tag` is started and smoke-tested again.
+3. The tag in `.last_good_tag` is started and smoke-tested again. It starts against the schema the
+   failed tag has already migrated, which is safe only because migrations are expand-only (see
+   [Migrations and rollback](#migrations-and-rollback)).
 
 The job fails either way, so a rolled-back deploy is never green.
+
 
 | Exit code | Meaning |
 |---|---|
@@ -348,6 +354,26 @@ alias dc='docker compose -f docker-compose.prod.yml --env-file .env'
 A manual deploy or rollback uses the files already in place, and takes the same deploy lock as the CD job.
 To change the files themselves, push to `main`. The output of the last CD deploy stays in
 `.incoming/deploy.log` until the next one.
+
+### Migrations and rollback
+
+The api runs with `Database__RunMigrationsOnStartup=true`, and a rollback, automatic or by hand, starts
+the previous image against a schema the newer image has already migrated. EF Core does not migrate
+down, so the previous code must work on the newer schema. One rule makes that hold:
+
+> **Migrations are expand-only. A contracting migration ships one release after the code stops using
+> the object.**
+
+- **Expand** (any release): add a table, a nullable column, a column with a default, an index, a view,
+  or a seed row. The previous image ignores what it does not know.
+- **Contract** (a later release): drop or rename a table or column, narrow a type, add `NOT NULL` to an
+  existing column, or remove seed data. Ship the code that stops reading and writing the object first,
+  let it become `.last_good_tag`, and only then ship the migration that removes it. A rollback then
+  lands on code that no longer needs the object.
+- A rename is an expand (add the new name, write both, backfill), a release that reads only the new
+  name, and a contract (drop the old one).
+
+The PR template asks for this under *Risks*. Every migration so far is additive.
 
 ### Database backup and restore
 
