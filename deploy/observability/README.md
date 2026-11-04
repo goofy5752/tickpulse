@@ -285,7 +285,9 @@ Conventions the dashboards rely on:
   export; a backfill stores thousands of klines in that time. `increase()` cannot see that first jump, so
   totals over the dashboard range, such as **Candles backfilled**, use
   `(max_over_time(c[$__range]) - c offset $__range) or max_over_time(c[$__range])` per series: a series
-  that started inside the range counts in full, an older one from its value at the range start.
+  that started inside the range counts in full, an older one from its value at the range start. That start
+  value comes from the 5 min lookback, so a telemetry gap longer than 5 min at the range start makes an older
+  series count in full (an over-report by what it stored before the range).
   `tests/TickPulse.Integration.Tests/Telemetry/DashboardQueryTests.cs` checks that panel against a real
   Prometheus.
 - **Export interval 15 s** (the metric reader's export interval).

@@ -44,9 +44,11 @@ public sealed class AdminSymbolsController(SymbolAdminService admin) : Controlle
     [ProducesResponseType<ProblemResponse>(StatusCodes.Status409Conflict)]
     [ProducesResponseType<ProblemResponse>(StatusCodes.Status422UnprocessableEntity)]
     [ProducesResponseType<ProblemResponse>(StatusCodes.Status503ServiceUnavailable)]
-    public async Task<IActionResult> AddAsync([FromBody] AddSymbolRequest request, CancellationToken ct)
+    public async Task<IActionResult> AddAsync([FromBody] AddSymbolRequest? request, CancellationToken ct)
     {
-        var result = await admin.AddAsync(request.Symbol, ct);
+        // An empty body binds as null (the parameter is nullable), so it gets the same `symbol` validation problem as
+        // a body without the field.
+        var result = await admin.AddAsync(request?.Symbol, ct);
         return result is { IsSuccess: true, Value: { Created: true } added }
             ? Created(Url.RouteUrl(GetRouteName, new { symbol = added.Symbol.Name }), added.Symbol.ToAdminContract())
             : this.ToActionResult(result, r => r.Symbol.ToAdminContract());

@@ -39,6 +39,7 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
     [InlineData("GET", Path)]
     [InlineData("POST", Path)]
     [InlineData("DELETE", Path + "/BTCUSDT")]
+    [InlineData("GET", Path + "/BTCUSDT")]
     public async Task NoKey_Returns401Problem(string method, string path)
     {
         using var response = await SendAsync(api, new HttpMethod(method), path, key: null, body: method == "POST" ? "BNBUSDT" : null);
@@ -377,10 +378,7 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         problem.Type.ShouldBe(TypeBase + "validation");
         problem.Status.ShouldBe(400);
         problem.Detail.ShouldBe("symbol is required.");
-        using var document = JsonDocument.Parse(problem.Raw);
-        var errors = document.RootElement.GetProperty("errors").EnumerateObject().ToArray();
-        errors.Select(e => e.Name).ShouldBe(["symbol"]);
-        errors[0].Value.EnumerateArray().Select(v => v.GetString()).ShouldBe(["symbol is required."]);
+        ShouldOnlyRequireSymbol(problem);
         api.Binance.ReceivedRequests.Count.ShouldBe(requestsBefore);
     }
 
@@ -402,6 +400,7 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         var problem = await ReadAsync(response);
         problem.Type.ShouldBe(TypeBase + "validation");
         problem.Detail.ShouldBe("symbol is required.");
+        ShouldOnlyRequireSymbol(problem);
     }
 
     [Theory]
@@ -478,19 +477,27 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
     }
 
     [Fact]
-    public async Task Add_MissingBody_Returns400Validation()
+    public async Task Add_MissingBody_Returns400Validation_AboutSymbol()
     {
-        using var client = api.CreateClient();
-        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(Path, UriKind.Relative))
+        foreach (var (contentType, problemType) in new[] { ("application/json", JsonMediaType), ("application/xml", XmlMediaType) })
         {
-            Content = new StringContent(string.Empty, Encoding.UTF8, "application/json"),
-        };
-        request.Headers.Add(ApiKeyHeader, ApiFactory.AdminApiKey);
+            using var client = api.CreateClient();
+            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(Path, UriKind.Relative))
+            {
+                Content = new StringContent(string.Empty, Encoding.UTF8, contentType),
+            };
+            request.Headers.Add(ApiKeyHeader, ApiFactory.AdminApiKey);
+            request.Headers.Add("Accept", contentType);
 
-        using var response = await client.SendAsync(request, Ct);
+            using var response = await client.SendAsync(request, Ct);
 
-        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
-        (await ReadAsync(response)).Type.ShouldBe(TypeBase + "validation");
+            response.StatusCode.ShouldBe(HttpStatusCode.BadRequest, contentType);
+            MediaType(response).ShouldBe(problemType);
+            var problem = await ReadAsync(response);
+            problem.Type.ShouldBe(TypeBase + "validation");
+            problem.Detail.ShouldBe("symbol is required.");
+            ShouldOnlyRequireSymbol(problem);
+        }
     }
 
     [Fact]
@@ -732,6 +739,30 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         factory.Services.GetRequiredService<ISymbolRepository>().FindAsync(
             SymbolName.TryCreate(symbol, out var name) ? name : throw new ArgumentException(symbol, nameof(symbol)),
             Ct);
+
+    /// <summary>The problem's <c>errors</c> hold exactly one entry: <c>symbol: ["symbol is required."]</c>.</summary>
+    private static void ShouldOnlyRequireSymbol(Problem problem)
+    {
+        var errors = Errors(problem);
+        errors.Keys.ShouldBe(["symbol"]);
+        errors["symbol"].ShouldBe(["symbol is required."]);
+    }
+
+    /// <summary>The <c>errors</c> member of a validation problem, from JSON or XML (one element per message).</summary>
+    private static Dictionary<string, string[]> Errors(Problem problem)
+    {
+        if (problem.Raw.TrimStart().StartsWith('<'))
+        {
+            XNamespace rfc7807 = "urn:ietf:rfc:7807";
+            return XDocument.Parse(problem.Raw).Root!.Element(rfc7807 + "errors").ShouldNotBeNull().Elements()
+                .GroupBy(e => e.Name.LocalName)
+                .ToDictionary(g => g.Key, g => g.Select(e => e.Value).ToArray());
+        }
+
+        using var json = JsonDocument.Parse(problem.Raw);
+        return json.RootElement.GetProperty("errors").EnumerateObject()
+            .ToDictionary(p => p.Name, p => p.Value.EnumerateArray().Select(v => v.GetString()!).ToArray());
+    }
 
     private static async Task<JsonDocument> JsonAsync(HttpResponseMessage response) =>
         JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));

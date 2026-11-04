@@ -4,7 +4,7 @@
  *
  * It negotiates JSON or XML like the real API (DataContract-style XML in the
  * https://tickpulse.dev/schema/v1 namespace, problems as application/problem+xml) and answers the
- * admin routes:
+ * admin routes (list, add, get one, remove):
  * - the admin key is `dev-admin-key`; a missing or different key gets 401
  * - open the page with `?mock-admin=disabled` to get 403 `admin-disabled` on every admin call
  * - SOLUSDT, BNBUSDT, XRPUSDT, DOGEUSDT, LINKUSDT, AVAXUSDT and LTCUSDT are "trading"; any other
@@ -191,6 +191,12 @@ function adminRoute(url: URL, method: string, headers: Headers, body: unknown): 
   }
 
   const match = /^\/api\/admin\/symbols\/([^/]+)$/.exec(url.pathname)
+  if (match && method === 'GET') {
+    // The target of the Location header of a created symbol; inactive symbols are found too.
+    const symbol = decodeURIComponent(match[1] ?? '')
+    const found = market.symbols().find((entry) => entry.symbol === symbol.trim().toUpperCase())
+    return found ? data(found, SYMBOL) : unknownSymbol(symbol)
+  }
   if (match && method === 'DELETE') {
     const symbol = decodeURIComponent(match[1] ?? '')
     return market.removeSymbol(symbol) ? { kind: 'empty', status: 204 } : unknownSymbol(symbol)

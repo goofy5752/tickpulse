@@ -27,9 +27,11 @@ public sealed class AnalyticsService(
     public const int MaxCandleLimit = 1000;
 
     /// <summary>
-    /// How far before the minute of <c>now − 24 h</c> the reference close of the 24 h change may lie. An older
-    /// reference (a backfill that has not reached <c>now − 24 h</c> yet, or a gap in the data) would measure a
-    /// longer stretch than 24 h, so the change is null instead.
+    /// How far before the minute of <c>now − 24 h</c> the reference close of the 24 h change may lie while the
+    /// symbol's backfill is not <see cref="BackfillStatus.Completed"/>. Until then, an older reference can be the
+    /// frontier of a backfill that has not reached <c>now − 24 h</c> yet (also after a failure, or while a
+    /// reactivation gap is being filled), so the change is null instead. Once the backfill has completed, an older
+    /// close is the last real price before the window (a thin pair without trades), as in a rolling 24 h ticker.
     /// </summary>
     public static readonly TimeSpan DayAgoCloseTolerance = TimeSpan.FromMinutes(15);
 
@@ -122,9 +124,10 @@ public sealed class AnalyticsService(
     /// <summary>
     /// Every symbol TickPulse monitors or used to monitor. The latest price is the live one, or the last stored
     /// close; the 24 h change compares it with the close at or before <c>now − 24 h</c>. The change is null when the
-    /// latest price is itself that old (it would be compared with itself), and when that close lies more than
-    /// <see cref="DayAgoCloseTolerance"/> before the minute of <c>now − 24 h</c> (it would span far more than 24 h,
-    /// as while a backfill is still below <c>now − 24 h</c>). Three queries in all, whatever the number of symbols.
+    /// latest price is itself that old (it would be compared with itself), and, until the symbol's backfill has
+    /// completed, when that close lies more than <see cref="DayAgoCloseTolerance"/> before the minute of
+    /// <c>now − 24 h</c> (it may be a backfill frontier, far more than 24 h back). Three queries in all, whatever the
+    /// number of symbols.
     /// </summary>
     public async Task<AppResult<IReadOnlyList<SymbolSummary>>> ListSymbolsAsync(CancellationToken ct)
     {
@@ -151,7 +154,10 @@ public sealed class AnalyticsService(
         foreach (var s in all)
         {
             var latest = live[s.Id] ?? (fallback.TryGetValue(s.Id, out var close) ? close : null);
-            decimal? then = dayAgo.TryGetValue(s.Id, out var old) && old.BucketStart >= oldestReferenceUtc ? old.Close : null;
+            var boundApplies = s.BackfillStatus != BackfillStatus.Completed;
+            decimal? then = dayAgo.TryGetValue(s.Id, out var old) && (!boundApplies || old.BucketStart >= oldestReferenceUtc)
+                ? old.Close
+                : null;
             var change = latest is { } current && current.BucketStart > dayAgoUtc ? ChangePercent(current.Close, then) : null;
             summaries.Add(new SymbolSummary(s.Name, s.IsActive, latest?.Close, change, s.BackfillStatus));
         }
