@@ -85,7 +85,7 @@ if the final version differs.
 | [N10](#n10) | The Grafana vhost became the host's default server for unknown names | First server setup | Important | #30 |
 | [N11](#n11) | The first deploy was refused: the CD job never uploaded `mask-env.sh` | First deploy | Important | #32 |
 | [N12](#n12) | Grafana could not load its data source plugins on the live site | Owner, live site | Important | #33 |
-| [N13](#n13) | Runtime dashboard panels queried metric names the live exporters do not use | Production smoke test | Minor | TBD |
+| [N13](#n13) | Runtime dashboard panels queried metric names the live exporters do not use | Production smoke test | Minor | #35 |
 
 ---
 
@@ -908,7 +908,7 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
 
 ### N13
 
-**Runtime dashboard panels queried metric names the live exporters do not use** · Production smoke test · Minor · PR TBD
+**Runtime dashboard panels queried metric names the live exporters do not use** · Production smoke test · Minor · PR #35
 
 - **Symptom:** on the live Grafana, *TickPulse Runtime & DB* showed No data for the thread pool and DB
   pending-request panels; the DB timeouts panel stayed empty.
