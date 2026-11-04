@@ -74,6 +74,7 @@ public sealed class TickPulseMetrics
     private readonly Counter<long> _backfillCandles;
     private readonly Counter<long> _gapFillTrades;
     private readonly Counter<long> _apiResponses;
+    private readonly HashSet<string> _retired = new(StringComparer.OrdinalIgnoreCase);
     private volatile ChannelReader<Tick>? _channel;
 
     public TickPulseMetrics(IMeterFactory meterFactory, IngestionState state, SymbolIdCache symbols)
@@ -111,7 +112,7 @@ public sealed class TickPulseMetrics
             "tickpulse.ingest.symbol.active",
             ObserveActiveSymbols,
             unit: null,
-            "1 while this leader streams the symbol, 0 once it was removed.");
+            "1 while this leader streams the symbol; 0 once, when it was removed.");
         _wsConnections = meter.CreateCounter<long>(
             "tickpulse.ws.connections", "{connection}", "WebSocket connections opened, by reason.");
         meter.CreateObservableGauge(
@@ -183,17 +184,33 @@ public sealed class TickPulseMetrics
 
     private static KeyValuePair<string, object?> SymbolTag(string symbol) => new("symbol", symbol);
 
-    // Only the leader streams, so only the leader reports its symbols; a standby instance reports none.
-    private IEnumerable<Measurement<int>> ObserveActiveSymbols()
+    // Only the leader streams, so only the leader reports its symbols; a standby instance reports none. A removed
+    // symbol reports 0 once and then drops out, so removed symbols do not pile up as series; it reports 1 again if it
+    // is re-added. (The cache itself keeps every id: ticks of a removed symbol can still be in flight.)
+    private List<Measurement<int>> ObserveActiveSymbols()
     {
+        var measurements = new List<Measurement<int>>();
         if (!_state.IsLeader)
         {
-            yield break;
+            return measurements;
         }
 
-        foreach (var name in _symbols.KnownNames)
+        lock (_retired)
         {
-            yield return new Measurement<int>(_symbols.IsActive(name) ? 1 : 0, SymbolTag(name));
+            foreach (var name in _symbols.KnownNames)
+            {
+                if (_symbols.IsActive(name))
+                {
+                    _retired.Remove(name);
+                    measurements.Add(new Measurement<int>(1, SymbolTag(name)));
+                }
+                else if (_retired.Add(name))
+                {
+                    measurements.Add(new Measurement<int>(0, SymbolTag(name)));
+                }
+            }
         }
+
+        return measurements;
     }
 }

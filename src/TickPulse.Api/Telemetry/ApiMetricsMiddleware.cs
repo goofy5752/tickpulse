@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http.Metadata;
 using TickPulse.Infrastructure.Telemetry;
 
@@ -10,7 +11,8 @@ namespace TickPulse.Api.Telemetry;
 /// <remarks>
 /// It runs outside the exception handler and the status code pages, so it sees the final status of every response,
 /// problems included. <c>route</c> is the same template as ASP.NET Core's <c>http.route</c>
-/// (<c>api/{symbol}/24hAvgPrice</c>) and is left out when no endpoint matched. The dashboard, the hub, health and
+/// (<c>api/{symbol}/24hAvgPrice</c>), also for a 500 after an unhandled exception, and is left out when no endpoint
+/// matched. The dashboard, the hub, health and
 /// documentation are not counted.
 /// </remarks>
 internal sealed class ApiMetricsMiddleware(RequestDelegate next, TickPulseMetrics metrics)
@@ -46,9 +48,19 @@ internal sealed class ApiMetricsMiddleware(RequestDelegate next, TickPulseMetric
         }
         finally
         {
-            var route = context.GetEndpoint()?.Metadata.GetMetadata<IRouteDiagnosticsMetadata>()?.Route;
-            metrics.ApiResponse(route, context.Response.StatusCode, MediaType(context.Response.ContentType));
+            metrics.ApiResponse(Route(context), context.Response.StatusCode, MediaType(context.Response.ContentType));
         }
+    }
+
+    /// <summary>
+    /// The route template (<c>http.route</c>) of the request. After an unhandled exception the exception handler has
+    /// cleared the endpoint for its re-execution, so the one that threw is taken from <see cref="IExceptionHandlerFeature"/>.
+    /// </summary>
+    public static string? Route(HttpContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        var endpoint = context.GetEndpoint() ?? context.Features.Get<IExceptionHandlerFeature>()?.Endpoint;
+        return endpoint?.Metadata.GetMetadata<IRouteDiagnosticsMetadata>()?.Route;
     }
 
     /// <summary>The media type of a <c>Content-Type</c> value without its parameters, in lower case.</summary>

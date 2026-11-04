@@ -6,7 +6,8 @@ namespace TickPulse.Application.Abstractions;
 public interface ITickWriter
 {
     /// <summary>Returns the number of ticks that were newly inserted (replayed ticks are ignored).</summary>
-    Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, CancellationToken ct);
+    Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, CancellationToken ct) =>
+        WriteBatchAsync(ticks, new Dictionary<int, int>(), ct);
 
     /// <summary>
     /// Like <see cref="WriteBatchAsync(IReadOnlyList{Tick}, CancellationToken)"/>, and also fills

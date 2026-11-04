@@ -263,9 +263,12 @@ Conventions the dashboards rely on:
     `application/xml`, `application/problem+xml`, …), or `none` for an empty body; the XML share
     matches `.*xml.*`;
   - only `/api/…` requests are counted (not the dashboard, the hub, health or docs), and `route` is
-    left out when no endpoint matched.
+    left out when no endpoint matched (a 500 after an unhandled exception keeps the route of the
+    endpoint that threw).
 - **Ingest lag** is recorded once per stored batch: the lag of its newest tick. A batch with nothing
-  new (a gap-fill or rotation replay, whose trade times are old) records no sample. The buckets are
+  new (a gap-fill or rotation replay) records no sample, and neither does a batch whose newest tick
+  was received more than 30 s after its trade time (`TickBatchWriter.RecoveredTickAge`: recovered by
+  gap-fill over REST, not streamed). The buckets are
   `[50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000]` ms, around the 5 s alert threshold.
 - **`tickpulse.ingest.ticks.received`** counts trades from the WebSocket stream only;
   `tickpulse.gapfill.trades` counts the REST recovery. **`ticks.persisted`** counts newly stored ticks
@@ -275,11 +278,17 @@ Conventions the dashboards rely on:
   and the 60 s WebSocket alert.
 - **`tickpulse.ingest.symbol.active`** reports one series per symbol the instance knows about, and
   only while the instance is the ingestion leader (a standby instance streams nothing and reports no
-  series): `1` while the symbol is monitored and `0` once an admin removes it. The zero-ticks alert
-  only considers symbols at `1`.
+  series): `1` while the symbol is monitored, then `0` once, at the first export after an admin removed
+  it; after that the series is no longer reported, until the symbol is added again. The zero-ticks
+  alert only considers symbols at `1`.
 - **Exporters are off** when `Otel:Endpoint` is unset or empty. An unreachable or unresolvable
   endpoint only makes the exporters drop data in the background; the API keeps serving and does not
   log the failures.
+- **Trace sampling** (`Otel:FlushSampleRatio`, default `0.1`): a parent-based sampler keeps every
+  HTTP request (also when the caller sent an unsampled `traceparent`), every `backfill.page` and
+  every `gapfill.run`, and the given share of `ingest.flush` traces (by trace id). Any other span
+  without a parent, such as the leader lock probe every few seconds, is dropped. Child spans follow
+  their parent, so the database spans of an unsampled flush are dropped with it.
 
 ### Standard instruments used
 
@@ -297,8 +306,10 @@ names, and the collector panels accept both suffixed and unsuffixed names.
 ### Traces and logs
 
 - **Spans** come from ActivitySource `TickPulse`: `ingest.flush`, `backfill.page` and `gapfill.run`,
-  plus the AspNetCore (without `/health/*`), HttpClient and Npgsql instrumentation. Span attributes:
-  `tickpulse.batch.size` / `.stored` / `.attempts` on `ingest.flush`; `tickpulse.symbol` and
+  plus the AspNetCore (without `/health/*`, `client.address` and `url.query`), HttpClient and Npgsql
+  instrumentation. Span attributes: `tickpulse.batch.size` / `.stored` / `.attempts` on
+  `ingest.flush` (Error status when the batch was dropped); `tickpulse.symbol`,
+  `tickpulse.backfill.start` (ISO-8601 UTC, e.g. `2026-11-01T12:00:00.0000000Z`) and
   `tickpulse.backfill.fetched` / `.inserted` on `backfill.page`; `tickpulse.symbol` and
   `tickpulse.gapfill.from_id` / `.emitted` / `.complete` on `gapfill.run`. The trace tables search
   with TraceQL, e.g.
@@ -320,7 +331,8 @@ names, and the collector panels accept both suffixed and unsuffixed names.
     `service.version`, `deployment.environment`, `trace_id` and `span_id` added.
   - Levels come from `Serilog:MinimumLevel` in `appsettings.json`: Information by default; Warning for
     `Npgsql`, `System.Net.Http.HttpClient`, `Polly`, `Microsoft.Extensions.Http.Resilience`,
-    `Microsoft.AspNetCore` and `Microsoft.EntityFrameworkCore`.
+    `Microsoft.AspNetCore`, `Microsoft.EntityFrameworkCore` and
+    `TickPulse.Api.Auth.ApiKeyAuthenticationHandler` (its own failed-attempt warning stays visible).
 
 ## Adding a panel
 

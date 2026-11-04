@@ -181,6 +181,17 @@ public sealed class MetricsTests(ApiFactory api) : IClassFixture<ApiFactory>, ID
             .ToDictionary(m => (string)m.Tags["symbol"]!, m => m.Value)
             .ShouldBe(new Dictionary<string, int> { ["BTCUSDT"] = 1, ["ETHUSDT"] = 0 }, ignoreOrder: true);
 
+        // The removed symbol reported 0 once; from now on it is not reported, until it is added again.
+        active.Clear();
+        active.RecordObservableInstruments();
+        active.GetMeasurementSnapshot().Select(m => (string?)m.Tags["symbol"]).ShouldBe(["BTCUSDT"]);
+        symbols.Update([Symbol(Btc, "BTCUSDT"), Symbol(Eth, "ETHUSDT")]);
+        active.Clear();
+        active.RecordObservableInstruments();
+        active.GetMeasurementSnapshot()
+            .ToDictionary(m => (string)m.Tags["symbol"]!, m => m.Value)
+            .ShouldBe(new Dictionary<string, int> { ["BTCUSDT"] = 1, ["ETHUSDT"] = 1 }, ignoreOrder: true);
+
         // The session ends: the channel is no longer tracked.
         metrics.TrackChannel(null);
         depth.Clear();
@@ -227,6 +238,45 @@ public sealed class MetricsTests(ApiFactory api) : IClassFixture<ApiFactory>, ID
                 ("api/{symbol}/24hAvgPrice", "404", "application/problem+xml", 1L),
             ],
             ignoreOrder: true);
+    }
+
+    [Fact]
+    public async Task Flush_RecoveredTicks_RecordNoLagSample()
+    {
+        var state = new IngestionState(_clock);
+        var symbols = Symbols();
+        var metrics = NewMetrics(state, symbols);
+        using var persisted = Collector<long>("tickpulse.ingest.ticks.persisted");
+        using var lag = Collector<double>("tickpulse.ingest.lag");
+
+        // A gap-fill batch: new trades from ten minutes ago, fetched over REST just now.
+        var writer = new FakeTickWriter(alreadyStored: []);
+        var channel = Channel.CreateUnbounded<Tick>();
+        channel.Writer.TryWrite(new Tick(Btc, 1, 100m, 1m, T0.AddMinutes(-10), T0.AddSeconds(1)));
+        channel.Writer.TryWrite(new Tick(Btc, 2, 100m, 1m, T0.AddMinutes(-10).AddMilliseconds(5), T0.AddSeconds(1)));
+        channel.Writer.Complete();
+
+        await BatchWriter(writer, state, symbols, metrics).RunAsync(channel.Reader, Ct);
+
+        Totals(persisted).ShouldBe(new Dictionary<string, long> { ["BTCUSDT"] = 2 }, ignoreOrder: true);
+        lag.GetMeasurementSnapshot().ShouldBeEmpty();
+        TickBatchWriter.RecoveredTickAge.ShouldBe(TimeSpan.FromSeconds(30));
+    }
+
+    [Fact]
+    public async Task ApiResponse_UnhandledException_KeepsTheRoute()
+    {
+        using var responses = new MetricCollector<long>(
+            api.Services.GetRequiredService<IMeterFactory>(), TickPulseMetrics.MeterName, "tickpulse.api.responses");
+        using var client = api.CreateClient();
+
+        (await GetAsync(client, "/api/probe/throw", null)).ShouldBe(HttpStatusCode.InternalServerError);
+
+        await WaitForAsync(() => responses.GetMeasurementSnapshot().Count >= 1, "the 500 counted");
+        var recorded = responses.GetMeasurementSnapshot().ShouldHaveSingleItem();
+        recorded.Tags["route"].ShouldBe("api/probe/throw");
+        recorded.Tags["status"].ShouldBe("500");
+        recorded.Tags["content_type"].ShouldBe("application/problem+json");
     }
 
     [Fact]
@@ -343,9 +393,6 @@ public sealed class MetricsTests(ApiFactory api) : IClassFixture<ApiFactory>, ID
     private sealed class FakeTickWriter((int SymbolId, long AggTradeId)[] alreadyStored) : ITickWriter
     {
         private readonly HashSet<(int, long)> _stored = [.. alreadyStored];
-
-        public Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, CancellationToken ct) =>
-            WriteBatchAsync(ticks, new Dictionary<int, int>(), ct);
 
         public Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, IDictionary<int, int> insertedPerSymbol, CancellationToken ct)
         {

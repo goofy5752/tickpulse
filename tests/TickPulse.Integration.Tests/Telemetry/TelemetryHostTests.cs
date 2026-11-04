@@ -161,6 +161,7 @@ public sealed class TelemetryHostTests(ApiFactory api) : IClassFixture<ApiFactor
     [InlineData("Microsoft.AspNetCore.Hosting.Diagnostics", false)]
     [InlineData("Microsoft.EntityFrameworkCore.Database.Command", false)]
     [InlineData("TickPulse.Infrastructure.Backfill.BackfillWorker", true)]
+    [InlineData("TickPulse.Api.Auth.ApiKeyAuthenticationHandler", false)]
     [InlineData("Serilog.AspNetCore.RequestLoggingMiddleware", true)]
     public void LogLevels_QuietTheChattyLibraries(string category, bool information)
     {
@@ -236,19 +237,5 @@ public sealed class TelemetryHostTests(ApiFactory api) : IClassFixture<ApiFactor
     {
         public LogEventProperty CreateProperty(string name, object? value, bool destructureObjects = false) =>
             new(name, new ScalarValue(value));
-    }
-
-    /// <summary>Gives every request a remote address (the test server has none).</summary>
-    private sealed class RemoteAddressFilter(IPAddress address) : IStartupFilter
-    {
-        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
-        {
-            app.Use((HttpContext context, Func<Task> nextMiddleware) =>
-            {
-                context.Connection.RemoteIpAddress = address;
-                return nextMiddleware();
-            });
-            next(app);
-        };
     }
 }

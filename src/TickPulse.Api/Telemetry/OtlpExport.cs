@@ -37,12 +37,18 @@ internal sealed class OtlpExport : IDisposable
 
         Tracing = Sdk.CreateTracerProviderBuilder()
             .SetResourceBuilder(resource)
+            .SetSampler(TickPulseSampler.Create(TelemetrySetup.FlushSampleRatio(configuration)))
             .AddSource(TickPulseMetrics.ActivitySourceName)
             .AddAspNetCoreInstrumentation(o =>
             {
                 // Container health checks poll every few seconds; their traces would only be noise.
                 o.Filter = context => !context.Request.Path.StartsWithSegments(HealthEndpoints.PathPrefix);
-                o.EnrichWithHttpRequest = (activity, _) => activity.SetTag("client.address", null);
+                // Never store the client address or the query string (it may carry anything a client typed).
+                o.EnrichWithHttpRequest = (activity, _) =>
+                {
+                    activity.SetTag("client.address", null);
+                    activity.SetTag("url.query", null);
+                };
             })
             .AddHttpClientInstrumentation()
             .AddNpgsql()

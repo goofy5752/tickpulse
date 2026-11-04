@@ -297,9 +297,6 @@ public sealed class TickBatchWriterTests : IDisposable
 
         public int Attempts => Volatile.Read(ref _attempts);
 
-        public Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, CancellationToken ct) =>
-            WriteBatchAsync(ticks, new Dictionary<int, int>(), ct);
-
         public Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, IDictionary<int, int> insertedPerSymbol, CancellationToken ct)
         {
             Interlocked.Increment(ref _attempts);

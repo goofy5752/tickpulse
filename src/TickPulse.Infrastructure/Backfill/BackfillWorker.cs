@@ -418,7 +418,7 @@ internal sealed partial class BackfillWorker(
     {
         using var activity = TickPulseMetrics.ActivitySource.StartActivity(TickPulseMetrics.BackfillPageSpan);
         activity?.SetTag("tickpulse.symbol", name.Value);
-        activity?.SetTag("tickpulse.backfill.start", start);
+        activity?.SetTag("tickpulse.backfill.start", start.ToString("O", CultureInfo.InvariantCulture));
         try
         {
             var page = await FetchPageAsync(name, start, end, ct).ConfigureAwait(false);

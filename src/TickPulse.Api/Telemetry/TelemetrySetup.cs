@@ -89,7 +89,7 @@ internal static class TelemetrySetup
             o.EnrichDiagnosticContext = (diagnostics, context) =>
             {
                 diagnostics.Set("client_ip_hash", hasher.Hash(ClientAddressing.ClientAddress(context)));
-                if (context.GetEndpoint()?.Metadata.GetMetadata<Microsoft.AspNetCore.Http.Metadata.IRouteDiagnosticsMetadata>()?.Route is { } route)
+                if (ApiMetricsMiddleware.Route(context) is { } route)
                 {
                     diagnostics.Set("route", route);
                 }
@@ -113,6 +113,27 @@ internal static class TelemetrySetup
             : throw new InvalidOperationException(string.Create(
                 CultureInfo.InvariantCulture,
                 $"{EndpointKey} must be an absolute http(s) URL such as http://otel-collector:4317, or empty to disable export."));
+    }
+
+    /// <summary>
+    /// The share of <c>ingest.flush</c> traces kept (<c>Otel:FlushSampleRatio</c>, 0 to 1, invariant culture), or
+    /// <see cref="TickPulseSampler.DefaultFlushRatio"/> when unset or blank.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The value is not a number from 0 to 1.</exception>
+    public static double FlushSampleRatio(IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        var raw = configuration[TickPulseSampler.FlushRatioKey];
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return TickPulseSampler.DefaultFlushRatio;
+        }
+
+        return double.TryParse(raw.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var ratio) && ratio is >= 0 and <= 1
+            ? ratio
+            : throw new InvalidOperationException(string.Create(
+                CultureInfo.InvariantCulture,
+                $"{TickPulseSampler.FlushRatioKey} must be a number from 0 to 1, such as 0.1."));
     }
 
     /// <summary>The informational version, with build metadata (the commit) cut to 7 characters.</summary>

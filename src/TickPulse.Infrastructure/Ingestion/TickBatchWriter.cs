@@ -46,6 +46,12 @@ public sealed partial class TickBatchWriter(
     /// <summary>Upper bound on the wait between retries of a transient failure.</summary>
     public static readonly TimeSpan MaxTransientDelay = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// A tick received this long after its trade time was recovered (gap-fill), not streamed; a batch whose newest
+    /// tick is one records no ingest lag sample.
+    /// </summary>
+    public static readonly TimeSpan RecoveredTickAge = TimeSpan.FromSeconds(30);
+
     private static readonly TimeSpan ConflictBaseDelay = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan TransientBaseDelay = TimeSpan.FromMilliseconds(250);
 
@@ -187,12 +193,14 @@ public sealed partial class TickBatchWriter(
     {
         var now = clock.GetUtcNow().UtcDateTime;
         var newest = DateTime.MinValue;
+        var newestReceived = DateTime.MinValue;
         var last = new Dictionary<int, Tick>();
         foreach (var tick in batch)
         {
             if (tick.TradeTimeUtc > newest)
             {
                 newest = tick.TradeTimeUtc;
+                newestReceived = tick.ReceivedAtUtc;
             }
 
             if (!last.TryGetValue(tick.SymbolId, out var seen) || tick.AggTradeId > seen.AggTradeId)
@@ -221,8 +229,10 @@ public sealed partial class TickBatchWriter(
             }
         }
 
-        // A batch with nothing new is a replay (gap-fill or rotation overlap) with old trade times, not ingest lag.
-        metrics.BatchStored(batch.Count, duration, stored > 0 ? lagMs : null);
+        // Not ingest lag: a batch with nothing new (a gap-fill or rotation replay), or one whose newest tick was
+        // recovered over REST long after it traded (a gap-fill batch, which carries old trade times).
+        var recovered = newestReceived - newest > RecoveredTickAge;
+        metrics.BatchStored(batch.Count, duration, stored > 0 && !recovered ? lagMs : null);
         try
         {
             state.RecordBatch(stored, lagMs, prices);
