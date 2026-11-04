@@ -27,7 +27,10 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// still open on the live connection (a fill stopped at the page cap or failed, the writer dropped a batch) is filled
 /// again on every reconcile pass, one run per symbol at a time, until it closes, so it never waits for the next
 /// connection. Every pass also checks the live connection's streams against the watermarks: one that started above
-/// the last accounted id (its predecessor stalled before the rotation replaced it) opens a gap for the ids between.</para>
+/// the last accounted id (its predecessor stalled before the rotation replaced it) opens a gap for the ids between. A
+/// clean rotation hands the retired connection's last ids to its successor: until the successor delivers a symbol, a
+/// short REST page ends that symbol's fill only once it reached past them, so lagging REST cannot close a gap below ids
+/// the retired connection delivered.</para>
 /// <para><b>Lead-in.</b> A symbol that starts streaming in this session (first subscription, an added or reactivated
 /// symbol) with no watermark at all is filled from the start of the minute its SUBSCRIBE was acknowledged in, up to its
 /// first streamed trade. Without it that minute's candle would only hold the trades after the subscription, and the
@@ -298,7 +301,15 @@ internal sealed partial class StreamSupervisor(
         // The old connection is idle from here on: only this loop sends commands, and it has moved to the new one.
         var oldEndedEarly = old.Connection.Completion.IsCompleted;
         state.SetConnected(next.ConnectedAtUtc, next.ConnectedAtUtc + options.RotationInterval);
-        Retire(old, oldEndedEarly ? LinkEnd.Broken : LinkEnd.Replaced);
+        if (oldEndedEarly)
+        {
+            Retire(old, LinkEnd.Broken);
+        }
+        else
+        {
+            // The new link carries every trade after the old one's last: it hands that boundary over.
+            Retire(old, LinkEnd.Replaced, successor: next);
+        }
         LogRotated(next.Subscribed.Count);
 
         // The overlap covers a clean rotation; only gaps that are still open get filled. If the old connection broke
@@ -512,7 +523,11 @@ internal sealed partial class StreamSupervisor(
             // has delivered may be missing, and the stream carries everything after that.
             long? Boundary() => link.FirstId(symbol) is { } first && first > lastId ? first : link.LastId(symbol) + 1;
 
-            var result = await gapFiller.FillAsync(symbolId, symbol, lastId, Boundary, output, ct).ConfigureAwait(false);
+            // Until this link delivers the symbol, what the link it replaced in a rotation delivered is the floor: a
+            // lagging REST page below it is not the end of the data (that link's ids may be the very ones missing).
+            long? HandedOver() => link.HandedOverId(symbol);
+
+            var result = await gapFiller.FillAsync(symbolId, symbol, lastId, Boundary, HandedOver, output, ct).ConfigureAwait(false);
 
             // If this link broke meanwhile, the fill stopped at a stream that no longer carries on; its retirement
             // reopens the gap (and the version changed), so closing here is harmless.
@@ -579,9 +594,9 @@ internal sealed partial class StreamSupervisor(
         _leadInDue.TryRemove(new KeyValuePair<string, DateTime>(symbol, from));
     }
 
-    private void Retire(StreamLink link, LinkEnd end)
+    private void Retire(StreamLink link, LinkEnd end, StreamLink? successor = null)
     {
-        var retire = RetireAsync(link, end);
+        var retire = RetireAsync(link, end, successor);
         lock (_gate)
         {
             _retiring.RemoveAll(t => t.IsCompleted);
@@ -591,13 +606,15 @@ internal sealed partial class StreamSupervisor(
         Track(retire);
     }
 
-    private async Task RetireAsync(StreamLink link, LinkEnd end)
+    private async Task RetireAsync(StreamLink link, LinkEnd end, StreamLink? successor)
     {
         await link.DisposeAsync().ConfigureAwait(false);
         Observe(link);
 
-        // The pump drains what the socket had buffered, then ends, so the spans are final.
+        // The pump drains what the socket had buffered, then ends, so the spans are final. A gap-fill on the successor
+        // waits for this retirement, so it sees the handed-over ids from its first page on.
         await link.Pump.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        successor?.TakeOver(link);
         if (end == LinkEnd.Discarded)
         {
             watermarks.NoteStored(link.Spans);

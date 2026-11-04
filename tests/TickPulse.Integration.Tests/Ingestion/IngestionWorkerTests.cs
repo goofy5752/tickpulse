@@ -786,6 +786,83 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rotation_NewLinkSilent_RestBehind_GapStaysOpenUntilTheRetiredLinksLastId()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var t0 = Now.AddMinutes(-5);
+        await ExecuteSqlAsync(db, "UPDATE symbols SET is_active = false WHERE name <> 'BTCUSDT'");
+        var logs = new LogCapture();
+        DroppingTickWriter? dropping = null;
+        await using var services = IngestionServices(
+            logs,
+            overrides: new Dictionary<string, string?> { ["Ingestion:ReconcileInterval"] = "00:00:01", ["Ingestion:RotationInterval"] = "00:00:03" },
+            replace: s => s.AddSingleton<ITickWriter>(sp => dropping = new DroppingTickWriter(
+                new TickWriter(sp.GetRequiredKeyedService<NpgsqlDataSource>(DependencyInjection.TickWriterDataSourceKey), TimeProvider.System),
+                dropFromId: 6)));
+        var state = services.GetRequiredService<IngestionState>();
+        var watermarks = services.GetRequiredService<GapFillWatermarks>();
+        using var worker = NewWorker(services, new PostgresLeaderLock(db.ConnectionString));
+        await worker.StartAsync(ct);
+        try
+        {
+            await _server.WaitUntilAsync(s => s.ActiveConnections >= 1 && s.SubscribedStreams.SetEquals([Stream("BTCUSDT")]), WaitTimeout, ct);
+            await WaitForAsync(() => state.Status == WsState.Connected, "connected");
+            for (var i = 1; i <= 5; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 5);
+
+            // The link streams 6..15 and every batch holding them is dropped. REST has 6..10 only (it lags).
+            for (var i = 6; i <= 10; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            for (var i = 11; i <= 15; i++)
+            {
+                await _server.PushRawAsync(AggTradeJson("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i)));
+            }
+
+            await WaitForAsync(() => dropping.ShouldNotBeNull().MaxSeen >= 15, "the writer dropped everything up to 15");
+            dropping!.Dropping = false;
+            await WaitForTradeCountAsync(db, "BTCUSDT", 10); // the fill on that link got 6..10 and stays open (bound 16)
+
+            // A rotation replaces the link. The new one streams nothing for the symbol, so it has no boundary of its own;
+            // the retired link delivered up to 15, so a lagging REST page from 11 must not close the gap.
+            static bool From11(string r) => r == "/api/v3/aggTrades?symbol=BTCUSDT&fromId=11&limit=1000";
+            var rotations = logs.Count("LogRotated");
+            await WaitForAsync(() => logs.Count("LogRotated") > rotations, "a rotation");
+            var before = _server.ReceivedRequests.Count;
+            await _server.WaitUntilAsync(s => s.ReceivedRequests.Skip(before).Count(From11) >= 3, WaitTimeout, ct);
+            watermarks.IsPending("BTCUSDT").ShouldBeTrue();
+
+            // REST catches up: 11..15 are recovered with nothing more on the stream.
+            for (var i = 11; i <= 15; i++)
+            {
+                _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 15);
+            await WaitForAsync(() => !watermarks.IsPending("BTCUSDT"), "the gap closed");
+            for (var i = 16; i <= 20; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 20);
+            (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 20).Select(i => (long)i));
+            (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(20);
+            state.LastReconnectUtc.ShouldBeNull();
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task LeadInFailed_IsRetriedOnTheNextConnection()
     {
         var ct = TestContext.Current.CancellationToken;

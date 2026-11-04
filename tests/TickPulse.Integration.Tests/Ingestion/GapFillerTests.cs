@@ -96,6 +96,21 @@ public sealed class GapFillerTests
         source.Requests.ShouldBe([500L]);
     }
 
+    [Theory]
+    [InlineData(12, false)] // REST lags behind what the retired link delivered (15): not the end of the data
+    [InlineData(15, true)]  // REST reached it: complete
+    [InlineData(18, true)]  // REST is ahead: the trades after 15 are emitted too (no stream boundary stops them)
+    public async Task Fill_NoStreamTradeYet_ShortPageCompletesOnlyPastWhatARetiredLinkDelivered(int restLast, bool complete)
+    {
+        var source = new FakeAggTrades(11, restLast);
+
+        var emitted = await Filler(source).FillAsync(BtcId, "BTCUSDT", 10, () => null, () => 15, _output.Writer, Ct);
+
+        emitted.ShouldBe(new GapFillResult(restLast - 10, restLast, complete));
+        Emitted().Select(t => t.AggTradeId).ShouldBe(Enumerable.Range(11, restLast - 10).Select(i => (long)i));
+        source.Requests.ShouldBe([11L]);
+    }
+
     [Fact]
     public async Task Fill_NothingMissed_EmitsNothing()
     {
