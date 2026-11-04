@@ -30,7 +30,6 @@ public sealed partial class GapFiller(IAggTradeSource source, TimeProvider clock
 
     public int MaxPages { get; } = maxPages >= 1 ? maxPages : throw new ArgumentOutOfRangeException(nameof(maxPages));
 
-
     /// <summary>Fills the gap after <paramref name="lastKnownId"/> for one symbol.</summary>
     /// <param name="symbolId">Database id of the symbol.</param>
     /// <param name="symbol">Symbol name.</param>

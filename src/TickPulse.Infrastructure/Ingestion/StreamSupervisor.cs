@@ -103,7 +103,7 @@ internal sealed partial class StreamSupervisor(
                 }
 
                 LogConnectionEnded(upFor.TotalSeconds, ended.Connection.Completion.IsFaulted);
-                Retire(ended, gap: true);
+                Retire(ended, LinkEnd.Broken);
                 await Task.Delay(backoff.Next(), clock, ct).ConfigureAwait(false);
             }
         }
@@ -213,6 +213,7 @@ internal sealed partial class StreamSupervisor(
                 }
 
                 nextRotation = UtcNow + rotationRetry;
+                state.SetConnected(current.ConnectedAtUtc, nextRotation);
                 if (!signalled)
                 {
                     continue;
@@ -253,14 +254,17 @@ internal sealed partial class StreamSupervisor(
         if (missing > 0)
         {
             LogRotationFailed(missing);
-            Retire(next, gap: false);
+
+            // Its last ids must not be merged: if the old connection broke before this one subscribed, they would
+            // move the gap-fill start past the trades missed in between. The old connection still covers them.
+            Retire(next, LinkEnd.Discarded);
             return null;
         }
 
         // The old connection is idle from here on: only this loop sends commands, and it has moved to the new one.
         var oldEndedEarly = old.Connection.Completion.IsCompleted;
         state.SetConnected(next.ConnectedAtUtc, next.ConnectedAtUtc + options.RotationInterval);
-        Retire(old, gap: oldEndedEarly);
+        Retire(old, oldEndedEarly ? LinkEnd.Broken : LinkEnd.Replaced);
         LogRotated(next.Subscribed.Count);
 
         // The overlap covers a clean rotation; only gaps that are still open get filled. If the old connection broke
@@ -421,9 +425,9 @@ internal sealed partial class StreamSupervisor(
         }
     }
 
-    private void Retire(StreamLink link, bool gap)
+    private void Retire(StreamLink link, LinkEnd end)
     {
-        var retire = RetireAsync(link, gap);
+        var retire = RetireAsync(link, end);
         lock (_gate)
         {
             _retiring.RemoveAll(t => t.IsCompleted);
@@ -433,14 +437,17 @@ internal sealed partial class StreamSupervisor(
         Track(retire);
     }
 
-    private async Task RetireAsync(StreamLink link, bool gap)
+    private async Task RetireAsync(StreamLink link, LinkEnd end)
     {
         await link.DisposeAsync().ConfigureAwait(false);
         Observe(link);
 
         // The pump drains what the socket had buffered, then ends.
         await link.Pump.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-        watermarks.Merge(link.LastIds, gap);
+        if (end != LinkEnd.Discarded)
+        {
+            watermarks.Merge(link.LastIds, gap: end == LinkEnd.Broken);
+        }
         lock (_gate)
         {
             _links.Remove(link);
@@ -496,4 +503,17 @@ internal sealed partial class StreamSupervisor(
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Dropped trade(s) for {Symbol}, which has no known id ({Count} so far on this connection)")]
     private partial void LogUnknownSymbol(string symbol, long count);
+}
+
+/// <summary>How a connection's life ended, which decides what its last trade ids mean for gap-fill.</summary>
+internal enum LinkEnd
+{
+    /// <summary>It broke (or the session ended with it): its last ids are merged and every symbol has an open gap.</summary>
+    Broken,
+
+    /// <summary>A rotation replaced it after the new connection was subscribed: its last ids are merged, no gap.</summary>
+    Replaced,
+
+    /// <summary>A rotation gave it up before it took over: its last ids are ignored.</summary>
+    Discarded,
 }

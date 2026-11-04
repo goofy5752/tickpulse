@@ -245,6 +245,7 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         await WaitForAsync(() => host.Logs.Count("LogRotationFailed") == 1, "the rotation refused");
 
         host.State.ConnectedSinceUtc.ShouldBe(since);
+        await WaitForAsync(() => host.State.NextRotationUtc > since + TimeSpan.FromSeconds(2), "the retry time published");
         host.Logs.Count("LogRotated").ShouldBe(0);
         await _server.WaitUntilAsync(s => s.ActiveConnections == 1 && s.SubscribedStreams.SetEquals(Seeded.Select(Stream)), WaitTimeout, TestContext.Current.CancellationToken);
         await _server.PushTradeAsync("BTCUSDT", 1, 100m, Now.AddSeconds(-2));
