@@ -75,6 +75,14 @@ npm --prefix web run dev | build | lint | typecheck
   Defaults are listed in the plan's Global Constraints, plus two leader-election keys:
   `Ingestion:LeaderRetryInterval` (`00:00:10`, how often a standby instance tries the lock) and
   `Ingestion:LeaderCheckInterval` (`00:00:05`, how often the leader probes it).
+  API host keys: `RateLimiting:PermitLimit` (`300`) and `RateLimiting:WindowSeconds` (`60`), a
+  fixed window per client IP on the API controllers; `ForwardedHeaders:KnownProxies` (array or
+  comma-separated IPs, added to loopback), the proxies whose `CF-Connecting-IP` is trusted as the
+  client IP; `Otel:IpSalt`, the salt of the logged client-IP hash (random per process when unset).
+- **Error negotiation**: problems go through `IProblemDetailsService` with two writers, XML
+  (`application/problem+xml`) when `Accept` prefers XML, otherwise JSON. Controllers return errors
+  as `ProblemResult(ProblemFactory.Create(...))`, so an error is never replaced by a 406: a client
+  that accepts neither format gets the problem as JSON. Only a successful response can be a 406.
 - **Clearing tables**: in SQL and shell scripts, clear tables with `DELETE FROM`.
 - **Packages**: versions live only in `Directory.Packages.props` (Central Package Management).
   Add a `PackageReference` only to the project that needs it.

@@ -1,0 +1,92 @@
+using System.Collections.Frozen;
+using System.Diagnostics;
+using Microsoft.AspNetCore.Mvc;
+using TickPulse.Application.Results;
+
+namespace TickPulse.Api.Problems;
+
+/// <summary>Builds the RFC 9457 problems TickPulse returns: a fixed set of type URIs plus a <c>traceId</c> extension.</summary>
+public static class ProblemFactory
+{
+    /// <summary>Base URI of every TickPulse problem type; the slug is appended.</summary>
+    public const string TypeBase = "https://tickpulse.dev/problems/";
+
+    /// <summary>Name of the extension member that carries the request's trace id.</summary>
+    public const string TraceIdKey = "traceId";
+
+    private static readonly FrozenDictionary<string, string> Titles = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [ProblemSlugs.UnknownSymbol] = "Unknown symbol",
+        [ProblemSlugs.NoData] = "No data",
+        [ProblemSlugs.InvalidSymbol] = "Invalid symbol",
+        [ProblemSlugs.SymbolLimit] = "Symbol limit reached",
+        [ProblemSlugs.AdminDisabled] = "Admin API disabled",
+        [ProblemSlugs.Validation] = "Validation failed",
+        [ProblemSlugs.NotAcceptable] = "Not acceptable",
+        [ProblemSlugs.RateLimited] = "Too many requests",
+        [ProblemSlugs.Internal] = "Internal server error",
+    }.ToFrozenDictionary(StringComparer.Ordinal);
+
+    /// <summary>A problem for a use-case failure.</summary>
+    public static ProblemDetails Create(HttpContext httpContext, AppError error, int status, string detail) =>
+        Create(httpContext, SlugFor(error), status, detail);
+
+    /// <summary>A problem of the type <c>https://tickpulse.dev/problems/{slug}</c>.</summary>
+    /// <exception cref="ArgumentException"><paramref name="slug"/> is not one of <see cref="ProblemSlugs"/>.</exception>
+    public static ProblemDetails Create(HttpContext httpContext, string slug, int status, string detail)
+    {
+        ArgumentNullException.ThrowIfNull(httpContext);
+        ArgumentException.ThrowIfNullOrWhiteSpace(slug);
+
+        return new ProblemDetails
+        {
+            Type = TypeFor(slug),
+            Title = TitleFor(slug),
+            Status = status,
+            Detail = detail,
+            Extensions = { [TraceIdKey] = TraceId(httpContext) },
+        };
+    }
+
+    /// <summary>The problem slug of a use-case failure.</summary>
+    public static string SlugFor(AppError error) => error switch
+    {
+        AppError.UnknownSymbol => ProblemSlugs.UnknownSymbol,
+        AppError.NoData => ProblemSlugs.NoData,
+        AppError.InvalidSymbol => ProblemSlugs.InvalidSymbol,
+        AppError.SymbolLimit => ProblemSlugs.SymbolLimit,
+        AppError.Validation => ProblemSlugs.Validation,
+        _ => throw new ArgumentOutOfRangeException(nameof(error), error, "No problem type is defined for this error."),
+    };
+
+    /// <summary>The type URI of a slug.</summary>
+    /// <exception cref="ArgumentException"><paramref name="slug"/> is not one of <see cref="ProblemSlugs"/>.</exception>
+    public static string TypeFor(string slug) =>
+        Titles.ContainsKey(slug) ? TypeBase + slug : throw new ArgumentException($"Unknown problem slug '{slug}'.", nameof(slug));
+
+    /// <summary>The human-readable title of a slug.</summary>
+    /// <exception cref="ArgumentException"><paramref name="slug"/> is not one of <see cref="ProblemSlugs"/>.</exception>
+    public static string TitleFor(string slug) =>
+        Titles.TryGetValue(slug, out var title) ? title : throw new ArgumentException($"Unknown problem slug '{slug}'.", nameof(slug));
+
+    /// <summary>The W3C id of the current activity, or the request's own identifier when there is none.</summary>
+    public static string TraceId(HttpContext httpContext)
+    {
+        ArgumentNullException.ThrowIfNull(httpContext);
+        return Activity.Current?.Id ?? httpContext.TraceIdentifier;
+    }
+}
+
+/// <summary>The slugs of TickPulse's problem types (<see cref="ProblemFactory.TypeBase"/> + slug).</summary>
+public static class ProblemSlugs
+{
+    public const string UnknownSymbol = "unknown-symbol";
+    public const string NoData = "no-data";
+    public const string InvalidSymbol = "invalid-symbol";
+    public const string SymbolLimit = "symbol-limit";
+    public const string AdminDisabled = "admin-disabled";
+    public const string Validation = "validation";
+    public const string NotAcceptable = "not-acceptable";
+    public const string RateLimited = "rate-limited";
+    public const string Internal = "internal";
+}
