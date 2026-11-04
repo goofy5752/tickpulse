@@ -8,7 +8,7 @@ namespace TickPulse.Api.Hubs;
 /// <see cref="Subscribe"/> and receives <see cref="PriceMethod"/> messages for it, at most one per symbol every 250 ms.
 /// Every client receives <see cref="StatsMethod"/> every 2 s. The messages are sent by <see cref="MarketBroadcaster"/>.
 /// </summary>
-public sealed class MarketHub : Hub
+public sealed class MarketHub(MarketHubConnections connections) : Hub
 {
     public const string Path = "/hubs/market";
 
@@ -28,6 +28,18 @@ public sealed class MarketHub : Hub
 
     /// <summary>The group of a normalised (upper-case) symbol, e.g. <c>sym:BTCUSDT</c>.</summary>
     public static string GroupName(string symbol) => GroupPrefix + symbol;
+
+    public override async Task OnConnectedAsync()
+    {
+        connections.Opened();
+        await base.OnConnectedAsync();
+    }
+
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        connections.Closed();
+        await base.OnDisconnectedAsync(exception);
+    }
 
     /// <summary>
     /// Joins the group of <paramref name="symbol"/> (case-insensitive). Returns whether the connection is now
