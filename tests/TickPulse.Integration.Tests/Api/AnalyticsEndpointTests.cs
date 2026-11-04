@@ -471,8 +471,9 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
         await WriteCandlesAsync(Btc, Candle(Day(6, 6, 0), 1m), Candle(Day(6, 12, 30), 60_000m), Candle(Day(6, 12, 35), 2m));
         api.Services.GetRequiredService<IngestionState>().RecordBatch(1, 0, [new LivePrice("BTCUSDT", 61_500m, Now.AddSeconds(-1))]);
 
-        // ADAUSDT, inactive: no live price, so the last close (0.3) is the latest; a day ago it was 0.4 → −25.00 %.
-        await WriteCandlesAsync(Ada, Candle(Day(6, 11, 0), 0.4m), Candle(At(11, 0), 0.3m));
+        // ADAUSDT, inactive: no live price, so the last close (0.3) is the latest; a day ago (12:25, inside the
+        // tolerance) it was 0.4 → −25.00 %.
+        await WriteCandlesAsync(Ada, Candle(Day(6, 12, 25), 0.4m), Candle(At(11, 0), 0.3m));
         await DeactivateAsync("ADAUSDT");
 
         // ETHUSDT has no data at all.
@@ -511,6 +512,22 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
         var eth = json.RootElement.EnumerateArray().Single(r => r.GetProperty("symbol").GetString() == "ETHUSDT");
         eth.GetProperty("latestPrice").GetDecimal().ShouldBe(2_500m);
         eth.GetProperty("change24hPercent").ValueKind.ShouldBe(JsonValueKind.Null);
+    }
+
+    [Fact]
+    public async Task Symbols_BackfillBelowTheWindow_HasNullChange()
+    {
+        // A backfill in progress has stored weeks-old minutes but has not reached now − 24 h yet; the stream has
+        // stored the last minutes. The newest close at or before now − 24 h is the backfill frontier, 40 days back.
+        await WriteCandlesAsync(Btc, Candle(new DateTime(2026, 8, 28, 12, 34, 0, DateTimeKind.Utc), 40_000m), Candle(At(12, 33), 61_000m));
+        api.Services.GetRequiredService<IngestionState>().RecordBatch(1, 0, [new LivePrice("BTCUSDT", 61_500m, Now.AddSeconds(-1))]);
+
+        using var response = await GetAsync("/api/symbols");
+
+        using var json = await JsonAsync(response);
+        var btc = json.RootElement.EnumerateArray().Single(r => r.GetProperty("symbol").GetString() == "BTCUSDT");
+        btc.GetProperty("latestPrice").GetDecimal().ShouldBe(61_500m);
+        btc.GetProperty("change24hPercent").ValueKind.ShouldBe(JsonValueKind.Null);
     }
 
     [Fact]

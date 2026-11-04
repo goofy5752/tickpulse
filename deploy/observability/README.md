@@ -12,11 +12,11 @@ flowchart LR
     api["TickPulse API<br/>(OTel SDK + Serilog OTLP sink)"]
 
     subgraph obs["compose project · network tickpulse"]
-        col["OTel Collector<br/>memory_limiter → batch"]
+        col["OTel Collector<br/>memory_limiter → batch → bounded queue"]
         tempo[("Tempo<br/>traces · 14 d")]
         prom[("Prometheus<br/>metrics · 30 d")]
         loki[("Loki<br/>logs · 14 d")]
-        graf["Grafana<br/>4 dashboards · 4 alerts"]
+        graf["Grafana<br/>4 dashboards · 5 alerts"]
     end
 
     api -- "OTLP gRPC :4317 / HTTP :4318" --> col
@@ -39,9 +39,36 @@ flowchart LR
 | `grafana` | `grafana/grafana:13.3.0` | 256M | — | `127.0.0.1:3000` |
 
 Every image is pinned to an exact release. Go services also get a `GOMEMLIMIT` below their container
-limit, so the runtime collects garbage before the kernel kills the container. The collector's
-`memory_limiter` (limit 96 MiB, spike 24 MiB) starts refusing data at its 72 MiB soft limit and
-forces garbage collection at the 96 MiB hard limit, instead of letting the container be killed.
+limit, so the runtime collects garbage before the kernel kills the container.
+
+### Under load
+
+A traffic burst must neither blind monitoring nor page anyone. The volume is bounded at the source,
+and the collector sheds the bulky signals before the small one the alerts depend on:
+
+- **The API samples its request telemetry** (`Otel:SampledRequestsPerSecond`, default 10): ordinary
+  requests (2xx, 3xx and 429) keep their full trace and their Information request log line only up to
+  that many per second. Errors, other 4xx and slow requests are always logged, and beyond the budget
+  their trace is kept with the server span only (see *Traces and logs* below). At 5k req/s this is
+  about 10 full traces and 10 log lines per second instead of 5k of each.
+- **Two memory limiters.** Traces and logs pass `memory_limiter/bulk` (limit 72 MiB, spike 16 MiB),
+  which starts refusing at a 56 MiB heap; metrics pass `memory_limiter/metrics` (limit 90 MiB, spike
+  6 MiB), which refuses only above 84 MiB. So metrics keep flowing while traces and logs are refused.
+  Both force garbage collection at their hard limit instead of letting the 128 MiB container be killed.
+- **Bounded queues, short retries.** The Tempo and Loki exporters queue at most 4 MiB of encoded data
+  each (`sending_queue.sizer: bytes`), and give up on a batch after 30 s
+  (`retry_on_failure.max_elapsed_time`), so a slow or rate-limited backend makes the collector drop
+  data instead of holding it for minutes. Decoded in memory both full queues stay inside the 28 MiB gap
+  between the two limiters, so a backed-up bulk queue cannot push the heap to where metrics are
+  refused. Metrics retry for up to 5 minutes.
+- **Batches fit the backends.** Logs are sent in batches of at most 1024 records and traces of 2048
+  spans, well below the 4 MiB gRPC message size; Loki accepts up to 16 MiB anyway.
+- **Loki limits** are sized for one service: per stream 8 MB/s (burst 16 MB), tenant-wide
+  `ingestion_rate_mb: 16` (burst 32). The API's logs form a single stream (one `service_name` and
+  environment), so the **per-stream limit is the one that actually applies**; the tenant-wide one only
+  matters with several streams. Normal traffic stays far below both.
+- **The alerts read sample timestamps, not arrival times.** The WebSocket alert stays quiet when
+  metrics arrive late or not at all; *Telemetry pipeline down* reports that instead.
 
 ```
 deploy/observability/
@@ -104,7 +131,7 @@ Tear the stack down and delete its data with `down -v`.
 |---|---|---|
 | `GRAFANA_ADMIN_PASSWORD` | `tickpulse-dev` | Grafana admin password, applied on first boot only (see above). **Required in production.** |
 | `GRAFANA_ADMIN_USER` | `admin` | Grafana admin user |
-| `GRAFANA_ROOT_URL` | `http://localhost:3000` | `GF_SERVER_ROOT_URL`; `https://grafana.tickpulse.dev` in production |
+| `GRAFANA_ROOT_URL` | `http://localhost:3000` | `GF_SERVER_ROOT_URL`, and the target of the dashboard's Grafana links (baked into the api image at build time); `https://grafana.tickpulse.dev` in production |
 | `GRAFANA_COOKIE_SECURE` | `false` | `true` behind HTTPS |
 | `GRAFANA_BIND`, `GRAFANA_PORT` | `127.0.0.1`, `3000` | Where Grafana is published (the reverse proxy targets it) |
 | `OTEL_COLLECTOR_BIND`, `OTEL_GRPC_PORT`, `OTEL_HTTP_PORT` | `127.0.0.1`, `4317`, `4318` | Host ports of the collector |
@@ -120,6 +147,12 @@ Without SMTP, everything still provisions; Grafana only logs a delivery error wh
 - Viewers cannot edit (`GF_USERS_VIEWERS_CAN_EDIT=false`) and cannot use Explore.
   - Every trace link in the dashboards therefore points at the **Logs** dashboard's trace view
     (`/d/tp-logs/…?var-trace_id=…`), which works for anonymous visitors.
+  - The Tempo trace tables would also offer the datasource's own `Trace: <id>` and `Span: <id>`
+    links, which open Explore. The `traceID` override therefore first clears the field's links
+    (`"value": null`) and then sets only *Open trace*: Grafana merges a `links` override with the
+    datasource's links rather than replacing them, so setting the new link alone would keep both.
+    Field overrides do not reach the expandable span rows, so the tables leave them out (an
+    `organize` transformation excludes the `nested` field); the trace view shows the spans.
   - Admins additionally get the Explore links (Loki derived field → Tempo, Tempo → "Logs for this trace").
 - Provisioned dashboards cannot be saved from the UI (`allowUiUpdates: false`). The JSON in this
   folder is the source of truth.
@@ -192,10 +225,11 @@ Thresholds are the same everywhere:
 
 | UID | Condition | Pending | Severity |
 |---|---|---|---|
-| `tp-ws-disconnected` | WS disconnected > 60 s (alert after a 30 s pending period): the newest `tickpulse_ws_state == 2` (Connected) sample is more than 60 s old, measured by sample timestamp, so it also fires when the API stops exporting | 30 s (fires about 90–110 s after the last Connected report) | critical |
+| `tp-ws-disconnected` | WS disconnected > 60 s (alert after a 30 s pending period): the newest `tickpulse_ws_state` sample is more than 60 s newer than the newest `tickpulse_ws_state == 2` (Connected) one, both by sample timestamp. Late or missing metrics move both together, so they never fire it; no data and query errors keep it quiet | 30 s (fires about 90–110 s after the last Connected report) | critical |
+| `tp-telemetry-stale` | *Telemetry pipeline down*: the newest `tickpulse_ws_state` sample is more than 120 s old (the API stopped exporting, or the collector, Prometheus or the path between them refuses or delays data); no data and query errors alert. Critical while it is the only alert for an API that is down entirely (the external uptime check is planned, see below) | 1 m | critical |
 | `tp-ingest-lag-p95` | p95 of `tickpulse_ingest_lag_milliseconds` over 5 m > 5000 | 2 m | warning |
 | `tp-zero-ticks` | a symbol with `tickpulse_ingest_symbol_active == 1` received no ticks in the last minute (never-ticked active symbols count as 0) | 5 m (= 6 min of silence) | warning |
-| `tp-api-5xx-ratio` | 5xx share of `http_server_request_duration_seconds_count` over 5 m > 2 %, only while traffic > 0.1 req/s | 5 m | critical |
+| `tp-api-5xx-ratio` | 5xx share of `http_server_request_duration_seconds_count` over 5 m > 2 %, only while traffic > 0.1 req/s; the SignalR hub and the health probes (`http_route!~"/?(hubs|health)/.*"`) are left out | 5 m | critical |
 
 Remote-written series carry **no staleness markers**, so Prometheus keeps answering instant queries
 with the last value for 5 minutes after the API stops exporting. Liveness-sensitive queries
@@ -203,7 +237,8 @@ therefore never read a bare gauge:
 
 - the WebSocket and leader panels use `last_over_time(…[45s])` (three export intervals), so they
   turn to *Offline* when reports stop;
-- the WebSocket alert measures the age of the last Connected sample;
+- the WebSocket alert compares the timestamps of the newest sample and the newest Connected sample, and
+  the *Telemetry pipeline down* alert measures the age of the newest sample;
 - `tp-zero-ticks` gates on `last_over_time(tickpulse_ingest_symbol_active[45s])`.
 
 Known behaviour of the two ingestion alerts:
@@ -213,10 +248,16 @@ Known behaviour of the two ingestion alerts:
   2 minutes to connect before the condition becomes true. With the 30 s pending period, that is
   about 2.5 minutes in total.
   - A deploy or failover restart is measured from the previous run's last Connected sample, so a
-    gap longer than about 90 s alerts. That is intended.
-  - With no `tickpulse_ws_state` sample at all in the last hour (the API has been down for an hour
-    or was never started), the rule has no data and **alerts**. A local stack started without the
-    API therefore shows this alert after a minute or two.
+    new run that reports for more than about 90 s without connecting alerts. That is intended.
+  - It only fires while the API keeps reporting. An API that stopped exporting, or a telemetry
+    pipeline that drops or delays metrics, shows up as *Telemetry pipeline down*
+    (`tp-telemetry-stale`) instead. With no `tickpulse_ws_state` sample at all in the last hour,
+    the rule has no data and stays quiet; `tp-telemetry-stale` alerts. A local stack started without
+    the API therefore shows that alert after a few minutes.
+- **`tp-telemetry-stale` is critical for now.** It is currently the only alert for an API that is down
+  entirely. An external uptime check on `/health/ready` is **planned** (see
+  [`docs/deployment.md`](../../docs/deployment.md), step *Uptime check*) but not in place yet; once it
+  exists, this rule can go back to warning.
 - **`tp-zero-ticks`, newly added illiquid symbol.** A symbol counts as soon as it is active, even
   before its first trade. A newly added, illiquid symbol that sees no trade for 6 minutes (1-minute
   window + 5-minute pending period) alerts. This is accepted: on Binance spot, a symbol with no trade
@@ -280,6 +321,16 @@ Conventions the dashboards rely on:
 - **`tickpulse.ingest.ticks.received`** counts trades from the WebSocket stream only;
   `tickpulse.gapfill.trades` counts the REST recovery. **`ticks.persisted`** counts newly stored ticks
   (replays are not counted). **`backfill.candles`** counts newly stored klines.
+- **Counters have no zero sample.** Each process exports its own cumulative series
+  (`service_instance_id`), and its first sample already holds everything counted before the first
+  export; a backfill stores thousands of klines in that time. `increase()` cannot see that first jump, so
+  totals over the dashboard range, such as **Candles backfilled**, use
+  `(max_over_time(c[$__range]) - c offset $__range) or max_over_time(c[$__range])` per series: a series
+  that started inside the range counts in full, an older one from its value at the range start. That start
+  value comes from the 5 min lookback, so a telemetry gap longer than 5 min at the range start makes an older
+  series count in full (an over-report by what it stored before the range).
+  `tests/TickPulse.Integration.Tests/Telemetry/DashboardQueryTests.cs` checks that panel against a real
+  Prometheus.
 - **Export interval 15 s** (the metric reader's export interval).
   The SDK default is 60 s, which is too coarse for 1-minute rate windows, the 45 s liveness windows
   and the 60 s WebSocket alert.
@@ -291,11 +342,20 @@ Conventions the dashboards rely on:
 - **Exporters are off** when `Otel:Endpoint` is unset or empty. An unreachable or unresolvable
   endpoint only makes the exporters drop data in the background; the API keeps serving and does not
   log the failures.
-- **Trace sampling** (`Otel:FlushSampleRatio`, default `0.1`): a parent-based sampler keeps every
-  HTTP request (also when the caller sent an unsampled `traceparent`), every `backfill.page` and
-  every `gapfill.run`, and the given share of `ingest.flush` traces (by trace id). Any other span
-  without a parent, such as the leader lock probe every few seconds, is dropped. Child spans follow
-  their parent, so the database spans of an unsampled flush are dropped with it.
+- **Trace sampling**: a parent-based sampler
+  - keeps HTTP requests up to `Otel:SampledRequestsPerSecond` (default `10`, a token bucket holding
+    one second's worth), whatever `traceparent` the caller sent. The decision is made when the
+    request starts, so **every request takes from the budget then, whatever its outcome**: a burst of
+    errors uses it up as well as a burst of successes. A request beyond the budget is only recorded;
+    its trace is still exported when the request log keeps it as an error, a 4xx other than 429, or a
+    request slower than 250 ms, but then it holds **the server span only, without the database or HTTP
+    client child spans** (those are never created for a request that was not sampled at the start);
+  - keeps every `backfill.page` and every `gapfill.run`, and the `Otel:FlushSampleRatio` share
+    (default `0.1`) of `ingest.flush` traces (by trace id);
+  - drops any other span without a parent, such as the leader lock probe every few seconds.
+
+  Child spans follow their parent, so the database spans of an unsampled request or flush are never
+  created.
 
 ### Standard instruments used
 
@@ -331,9 +391,24 @@ names, and the collector panels accept both suffixed and unsuffixed names.
   - The trace context must be set on the log record (the Serilog OTLP sink does this inside an
     activity); the `trace_id` link and the trace filter depend on it.
   - Raw IP addresses are never logged, only `client_ip_hash`.
-  - Every request logs one line (`Serilog.AspNetCore.RequestLoggingMiddleware`) with `RequestMethod`,
-    `RequestPath` (no query string), `StatusCode`, `Elapsed`, `route` and `client_ip_hash`; health
-    probes at Debug, 5xx at Error.
+  - Requests log one line (`Serilog.AspNetCore.RequestLoggingMiddleware`) with `RequestMethod`,
+    `RequestPath` (no query string), `StatusCode`, `Elapsed`, `route` and `client_ip_hash`, at a level
+    that depends on the outcome, so that a burst cannot flood Loki:
+    - an unhandled exception or a 5xx: Error;
+    - `/health/*`: Warning when not ready (503), otherwise Debug;
+    - slower than 250 ms, or a 4xx other than 429: Information;
+    - 2xx, 3xx and 429: Information when the request was sampled (its trace is kept, see *Trace
+      sampling*), otherwise Debug. Every request, sampled or not, is still counted by the metrics.
+
+    **429 is a deliberate exception to "4xx is always logged".** Rejections come in floods (one
+    client over its limit can send thousands per second), so they are sampled like successes; the
+    metrics count every one (`http_server_request_duration_seconds_count{http_response_status_code="429"}`,
+    `aspnetcore_rate_limiting_requests_total`, `tickpulse_api_responses_total{status="429"}`). The rate
+    limiter's own rejection log is separate from the request log.
+
+    Every Information line therefore has its trace, and the Logs dashboard's trace filter finds it.
+    When tracing is off (no `Otel:Endpoint`), the request log takes from the same budget itself, and
+    only for ordinary requests.
   - The console gets the same events as JSON (`RenderedCompactJsonFormatter`) with `service.name`,
     `service.version`, `deployment.environment`, `trace_id` and `span_id` added.
   - Levels come from `Serilog:MinimumLevel` in `appsettings.json`: Information by default; Warning for
@@ -359,7 +434,7 @@ names, and the collector panels accept both suffixed and unsuffixed names.
    Check the result as an anonymous viewer in a private window.
 
 An alert rule needs its `__dashboardUid__` / `__panelId__` annotations updated if you renumber a
-linked panel: `tp-ingestion` panels 9, 13 and 19, and `tp-api` panel 10.
+linked panel: `tp-ingestion` panels 9, 13 and 19, `tp-api` panel 10, and `tp-runtime` panel 26.
 
 ## Checking the stack
 
@@ -369,7 +444,7 @@ docker compose -f $F --profile observability ps            # prometheus, tempo, 
 
 curl -s -u "admin:${GRAFANA_ADMIN_PASSWORD:-tickpulse-dev}" localhost:3000/api/datasources | jq -r '.[].uid'          # loki prom tempo
 curl -s -u "admin:${GRAFANA_ADMIN_PASSWORD:-tickpulse-dev}" 'localhost:3000/api/search?type=dash-db' | jq -r '.[].uid' # 4 dashboards
-curl -s -u "admin:${GRAFANA_ADMIN_PASSWORD:-tickpulse-dev}" localhost:3000/api/v1/provisioning/alert-rules | jq length # 4
+curl -s -u "admin:${GRAFANA_ADMIN_PASSWORD:-tickpulse-dev}" localhost:3000/api/v1/provisioning/alert-rules | jq length # 5
 
 # Synthetic traces, logs and metrics straight into the collector:
 TG=ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.164.0

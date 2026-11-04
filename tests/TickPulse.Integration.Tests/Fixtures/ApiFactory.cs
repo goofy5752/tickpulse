@@ -28,7 +28,10 @@ namespace TickPulse.Integration.Tests.Fixtures;
 /// Binance REST retries then have no delay, so they never wait on the frozen clock. The WebSocket connections (and so
 /// their subscribe throttle) always run on <see cref="TimeProvider.System"/>, so commands are never held by a frozen
 /// clock. Workers that batch or retry on the app clock need <see cref="WithSystemClock"/>.</para>
-/// <para>The web root is a temporary directory (<see cref="WebRoot"/>), empty until a test writes files into it.</para>
+/// <para>The web root is a temporary directory (<see cref="WebRoot"/>), empty until a test writes files into it, or a
+/// path that does not exist after <see cref="WithoutWebRoot"/>. The development static web assets manifest
+/// (<c>TickPulse.Api.staticwebassets.runtime.json</c>) is never loaded: an incremental build keeps it after a local
+/// <c>wwwroot</c> is deleted, and the host would then fail to start because a content root it names is gone.</para>
 /// <para>Test-only controllers in this assembly (under <c>api/probe</c>) are added as an application part.</para>
 /// </remarks>
 public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Program>, IAsyncLifetime
@@ -41,6 +44,7 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
     private bool _systemClock;
     private bool _configured;
     private string? _environment;
+    private bool _noWebRoot;
     private ILoggerProvider? _logs;
 
     /// <summary>The app's clock, starting at the current time (millisecond precision); frozen until a test moves it.</summary>
@@ -66,6 +70,14 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
     {
         EnsureNotConfigured();
         _systemClock = true;
+        return this;
+    }
+
+    /// <summary>Points the web root at a directory that does not exist, as on a machine without a dashboard build.</summary>
+    public ApiFactory WithoutWebRoot()
+    {
+        EnsureNotConfigured();
+        _noWebRoot = true;
         return this;
     }
 
@@ -126,7 +138,10 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
             builder.UseEnvironment(_environment);
         }
 
-        builder.UseWebRoot(WebRoot);
+        builder.UseWebRoot(_noWebRoot ? Path.Combine(WebRoot, "missing") : WebRoot);
+
+        // A path with no file: the development static web assets loader then has nothing to load (see the remarks).
+        builder.UseSetting(WebHostDefaults.StaticWebAssetsKey, Path.Combine(WebRoot, "no-static-web-assets.json"));
         if (_logs is not null)
         {
             builder.ConfigureLogging(logging => logging.AddProvider(_logs));

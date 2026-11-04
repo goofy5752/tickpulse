@@ -10,7 +10,9 @@ namespace TickPulse.Infrastructure.Persistence;
 /// Writes a batch of ticks and folds the ticks that were actually inserted into <c>candles_1m</c>, all in one
 /// transaction. Replayed ticks hit the <c>price_ticks</c> primary key, are skipped by
 /// <c>ON CONFLICT DO NOTHING</c>, never reach <c>RETURNING</c> and so never touch a candle. That keeps
-/// <c>price_sum</c>/<c>tick_count</c> exact under reconnect replays, rotation overlap and gap-fill.
+/// <c>price_sum</c>/<c>tick_count</c> exact under reconnect replays, rotation overlap and gap-fill. Triggers on
+/// <c>candles_1m</c> refresh the <c>candles_1h</c>/<c>candles_1d</c> rollups in the same transaction (see the
+/// CandleRollups migration).
 /// </summary>
 public sealed class TickWriter(NpgsqlDataSource dataSource, TimeProvider clock) : ITickWriter
 {

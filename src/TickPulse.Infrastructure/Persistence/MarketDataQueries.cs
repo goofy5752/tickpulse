@@ -7,8 +7,10 @@ namespace TickPulse.Infrastructure.Persistence;
 
 /// <summary>
 /// Read-side queries over <c>price_ticks</c> and <c>candles_1m</c> through raw, parameterised Npgsql SQL on the
-/// shared (unkeyed) data source. Higher periods are aggregated from the 1-minute candles with
-/// <c>time_bucket(width, bucket_start, origin)</c> and the Monday origin <see cref="Period.Origin"/>.
+/// shared (unkeyed) data source. Higher periods are aggregated with <c>time_bucket(width, bucket_start, origin)</c>
+/// and the Monday origin <see cref="Period.Origin"/>: 5m and 30m from the 1-minute candles, 1d and 1w from the
+/// daily rollup <c>candles_1d</c>, which triggers keep equal to the aggregate of its minutes (see the
+/// CandleRollups migration).
 /// </summary>
 public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketDataQueries
 {
@@ -53,6 +55,29 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
           FROM candles_1m
          WHERE symbol_id = $1
            AND bucket_start >= (SELECT time_bucket($2, max(bucket_start), $3) FROM candles_1m WHERE symbol_id = $1) - $4
+         GROUP BY b
+         ORDER BY b
+        """;
+
+    // ClosesSql over the daily rollup, for whole-day periods (1d, 1w) and day-aligned windows. Every minute of a
+    // day lies in the same day row, so the same filter selects the same minutes; the close of a day is the
+    // close of its latest minute (see the CandleRollups migration).
+    internal const string DailyClosesSql = """
+        SELECT time_bucket($2, bucket_start, $3) AS b, last(close, bucket_start)
+          FROM candles_1d
+         WHERE symbol_id = $1 AND bucket_start >= $4 AND bucket_start < $5
+         GROUP BY b
+         ORDER BY b
+        """;
+
+    // CandlesSql over the daily rollup, for whole-day periods. The latest day row holds the latest minute, so the
+    // anchor is the same period start, and anchor - lookback stays on a day boundary.
+    internal const string DailyCandlesSql = """
+        SELECT time_bucket($2, bucket_start, $3) AS b,
+               first(open, bucket_start), max(high), min(low), last(close, bucket_start), sum(volume)
+          FROM candles_1d
+         WHERE symbol_id = $1
+           AND bucket_start >= (SELECT time_bucket($2, max(bucket_start), $3) FROM candles_1d WHERE symbol_id = $1) - $4
          GROUP BY b
          ORDER BY b
         """;
@@ -157,7 +182,8 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
             return [];
         }
 
-        await using var command = dataSource.CreateCommand(ClosesSql);
+        var daily = IsWholeDays(p.Length) && IsDayBoundary(w.Start) && IsDayBoundary(w.EndExclusive);
+        await using var command = dataSource.CreateCommand(daily ? DailyClosesSql : ClosesSql);
         command.Parameters.Add(Integer(symbolId));
         command.Parameters.Add(Interval(p.Length));
         command.Parameters.Add(TimestampTz(Period.Origin));
@@ -187,7 +213,7 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(limit, MaxCandleLimit);
 
-        await using var command = dataSource.CreateCommand(CandlesSql);
+        await using var command = dataSource.CreateCommand(IsWholeDays(p.Length) ? DailyCandlesSql : CandlesSql);
         command.Parameters.Add(Integer(symbolId));
         command.Parameters.Add(Interval(p.Length));
         command.Parameters.Add(TimestampTz(Period.Origin));
@@ -333,6 +359,11 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
             throw new ArgumentException("Uninitialised Period.", nameof(p));
         }
     }
+
+    // Day boundaries are UTC midnights; the Monday origin is one, so whole-day periods never split a day.
+    private static bool IsWholeDays(TimeSpan length) => length.Ticks % TimeSpan.TicksPerDay == 0;
+
+    private static bool IsDayBoundary(DateTime utc) => utc.Ticks % TimeSpan.TicksPerDay == 0;
 
     private static NpgsqlParameter<int> Integer(int value) => new() { TypedValue = value, NpgsqlDbType = NpgsqlDbType.Integer };
 

@@ -19,7 +19,10 @@ public sealed class SymbolResponse
 
     /// <summary>
     /// <c>(latest − close 24 h ago) / close 24 h ago × 100</c>, to 2 decimal places; <see langword="null"/> when
-    /// either price is unknown.
+    /// either price is unknown. While the history backfill is not <c>Completed</c>, it is also null when no close
+    /// exists within 15 minutes before <c>now − 24 h</c>, because the backfill may not have reached that far yet.
+    /// After completion, the last close before <c>now − 24 h</c> counts however old it is (a thin pair without
+    /// trades).
     /// </summary>
     [DataMember(Name = "change24hPercent", Order = 4)]
     public decimal? Change24hPercent { get; init; }

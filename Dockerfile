@@ -3,7 +3,7 @@
 # TickPulse images.
 #   web    builds the React dashboard (static files)
 #   build  restores and publishes TickPulse.Api and TickPulse.Cli
-#   api    the API host: ASP.NET Core runtime + the dashboard in wwwroot      (docker build --target api .)
+#   api    the API host: ASP.NET Core runtime + the precompressed dashboard     (docker build --target api .)
 #   cli    the console client                                                 (docker build --target cli .)
 #
 # Dependency manifests are copied before the sources, so the npm ci and dotnet restore layers stay cached until
@@ -15,6 +15,9 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY web/ ./
+# Where the dashboard's Grafana links point. Compose passes the local stack's GRAFANA_ROOT_URL; the default is
+# the public Grafana that the production image links to.
+ARG VITE_GRAFANA_URL=https://grafana.tickpulse.dev
 RUN npm run build
 
 # ---------- build: restore once, publish both apps ----------
@@ -33,6 +36,9 @@ RUN dotnet restore src/TickPulse.Api/TickPulse.Api.csproj \
  && dotnet restore src/TickPulse.Cli/TickPulse.Cli.csproj
 
 COPY src/ src/
+# The dashboard goes into wwwroot before publish, so the static web assets pipeline precompresses every file (Brotli
+# and gzip), computes an ETag per encoding and writes the manifest that MapStaticAssets serves.
+COPY --from=web /web/dist src/TickPulse.Api/wwwroot/
 RUN dotnet publish src/TickPulse.Api/TickPulse.Api.csproj -c Release --no-restore -o /out/api -p:UseAppHost=false \
  && dotnet publish src/TickPulse.Cli/TickPulse.Cli.csproj -c Release --no-restore -o /out/cli -p:UseAppHost=false
 
@@ -46,7 +52,6 @@ ENV DOTNET_NOLOGO=1
 # COPY leaves the files owned by root, so the process (the image's unprivileged "app" user) cannot modify them.
 # The base image already listens on 8080 (ASPNETCORE_HTTP_PORTS).
 COPY --from=build /out/api ./
-COPY --from=web /web/dist ./wwwroot
 USER app
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \

@@ -314,7 +314,7 @@ public sealed class AnalyticsServiceTests
     {
         _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Ada]);
         LatestCloses((Ada.Id, Now.AddHours(-2), 0.2475m));
-        DayAgoCloses((Ada.Id, Now.AddHours(-25), 0.25m));
+        DayAgoCloses((Ada.Id, Now.AddHours(-24).AddMinutes(-3), 0.25m));
 
         var result = await _service.ListSymbolsAsync(Ct);
 
@@ -333,6 +333,57 @@ public sealed class AnalyticsServiceTests
         var result = await _service.ListSymbolsAsync(Ct);
 
         result.Value.ShouldNotBeNull().ShouldBe([new SymbolSummary("ADAUSDT", false, 0.3m, null, BackfillStatus.NotRequested)]);
+    }
+
+    [Fact]
+    public async Task ListSymbols_DayAgoCloseFarBeforeTheWindow_GivesNullChange()
+    {
+        // A backfill runs oldest first: until it reaches now − 24 h, the newest close at or before now − 24 h is its
+        // frontier, weeks back. Comparing with it would report a change over weeks as the 24 h change.
+        _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Eth]);
+        _ingestion.RecordBatch(1, 0, [new LivePrice("ETHUSDT", 2_840m, Now.AddSeconds(-1))]);
+        DayAgoCloses((Eth.Id, Now.AddDays(-40), 2_000m));
+
+        var result = await _service.ListSymbolsAsync(Ct);
+
+        result.Value.ShouldNotBeNull().ShouldBe([new SymbolSummary("ETHUSDT", true, 2_840m, null, BackfillStatus.Running)]);
+    }
+
+    [Theory]
+    [InlineData(BackfillStatus.Running, 0, true)]
+    [InlineData(BackfillStatus.Running, 14, true)]
+    [InlineData(BackfillStatus.Running, 15, true)]
+    [InlineData(BackfillStatus.Running, 16, false)]
+    [InlineData(BackfillStatus.Running, 60, false)]
+    [InlineData(BackfillStatus.NotRequested, 16, false)]
+    [InlineData(BackfillStatus.Pending, 16, false)]
+    [InlineData(BackfillStatus.Failed, 16, false)]
+    public async Task ListSymbols_BeforeTheBackfillCompletes_DayAgoCloseMustLieWithinTheTolerance(
+        BackfillStatus backfill, int minutesBeforeTheWindow, bool hasChange)
+    {
+        _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Btc with { BackfillStatus = backfill }]);
+        _ingestion.RecordBatch(1, 0, [new LivePrice("BTCUSDT", 66_000m, Now.AddSeconds(-1))]);
+        DayAgoCloses((Btc.Id, Period.OneMinute.AlignDown(Now.AddHours(-24)).AddMinutes(-minutesBeforeTheWindow), 64_000m));
+
+        var result = await _service.ListSymbolsAsync(Ct);
+
+        result.Value.ShouldNotBeNull().Single().Change24hPercent.ShouldBe(hasChange ? 3.12m : null);
+    }
+
+    [Theory]
+    [InlineData(16)]
+    [InlineData(120)]
+    public async Task ListSymbols_BackfillCompleted_AcceptsAnOlderDayAgoClose(int minutesBeforeTheWindow)
+    {
+        // A thin pair can go hours without a trade. Once the history is complete, an older close is the last real
+        // price before the window, as in a rolling 24 h ticker, not a backfill frontier.
+        _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Btc]);
+        _ingestion.RecordBatch(1, 0, [new LivePrice("BTCUSDT", 66_000m, Now.AddSeconds(-1))]);
+        DayAgoCloses((Btc.Id, Period.OneMinute.AlignDown(Now.AddHours(-24)).AddMinutes(-minutesBeforeTheWindow), 64_000m));
+
+        var result = await _service.ListSymbolsAsync(Ct);
+
+        result.Value.ShouldNotBeNull().ShouldBe([new SymbolSummary("BTCUSDT", true, 66_000m, 3.12m, BackfillStatus.Completed)]);
     }
 
     [Fact]
@@ -389,7 +440,7 @@ public sealed class AnalyticsServiceTests
     {
         _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Btc]);
         _ingestion.RecordBatch(1, 0, [new LivePrice("BTCUSDT", 1m, Now)]);
-        DayAgoCloses((Btc.Id, Now.AddHours(-25), 0m));
+        DayAgoCloses((Btc.Id, Now.AddHours(-24).AddMinutes(-3), 0m));
 
         var result = await _service.ListSymbolsAsync(Ct);
 
