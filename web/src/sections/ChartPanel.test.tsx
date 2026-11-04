@@ -6,7 +6,7 @@ import { createQueryClient } from '@/api/queries'
 import type { CandleResponse, Period, SmaResponse } from '@/api/types'
 import type { PriceChartProps } from '@/components/PriceChart'
 import { DEFAULT_SMA_PARAMS, type SmaParams } from '@/lib/smaParams'
-import { ChartPanel } from './ChartPanel'
+import { CHART_TYPE_STORAGE_KEY, ChartPanel } from './ChartPanel'
 
 // The real chart needs a canvas; a stub shows what the panel hands it and counts mounts.
 const chart = vi.hoisted(() => ({ mounts: 0 }))
@@ -20,6 +20,7 @@ vi.mock('@/components/PriceChart', () => ({
         data-testid="chart"
         data-symbol={props.symbol}
         data-period={props.period}
+        data-type={props.type ?? 'candles'}
         data-sma={props.sma ? String(props.sma.requestedDataPoints) : ''}
         className={props.className}
       />
@@ -101,6 +102,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  localStorage.clear()
 })
 
 function setup(initial: { symbol: string; params: SmaParams }) {
@@ -133,6 +135,36 @@ function candleRequests(key: string): number {
 }
 
 describe('ChartPanel', () => {
+  it('ChartPanel_ChartType_SwitchesToLine_AndIsRemembered', async () => {
+    setup({ symbol: 'BTCUSDT', params: daily })
+    const element = await chartFor('BTCUSDT', '1d')
+    expect(element.dataset.type).toBe('candles')
+    expect(screen.getByText('1d candles')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Line' }))
+
+    expect(screen.getByTestId('chart').dataset.type).toBe('line')
+    expect(screen.getByText('1d closes')).toBeTruthy()
+    expect(localStorage.getItem(CHART_TYPE_STORAGE_KEY)).toBe('line')
+
+    // A fresh visit opens on the remembered view.
+    cleanup()
+    setup({ symbol: 'BTCUSDT', params: daily })
+    expect((await chartFor('BTCUSDT', '1d')).dataset.type).toBe('line')
+    expect(screen.getByRole<HTMLInputElement>('radio', { name: 'Line' }).checked).toBe(true)
+  })
+
+  it('ChartPanel_ChartType_KeepsTheChartMounted', async () => {
+    setup({ symbol: 'BTCUSDT', params: daily })
+    await chartFor('BTCUSDT', '1d')
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Line' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'Candles' }))
+
+    expect(screen.getByTestId('chart').dataset.type).toBe('candles')
+    expect(chart.mounts).toBe(1)
+  })
+
   it('ChartPanel_PeriodLoading_KeepsPreviousChartDimmedWithStatus', async () => {
     behaviour.set('candles|BTCUSDT|5m', 'hold')
     const { show } = setup({ symbol: 'BTCUSDT', params: daily })

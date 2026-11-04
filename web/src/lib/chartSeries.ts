@@ -2,6 +2,12 @@ import type { CandlestickData, ISeriesApi, LineData, UTCTimestamp, WhitespaceDat
 import type { TimeValue } from '@/lib/sma'
 
 export type CandleRow = CandlestickData<UTCTimestamp> | WhitespaceData<UTCTimestamp>
+export type CloseRow = LineData<UTCTimestamp> | WhitespaceData<UTCTimestamp>
+
+/** A candle as a point of the line view: its close; a gap stays a gap. */
+export function toCloseRow(row: CandleRow): CloseRow {
+  return 'close' in row ? { time: row.time, value: row.close } : { time: row.time }
+}
 
 /**
  * Hands the candles and the SMA line to their series.
@@ -20,8 +26,11 @@ export function setSeriesData(
   smaSeries: ISeriesApi<'Line'>,
   candles: CandleRow[],
   line: readonly TimeValue[],
+  closeSeries?: ISeriesApi<'Area'>,
 ): void {
   candleSeries.setData(candles)
+  // The line view: the same time grid, so all series always share every time point.
+  closeSeries?.setData(candles.map(toCloseRow))
   const first = candles[0]
   if (line.length === 0 && first) {
     smaSeries.setData([{ time: first.time }])
