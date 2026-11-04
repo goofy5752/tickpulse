@@ -22,9 +22,24 @@ public interface IMarketDataQueries
 
     Task<decimal?> GetCloseAtOrBeforeAsync(int symbolId, DateTime utc, CancellationToken ct);
 
+    /// <summary>
+    /// For each of <paramref name="symbolIds"/>, the close and start of its latest 1-minute candle starting at or before
+    /// <paramref name="utc"/>, in one round trip. Symbols without such a candle are absent from the result.
+    /// </summary>
+    Task<IReadOnlyDictionary<int, PricePoint>> GetClosesAtOrBeforeAsync(IReadOnlyCollection<int> symbolIds, DateTime utc, CancellationToken ct);
+
     Task<long> ApproximateTickCountAsync(CancellationToken ct);
 
     Task<DateTime?> FirstStreamMinuteAsync(int symbolId, CancellationToken ct);
+
+    /// <summary>
+    /// The earliest 1-minute bucket holding streamed ticks that starts at or after <paramref name="atOrAfterUtc"/>, or
+    /// <see langword="null"/>.
+    /// </summary>
+    Task<DateTime?> FirstStreamMinuteAtOrAfterAsync(int symbolId, DateTime atOrAfterUtc, CancellationToken ct);
+
+    /// <summary>The latest stored 1-minute bucket (streamed or backfilled) starting before <paramref name="beforeUtc"/>, or <see langword="null"/>.</summary>
+    Task<DateTime?> LastMinuteBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct);
 
     /// <summary>
     /// The earliest and latest backfilled (exchange) minutes strictly before <paramref name="beforeUtc"/>, or

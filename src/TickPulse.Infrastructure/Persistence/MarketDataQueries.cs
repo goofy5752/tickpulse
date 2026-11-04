@@ -64,10 +64,27 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
          LIMIT 1
         """;
 
+    // $1 symbol ids, $2 instant. One backward primary-key probe per id (LIMIT 1 inside the lateral join); ids
+    // without a candle at or before $2 produce no row. DISTINCT answers a repeated id once.
+    internal const string ClosesAtOrBeforeSql = """
+        SELECT s.id, c.bucket_start, c.close
+          FROM (SELECT DISTINCT unnest($1::int[]) AS id) AS s
+         CROSS JOIN LATERAL (
+               SELECT bucket_start, close FROM candles_1m
+                WHERE symbol_id = s.id AND bucket_start <= $2
+                ORDER BY bucket_start DESC
+                LIMIT 1) AS c
+        """;
+
     internal const string ApproximateTickCountSql = "SELECT approximate_row_count('price_ticks')";
 
     // Reads the partial index ix_candles_1m_stream.
     internal const string FirstStreamMinuteSql = "SELECT min(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 1";
+
+    internal const string FirstStreamMinuteAtOrAfterSql =
+        "SELECT min(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 1 AND bucket_start >= $2";
+
+    internal const string LastMinuteBeforeSql = "SELECT max(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND bucket_start < $2";
 
     internal const string BackfillRangeSql =
         "SELECT min(bucket_start), max(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 2 AND bucket_start < $2";
@@ -194,6 +211,30 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     }
 
     /// <inheritdoc />
+    /// <remarks>Any source counts, as in <see cref="GetCloseAtOrBeforeAsync"/>. An empty <paramref name="symbolIds"/> runs no query.</remarks>
+    public async Task<IReadOnlyDictionary<int, PricePoint>> GetClosesAtOrBeforeAsync(IReadOnlyCollection<int> symbolIds, DateTime utc, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(symbolIds);
+        RequireUtc(utc, nameof(utc));
+        var closes = new Dictionary<int, PricePoint>(symbolIds.Count);
+        if (symbolIds.Count == 0)
+        {
+            return closes;
+        }
+
+        await using var command = dataSource.CreateCommand(ClosesAtOrBeforeSql);
+        command.Parameters.Add(new NpgsqlParameter<int[]> { TypedValue = [.. symbolIds], NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
+        command.Parameters.Add(TimestampTz(utc));
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            closes[reader.GetInt32(0)] = new PricePoint(reader.GetDateTime(1), reader.GetDecimal(2));
+        }
+
+        return closes;
+    }
+
+    /// <inheritdoc />
     /// <remarks>An estimate from the planner statistics of the <c>price_ticks</c> chunks; cheap at any size.</remarks>
     public async Task<long> ApproximateTickCountAsync(CancellationToken ct)
     {
@@ -208,6 +249,27 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     {
         await using var command = dataSource.CreateCommand(FirstStreamMinuteSql);
         command.Parameters.Add(Integer(symbolId));
+        return await command.ExecuteScalarAsync(ct) is DateTime minute ? minute : null;
+    }
+
+    /// <inheritdoc />
+    public async Task<DateTime?> FirstStreamMinuteAtOrAfterAsync(int symbolId, DateTime atOrAfterUtc, CancellationToken ct)
+    {
+        RequireUtc(atOrAfterUtc, nameof(atOrAfterUtc));
+        await using var command = dataSource.CreateCommand(FirstStreamMinuteAtOrAfterSql);
+        command.Parameters.Add(Integer(symbolId));
+        command.Parameters.Add(TimestampTz(atOrAfterUtc));
+        return await command.ExecuteScalarAsync(ct) is DateTime minute ? minute : null;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>One primary-key endpoint scan, backwards from <paramref name="beforeUtc"/>.</remarks>
+    public async Task<DateTime?> LastMinuteBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct)
+    {
+        RequireUtc(beforeUtc, nameof(beforeUtc));
+        await using var command = dataSource.CreateCommand(LastMinuteBeforeSql);
+        command.Parameters.Add(Integer(symbolId));
+        command.Parameters.Add(TimestampTz(beforeUtc));
         return await command.ExecuteScalarAsync(ct) is DateTime minute ? minute : null;
     }
 

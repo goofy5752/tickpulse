@@ -82,7 +82,7 @@ public sealed class SymbolRepository(NpgsqlDataSource dataSource, TimeProvider c
               RETURNING {Columns}
               """
             : $"""
-              UPDATE symbols SET is_active = true, deactivated_at = NULL, updated_at = $2
+              UPDATE symbols SET is_active = true, updated_at = $2
                WHERE name = $1
               RETURNING {Columns}
               """;

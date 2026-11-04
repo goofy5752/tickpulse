@@ -14,7 +14,8 @@ public interface ISymbolRepository
     /// <summary>
     /// Creates the symbol, or reactivates it, unless that would take the number of active symbols above
     /// <paramref name="maxActiveSymbols"/>. The limit check and the write happen atomically, so concurrent
-    /// adds cannot exceed the limit. An already active symbol is returned unchanged.
+    /// adds cannot exceed the limit. An already active symbol is returned unchanged. Reactivating keeps
+    /// <see cref="MonitoredSymbol.DeactivatedAtUtc"/>, so the backfill can find the stretch the symbol was inactive.
     /// </summary>
     Task<SymbolAddOutcome> AddOrReactivateAsync(SymbolName name, int maxActiveSymbols, CancellationToken ct);
 

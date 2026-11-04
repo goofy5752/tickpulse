@@ -28,7 +28,8 @@ public static class BinanceServiceCollectionExtensions
 
     /// <summary>
     /// Registers <see cref="BinanceRestClient"/> as a typed <see cref="HttpClient"/> behind the standard resilience
-    /// handler, a singleton <see cref="BinanceWeightGuard"/>, and the client as <see cref="IExchangeMetadata"/>,
+    /// handler, a singleton <see cref="BinanceWeightGuard"/>, the client wrapped in <see cref="BinanceExchangeMetadata"/> as
+    /// <see cref="IExchangeMetadata"/>, and the client itself as
     /// <see cref="IKlineSource"/> and <see cref="IAggTradeSource"/>.
     /// </summary>
     /// <remarks>
@@ -67,7 +68,9 @@ public static class BinanceServiceCollectionExtensions
         });
         client.AddHttpMessageHandler(sp => new BinanceAttemptHandler(sp.GetRequiredService<BinanceWeightGuard>()));
 
-        services.TryAddTransient<IExchangeMetadata>(sp => sp.GetRequiredService<BinanceRestClient>());
+        services.TryAddTransient<IExchangeMetadata>(sp => new BinanceExchangeMetadata(
+            sp.GetRequiredService<BinanceRestClient>(),
+            sp.GetRequiredService<TimeProvider>()));
         services.TryAddTransient<IKlineSource>(sp => sp.GetRequiredService<BinanceRestClient>());
         services.TryAddTransient<IAggTradeSource>(sp => sp.GetRequiredService<BinanceRestClient>());
         return services;

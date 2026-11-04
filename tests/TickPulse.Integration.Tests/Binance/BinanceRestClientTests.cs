@@ -77,6 +77,97 @@ public sealed class BinanceRestClientTests
     }
 
     [Theory]
+    [InlineData(HttpStatusCode.OK, TradingInfo, true)]
+    [InlineData(HttpStatusCode.BadRequest, """{"code":-1121,"msg":"Invalid symbol."}""", false)]
+    public async Task ExchangeMetadata_Answer_PassesThrough(HttpStatusCode status, string body, bool expected)
+    {
+        var stub = new StubHandler();
+        stub.Enqueue(status, body);
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+
+        (await new BinanceExchangeMetadata(rest).IsTradingSymbolAsync(Btc, TestContext.Current.CancellationToken)).ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.RequestTimeout)]
+    public async Task ExchangeMetadata_TransientFailure_ThrowsExchangeUnavailable(HttpStatusCode status)
+    {
+        var stub = new StubHandler();
+        stub.Enqueue(status, "<html>upstream error</html>");
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+
+        var ex = await Should.ThrowAsync<ExchangeUnavailableException>(
+            () => new BinanceExchangeMetadata(rest).IsTradingSymbolAsync(Btc, TestContext.Current.CancellationToken));
+
+        ex.InnerException.ShouldBeOfType<BinanceApiException>().IsTransient.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task ExchangeMetadata_Banned_ThrowsExchangeUnavailable()
+    {
+        var stub = new StubHandler();
+        stub.Enqueue((HttpStatusCode)418, "", retryAfterSeconds: 120);
+        using var client = NewClient(stub, new FakeTimeProvider(Noon), out var rest);
+
+        var ex = await Should.ThrowAsync<ExchangeUnavailableException>(
+            () => new BinanceExchangeMetadata(rest).IsTradingSymbolAsync(Btc, TestContext.Current.CancellationToken));
+
+        ex.InnerException.ShouldBeOfType<BinanceBannedException>();
+    }
+
+    [Fact]
+    public async Task ExchangeMetadata_GuardPausedPastTimeout_ThrowsExchangeUnavailable()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var clock = new FakeTimeProvider(Noon);
+        var stub = new StubHandler();
+        stub.Enqueue((HttpStatusCode)429, TooManyRequests, retryAfterSeconds: 60);
+        using var client = NewClient(stub, clock, out var rest);
+
+        // The 429 pauses the weight guard for a minute; the admin call gives up after its own timeout instead.
+        var call = new BinanceExchangeMetadata(rest, clock).IsTradingSymbolAsync(Btc, ct);
+        call.IsCompleted.ShouldBeFalse();
+        clock.Advance(BinanceExchangeMetadata.Timeout - TimeSpan.FromMilliseconds(1));
+        call.IsCompleted.ShouldBeFalse();
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+
+        var ex = await Should.ThrowAsync<ExchangeUnavailableException>(() => call.WaitAsync(Timeout, ct));
+        ex.InnerException.ShouldBeAssignableTo<OperationCanceledException>();
+        stub.Requests.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task ExchangeMetadata_CallerCancels_ThrowsOperationCanceled()
+    {
+        var clock = new FakeTimeProvider(Noon);
+        var stub = new StubHandler();
+        stub.Enqueue((HttpStatusCode)429, TooManyRequests, retryAfterSeconds: 60);
+        using var client = NewClient(stub, clock, out var rest);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+
+        var call = new BinanceExchangeMetadata(rest, clock).IsTradingSymbolAsync(Btc, cts.Token);
+        await cts.CancelAsync();
+
+        var ex = await CatchAsync(() => call.WaitAsync(Timeout, TestContext.Current.CancellationToken));
+        ex.ShouldBeAssignableTo<OperationCanceledException>();
+    }
+
+    [Fact]
+    public async Task ExchangeMetadata_PermanentFailure_Propagates()
+    {
+        var stub = new StubHandler();
+        stub.Enqueue(HttpStatusCode.BadRequest, """{"code":-1100,"msg":"Illegal characters found in a parameter."}""");
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+
+        var ex = await Should.ThrowAsync<BinanceApiException>(
+            () => new BinanceExchangeMetadata(rest).IsTradingSymbolAsync(Btc, TestContext.Current.CancellationToken));
+
+        ex.IsTransient.ShouldBeFalse();
+    }
+
+    [Theory]
     [InlineData(HttpStatusCode.InternalServerError)]
     [InlineData(HttpStatusCode.ServiceUnavailable)]
     [InlineData(HttpStatusCode.RequestTimeout)]
@@ -583,7 +674,7 @@ public sealed class BinanceRestClientTests
         var klines = provider.GetRequiredService<IKlineSource>();
         var aggTrades = provider.GetRequiredService<IAggTradeSource>();
 
-        metadata.ShouldBeOfType<BinanceRestClient>();
+        metadata.ShouldBeOfType<BinanceExchangeMetadata>();
         (await metadata.IsTradingSymbolAsync(Btc, ct)).ShouldBeTrue();
         (await metadata.IsTradingSymbolAsync(Symbol("ADAUSDT"), ct)).ShouldBeFalse();
         (await metadata.IsTradingSymbolAsync(Symbol("NOPEUSDT"), ct)).ShouldBeFalse();

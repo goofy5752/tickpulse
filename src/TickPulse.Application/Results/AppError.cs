@@ -8,4 +8,7 @@ public enum AppError
     InvalidSymbol,
     SymbolLimit,
     Validation,
+
+    /// <summary>A dependency outside TickPulse (the exchange) cannot answer right now; retrying later may help.</summary>
+    UpstreamUnavailable,
 }

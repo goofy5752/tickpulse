@@ -69,12 +69,28 @@ npm --prefix web run dev | build | lint | typecheck
 - **Errors** are RFC 9457 ProblemDetails, negotiated as JSON or XML on every path. Type URIs are
   `https://tickpulse.dev/problems/{slug}` with slugs `unknown-symbol`, `no-data`,
   `invalid-symbol`, `symbol-limit`, `admin-disabled`, `validation`, `not-acceptable`,
-  `rate-limited`, `internal`.
+  `rate-limited`, `internal`, `not-found` (unmatched routes), `unauthorized` (401: missing or wrong
+  `X-Api-Key`), `upstream-unavailable` (503: Binance cannot confirm a symbol being added right now).
 - **Config keys** (env uses `__`): `ConnectionStrings:TickPulse`, `Admin:*`, `Binance:*`,
   `Ingestion:*`, `Backfill:*`, `Database:RunMigrationsOnStartup`, `Otel:Endpoint`.
   Defaults are listed in the plan's Global Constraints, plus two leader-election keys:
   `Ingestion:LeaderRetryInterval` (`00:00:10`, how often a standby instance tries the lock) and
   `Ingestion:LeaderCheckInterval` (`00:00:05`, how often the leader probes it).
+  API host keys: `RateLimiting:PermitLimit` (`300`) and `RateLimiting:WindowSeconds` (`60`), a
+  fixed window per client (IPv4 address, IPv6 /64) on the API controllers;
+  `ForwardedHeaders:KnownProxies` (IPs) and `ForwardedHeaders:KnownNetworks` (CIDRs, e.g. the
+  Docker bridge `172.16.0.0/12`), each an array or comma-separated and added to loopback: the
+  proxies whose `CF-Connecting-IP` is trusted as the client IP (`X-Forwarded-For` is never read);
+  `Otel:IpSalt`, the salt of the logged client-IP hash (random per process when unset).
+- **Error negotiation**: problems go through `IProblemDetailsService` with two writers, XML
+  (`application/problem+xml`) when `Accept` prefers XML, otherwise JSON. Higher q wins; at equal q
+  a concrete type beats a wildcard, and between concrete types the first listed wins. The host
+  reorders `Accept` by q, then specificity, before MVC, so successes follow the same rule.
+  Controllers return errors as `ProblemResult(ProblemFactory.Create(...))`, so an error is never
+  replaced by a 406: a client that accepts neither format gets the problem as JSON. Only a
+  successful response can be a 406. `/api` responses carry `Vary: Accept`.
+- **Startup migrations** retry transient Npgsql errors (5 attempts, 1/2/4/8 s backoff, 2 min in
+  total); beyond that startup fails and the container restart policy takes over.
 - **Clearing tables**: in SQL and shell scripts, clear tables with `DELETE FROM`.
 - **Packages**: versions live only in `Directory.Packages.props` (Central Package Management).
   Add a `PackageReference` only to the project that needs it.

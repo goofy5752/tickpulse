@@ -2,11 +2,17 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Scalar.AspNetCore" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\TickPulse.Infrastructure\TickPulse.Infrastructure.csproj" />
     <ProjectReference Include="..\TickPulse.Contracts\TickPulse.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Unit tests of the host's helpers (partition keys, migration retry). -->
+    <InternalsVisibleTo Include="TickPulse.Integration.Tests" />
   </ItemGroup>
 
 </Project>

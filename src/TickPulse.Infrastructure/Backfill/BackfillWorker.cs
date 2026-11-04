@@ -29,6 +29,10 @@ namespace TickPulse.Infrastructure.Backfill;
 /// increased) it starts again from the beginning. Inserts are <c>ON CONFLICT DO NOTHING</c>, so overlap is harmless
 /// and streamed minutes are never overwritten. Klines with zero volume are stored as Binance returns them. On
 /// completion <c>backfilled_from</c> records the earliest backfilled minute actually stored.</para>
+/// <para>A reactivated symbol (it streamed, was deactivated, and is active again) also gets the stretch it was inactive:
+/// from right after the latest minute stored before its new stream, up to the first minute streamed since its last
+/// deactivation (or the current minute). The admin use case marks such a symbol <see cref="BackfillStatus.Pending"/>
+/// before queueing it, so this happens even when its earlier backfill had completed.</para>
 /// <para>Failures: a transient Binance error is retried up to <see cref="MaxTransientRetries"/> times with
 /// <see cref="RetryDelay"/>, unless leadership was lost (then the run pauses). A permanent Binance error, persisting
 /// transient errors or a database error mark the symbol <see cref="BackfillStatus.Failed"/> (the reason is logged)
@@ -272,7 +276,7 @@ internal sealed partial class BackfillWorker(
                 return;
             }
 
-            await BackfillAsync(symbolId, name, ct).ConfigureAwait(false);
+            await BackfillAsync(symbol, name, ct).ConfigureAwait(false);
         }
         catch (BinanceBannedException ex)
         {
@@ -309,16 +313,56 @@ internal sealed partial class BackfillWorker(
         _scanNeeded = true;
     }
 
-    private async Task BackfillAsync(int symbolId, SymbolName name, CancellationToken ct)
+    private async Task BackfillAsync(MonitoredSymbol symbol, SymbolName name, CancellationToken ct)
     {
+        var symbolId = symbol.Id;
         var now = clock.GetUtcNow().UtcDateTime;
+        var current = Period.OneMinute.AlignDown(now);
         var from = Period.OneMinute.AlignDown(now - _depth);
-        var end = await queries.FirstStreamMinuteAsync(symbolId, ct).ConfigureAwait(false) ?? Period.OneMinute.AlignDown(now);
+        var firstStream = await queries.FirstStreamMinuteAsync(symbolId, ct).ConfigureAwait(false);
+        var end = firstStream ?? current;
 
         await symbols.SetBackfillStatusAsync(symbolId, BackfillStatus.Running, null, ct).ConfigureAwait(false);
         var next = await ResumePointAsync(symbolId, from, end, from, ct).ConfigureAwait(false);
         LogStarted(name.Value, from, end, next);
+        var totals = await WalkAsync(symbolId, name, from, end, next, ct).ConfigureAwait(false);
 
+        // A symbol that streamed, was deactivated and is active again also has the stretch it was inactive to fill.
+        if (await InactiveStretchAsync(symbol, firstStream, from, current, ct).ConfigureAwait(false) is { } gap)
+        {
+            LogStarted(name.Value, gap.Start, gap.End, gap.Start);
+            totals += await WalkAsync(symbolId, name, gap.Start, gap.End, gap.Start, ct).ConfigureAwait(false);
+            end = gap.End;
+        }
+
+        // backfilled_from is what is actually stored: later than `from` when the symbol's history is shorter.
+        var stored = await queries.BackfillRangeBeforeAsync(symbolId, end, ct).ConfigureAwait(false);
+        await symbols.SetBackfillStatusAsync(symbolId, BackfillStatus.Completed, stored?.First, ct).ConfigureAwait(false);
+        LogCompleted(name.Value, stored?.First, end, totals.Pages, totals.Fetched, totals.Inserted);
+    }
+
+    // The minutes a reactivated symbol missed while inactive: from right after the latest minute stored before its new
+    // stream (or `from`, if that is earlier) up to the first minute streamed since its last deactivation, or the current
+    // minute when nothing was streamed yet. Null when the symbol never streamed before that deactivation (the walk up
+    // to the first stream minute already covers it) or the stretch is empty. An interrupted fill resumes on its own:
+    // the minutes it stored are the latest ones before the end.
+    private async Task<(DateTime Start, DateTime End)?> InactiveStretchAsync(
+        MonitoredSymbol symbol, DateTime? firstStream, DateTime from, DateTime current, CancellationToken ct)
+    {
+        if (symbol.DeactivatedAtUtc is not { } deactivated || firstStream is not { } first || first >= deactivated)
+        {
+            return null;
+        }
+
+        var end = await queries.FirstStreamMinuteAtOrAfterAsync(symbol.Id, deactivated, ct).ConfigureAwait(false) ?? current;
+        var last = await queries.LastMinuteBeforeAsync(symbol.Id, end, ct).ConfigureAwait(false);
+        var start = last is { } minute && minute + Minute > from ? minute + Minute : from;
+        return start < end ? (start, end) : null;
+    }
+
+    // Fetches and stores [next, end) page by page, pausing while this instance is not leader.
+    private async Task<WalkTotals> WalkAsync(int symbolId, SymbolName name, DateTime from, DateTime end, DateTime next, CancellationToken ct)
+    {
         var progress = new Progress(from, end, next);
         var pages = 0;
         var fetched = 0;
@@ -353,7 +397,6 @@ internal sealed partial class BackfillWorker(
             if (after <= next || page.Count < PageSize)
             {
                 // Nothing more in [next, end) (a short page), or no progress (never expected from Binance).
-                next = end;
                 break;
             }
 
@@ -364,10 +407,13 @@ internal sealed partial class BackfillWorker(
             }
         }
 
-        // backfilled_from is what is actually stored: later than `from` when the symbol's history is shorter.
-        var stored = await queries.BackfillRangeBeforeAsync(symbolId, end, ct).ConfigureAwait(false);
-        await symbols.SetBackfillStatusAsync(symbolId, BackfillStatus.Completed, stored?.First, ct).ConfigureAwait(false);
-        LogCompleted(name.Value, stored?.First, end, pages, fetched, inserted);
+        return new WalkTotals(pages, fetched, inserted);
+    }
+
+    private readonly record struct WalkTotals(int Pages, int Fetched, int Inserted)
+    {
+        public static WalkTotals operator +(WalkTotals a, WalkTotals b) =>
+            new(a.Pages + b.Pages, a.Fetched + b.Fetched, a.Inserted + b.Inserted);
     }
 
     // Where to continue in [from, end) when [from, next) is already covered: right after the latest backfilled minute,

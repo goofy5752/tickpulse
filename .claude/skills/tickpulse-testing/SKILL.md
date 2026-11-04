@@ -53,7 +53,12 @@ and `tests/coverlet.runsettings` (excludes generated code and migrations).
   `ReceivedCommands`, `PushTradeAsync(...)`, `DropAllConnectionsAsync()`, `ActiveConnections`;
   stub `exchangeInfo`, `klines`, `aggTrades`.
 - **`ApiFactory`**: `WebApplicationFactory<Program>` wired to the TimescaleFixture connection and a
-  FakeBinanceServer, `Admin:ApiKey=test-key`, and a `FakeTimeProvider Clock`.
+  FakeBinanceServer, `Admin:ApiKey=test-key`, and a `FakeTimeProvider Clock`. Use it as a class
+  fixture; for other settings create one per test (`new ApiFactory(db).WithSetting(k, v)`, then
+  `InitializeAsync()`). The ingestion and backfill hosted workers are removed unless you call
+  `WithWorkers()`; workers that batch or retry on the app clock also need `WithSystemClock()`.
+  Test-only controllers in the test assembly (e.g. `Api/ProbeController`, `api/probe/*`) are added
+  as an application part.
 
 ## Coverage gates (CI `backend` job)
 
@@ -76,7 +81,9 @@ Do not lower a threshold or widen an exclusion to get green; add the missing tes
 - Messy symbols (`btcusdt`, ` ETHUSDT `, `BTC-USDT`) normalise or fail cleanly (404/422, never 500).
 - `s` on a bucket boundary, in the future (400), without offset (UTC), with `+03:00`.
 - `Accept` matrix: browser default → XML, `*/*`/missing → JSON, `application/json;q=0.5,
-  application/xml` → XML, `text/csv` → 406 with a problem body; same on error responses.
+  application/xml` → XML, `text/csv` → 406 with a problem body. Error responses follow the same
+  JSON/XML choice as `application/problem+json`/`+xml`, but keep their own status: with `text/csv`
+  they fall back to `application/problem+json` (never a 406).
 - Symbol churn during reconnect ends subscribed exactly once.
 
 ## Before saying "done"

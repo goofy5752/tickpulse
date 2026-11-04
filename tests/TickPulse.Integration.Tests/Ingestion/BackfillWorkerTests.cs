@@ -216,6 +216,68 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Reactivated_Pending_FillsTheInactiveStretch_AfterBeingCompleted()
+    {
+        var prices = SeedTrades("BTCUSDT", From, DepthMinutes);
+        var run = CreateRun();
+        await MarkCompletedAsync(run, Ada, Eth);
+
+        // First activation: backfilled [From, From+1000), then streamed for ten minutes, then deactivated at From+1010.
+        Kline[] history = [.. Enumerable.Range(0, 1000).Select(i => new Kline(From.AddMinutes(i), 1m, 1m, 1m, 1m, 0m, 0m))];
+        (await run.Services.GetRequiredService<ICandleWriter>().InsertBackfillAsync(Btc, history, Ct)).ShouldBe(1000);
+        await WriteStreamAsync(run, From.AddMinutes(1000), 10, firstId: 50_000_000);
+        await run.Symbols.SetBackfillStatusAsync(Btc, BackfillStatus.Completed, From, Ct);
+        (await run.Symbols.DeactivateAsync(Symbol("BTCUSDT"), Ct)).ShouldBeTrue();
+        await SetDeactivatedAtAsync(Btc, From.AddMinutes(1010));
+
+        // Reactivated as the admin use case does it, and streaming again from From+3000.
+        (await run.Symbols.AddOrReactivateAsync(Symbol("BTCUSDT"), 20, Ct)).Status.ShouldBe(SymbolAddStatus.Reactivated);
+        await run.Symbols.SetBackfillStatusAsync(Btc, BackfillStatus.Pending, From, Ct);
+        await WriteStreamAsync(run, From.AddMinutes(3000), 5, firstId: 60_000_000);
+
+        await run.StartAsync();
+        run.Worker.Enqueue(Btc);
+        await WaitForStatusAsync(run, Btc, BackfillStatus.Completed);
+
+        // Only the inactive stretch [From+1010, From+3000) is fetched: after the last stored minute, up to the new stream.
+        var requests = _server.KlineRequests;
+        requests.Select(r => r["startTime"]).ShouldBe([UnixMs(From.AddMinutes(1010)), UnixMs(From.AddMinutes(2010))]);
+        requests.ShouldAllBe(r => r["endTime"] == (long.Parse(UnixMs(From.AddMinutes(3000)), CultureInfo.InvariantCulture) - 1).ToString(CultureInfo.InvariantCulture));
+        var stats = await CandleStatsAsync(Btc);
+        stats.Count.ShouldBe(1000 + 10 + 1990 + 5);
+        stats.Backfilled.ShouldBe(1000 + 1990);
+        stats.First.ShouldBe(From);
+        stats.Last.ShouldBe(From.AddMinutes(3004));
+        (await CloseAtAsync(Btc, From.AddMinutes(2999))).ShouldBe(prices[2999]);
+        (await CloseAtAsync(Btc, From.AddMinutes(999))).ShouldBe(1m); // the first activation's rows were left alone
+        (await FindAsync(run, Btc)).BackfilledFromUtc.ShouldBe(From);
+    }
+
+    [Fact]
+    public async Task Reactivated_NoNewStreamYet_FillsUpToNow()
+    {
+        SeedTrades("BTCUSDT", From, DepthMinutes);
+        var run = CreateRun();
+        await MarkCompletedAsync(run, Ada, Eth);
+        await WriteStreamAsync(run, From.AddMinutes(100), 3, firstId: 50_000_000);
+        (await run.Symbols.DeactivateAsync(Symbol("BTCUSDT"), Ct)).ShouldBeTrue();
+        await SetDeactivatedAtAsync(Btc, From.AddMinutes(103).AddSeconds(30));
+        (await run.Symbols.AddOrReactivateAsync(Symbol("BTCUSDT"), 20, Ct)).Status.ShouldBe(SymbolAddStatus.Reactivated);
+        await run.Symbols.SetBackfillStatusAsync(Btc, BackfillStatus.Pending, null, Ct);
+
+        await run.StartAsync();
+        await WaitForStatusAsync(run, Btc, BackfillStatus.Completed);
+
+        // [From, From+100) before the first stream minute, then [From+103, End) after the last stored one.
+        var stats = await CandleStatsAsync(Btc);
+        stats.Count.ShouldBe(DepthMinutes);
+        stats.Backfilled.ShouldBe(DepthMinutes - 3);
+        stats.Last.ShouldBe(End.AddMinutes(-1));
+        _server.KlineRequests[0]["startTime"].ShouldBe(UnixMs(From));
+        _server.KlineRequests.Skip(1).First()["startTime"].ShouldBe(UnixMs(From.AddMinutes(103)));
+    }
+
+    [Fact]
     public async Task PartialRun_Resumes_WithoutRefetching()
     {
         SeedTrades("BTCUSDT", From, DepthMinutes);
@@ -488,6 +550,26 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         _runs.Add(run);
         return run;
     }
+
+    /// <summary>One streamed tick per minute for <paramref name="minutes"/> minutes from <paramref name="first"/>.</summary>
+    private static async Task WriteStreamAsync(Run run, DateTime first, int minutes, long firstId)
+    {
+        Tick[] ticks = [.. Enumerable.Range(0, minutes).Select(i => new Tick(Btc, firstId + i, 500m, 1m, first.AddMinutes(i).AddSeconds(20), first.AddMinutes(i).AddSeconds(20)))];
+        (await run.Services.GetRequiredService<ITickWriter>().WriteBatchAsync(ticks, Ct)).ShouldBe(minutes);
+    }
+
+    private async Task SetDeactivatedAtAsync(int symbolId, DateTime utc)
+    {
+        await using var connection = new NpgsqlConnection(db.ConnectionString);
+        await connection.OpenAsync(Ct);
+        await using var command = new NpgsqlCommand("UPDATE symbols SET deactivated_at = $2 WHERE id = $1", connection);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = symbolId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = utc, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
+        (await command.ExecuteNonQueryAsync(Ct)).ShouldBe(1);
+    }
+
+    private static SymbolName Symbol(string raw) =>
+        SymbolName.TryCreate(raw, out var name) ? name : throw new ArgumentException(raw, nameof(raw));
 
     private static async Task MarkCompletedAsync(Run run, params int[] symbolIds)
     {

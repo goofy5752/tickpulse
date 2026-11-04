@@ -6,18 +6,18 @@ namespace TickPulse.Contracts;
 [DataContract(Name = "problem", Namespace = "https://tickpulse.dev/schema/v1")]
 public sealed class ProblemResponse
 {
-    [DataMember(Order = 1)]
+    [DataMember(Name = "type", Order = 1)]
     public string? Type { get; init; }
 
-    [DataMember(Order = 2)]
+    [DataMember(Name = "title", Order = 2)]
     public string? Title { get; init; }
 
-    [DataMember(Order = 3)]
+    [DataMember(Name = "status", Order = 3)]
     public int Status { get; init; }
 
-    [DataMember(Order = 4)]
+    [DataMember(Name = "detail", Order = 4)]
     public string? Detail { get; init; }
 
-    [DataMember(Order = 5)]
+    [DataMember(Name = "traceId", Order = 5)]
     public string? TraceId { get; init; }
 }
