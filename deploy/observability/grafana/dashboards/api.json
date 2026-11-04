@@ -207,7 +207,7 @@
       "id": 3,
       "type": "stat",
       "title": "5xx ratio",
-      "description": "Share of requests answered with a 5xx status. Alert threshold: 2 %.",
+      "description": "Share of requests answered with a 5xx status. Alert threshold: 2 %. The SignalR hub (long-lived connections) and the health probes are left out.",
       "targets": [
         {
           "refId": "A",
@@ -216,7 +216,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_response_status_code=~\"5..\"}[$__rate_interval]) or vector(0)) / sum(rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__rate_interval]))",
+          "expr": "sum(rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\", http_response_status_code=~\"5..\"}[$__rate_interval]) or vector(0)) / sum(rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval]))",
           "legendFormat": "",
           "range": true,
           "instant": false
@@ -294,7 +294,7 @@
       "id": 4,
       "type": "stat",
       "title": "Latency p95",
-      "description": "Server-side request duration, 95th percentile.",
+      "description": "Server-side request duration, 95th percentile. The SignalR hub (long-lived connections) and the health probes are left out.",
       "targets": [
         {
           "refId": "A",
@@ -303,7 +303,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval])))",
           "legendFormat": "",
           "range": true,
           "instant": false
@@ -694,7 +694,7 @@
       "id": 10,
       "type": "timeseries",
       "title": "5xx ratio by route",
-      "description": "Share of 5xx responses per route. The dashed line is the 2 % alert threshold.",
+      "description": "Share of 5xx responses per route. The dashed line is the 2 % alert threshold. The SignalR hub (long-lived connections) and the health probes are left out.",
       "targets": [
         {
           "refId": "A",
@@ -703,7 +703,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "(sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_response_status_code=~\"5..\"}[$__rate_interval])) or 0 * sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__rate_interval]))) / sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__rate_interval]))",
+          "expr": "(sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\", http_response_status_code=~\"5..\"}[$__rate_interval])) or 0 * sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval]))) / sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval]))",
           "legendFormat": "{{http_route}}",
           "range": true,
           "instant": false
@@ -793,7 +793,7 @@
       "id": 11,
       "type": "timeseries",
       "title": "Latency",
-      "description": "Server-side request duration across the selected routes.",
+      "description": "Server-side request duration across the selected routes. The SignalR hub (long-lived connections) and the health probes are left out.",
       "targets": [
         {
           "refId": "A",
@@ -802,7 +802,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval])))",
           "legendFormat": "p50",
           "range": true,
           "instant": false
@@ -814,7 +814,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval])))",
           "legendFormat": "p95",
           "range": true,
           "instant": false
@@ -826,7 +826,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval])))",
           "legendFormat": "p99",
           "range": true,
           "instant": false
@@ -957,7 +957,7 @@
       "id": 12,
       "type": "table",
       "title": "Routes",
-      "description": "Per-route summary over the selected time range.",
+      "description": "Per-route summary over the selected time range. Error ratio and latency leave out the SignalR hub and the health probes.",
       "targets": [
         {
           "refId": "A",
@@ -979,7 +979,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "(sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_response_status_code=~\"5..\"}[$__range])) or 0 * sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__range]))) / sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__range]))",
+          "expr": "(sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\", http_response_status_code=~\"5..\"}[$__range])) or 0 * sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range]))) / sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range]))",
           "legendFormat": "__auto",
           "range": false,
           "instant": true,
@@ -992,7 +992,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, http_route) (increase(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__range])))",
+          "expr": "histogram_quantile(0.95, sum by (le, http_route) (increase(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range])))",
           "legendFormat": "__auto",
           "range": false,
           "instant": true,
@@ -1005,7 +1005,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le, http_route) (increase(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__range])))",
+          "expr": "histogram_quantile(0.99, sum by (le, http_route) (increase(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range])))",
           "legendFormat": "__auto",
           "range": false,
           "instant": true,
@@ -1256,7 +1256,7 @@
       "id": 13,
       "type": "timeseries",
       "title": "p95 latency by route",
-      "description": "95th percentile request duration per route.",
+      "description": "95th percentile request duration per route. The SignalR hub (long-lived connections) and the health probes are left out.",
       "targets": [
         {
           "refId": "A",
@@ -1265,7 +1265,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval])))",
           "legendFormat": "{{http_route}}",
           "range": true,
           "instant": false
@@ -2163,7 +2163,18 @@
               "filters": []
             }
           ],
-          "transformations": [],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "nested": true
+                },
+                "indexByName": {},
+                "renameByName": {}
+              }
+            }
+          ],
           "fieldConfig": {
             "defaults": {
               "unit": "short",
@@ -2198,6 +2209,10 @@
                   "options": "traceID"
                 },
                 "properties": [
+                  {
+                    "id": "links",
+                    "value": null
+                  },
                   {
                     "id": "links",
                     "value": [
@@ -2258,7 +2273,18 @@
               "filters": []
             }
           ],
-          "transformations": [],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "nested": true
+                },
+                "indexByName": {},
+                "renameByName": {}
+              }
+            }
+          ],
           "fieldConfig": {
             "defaults": {
               "unit": "short",
@@ -2293,6 +2319,10 @@
                   "options": "traceID"
                 },
                 "properties": [
+                  {
+                    "id": "links",
+                    "value": null
+                  },
                   {
                     "id": "links",
                     "value": [

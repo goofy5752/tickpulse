@@ -22,7 +22,7 @@ namespace TickPulse.Api.Telemetry;
 /// </remarks>
 internal sealed class OtlpExport : IDisposable
 {
-    public OtlpExport(IConfiguration configuration, IHostEnvironment environment)
+    public OtlpExport(IConfiguration configuration, IHostEnvironment environment, RequestSampleBudget requests)
     {
         ArgumentNullException.ThrowIfNull(environment);
         if (TelemetrySetup.Endpoint(configuration) is not { } endpoint)
@@ -37,7 +37,7 @@ internal sealed class OtlpExport : IDisposable
 
         Tracing = Sdk.CreateTracerProviderBuilder()
             .SetResourceBuilder(resource)
-            .SetSampler(TickPulseSampler.Create(TelemetrySetup.FlushSampleRatio(configuration)))
+            .SetSampler(TickPulseSampler.Create(TelemetrySetup.FlushSampleRatio(configuration), requests))
             .AddSource(TickPulseMetrics.ActivitySourceName)
             .AddAspNetCoreInstrumentation(o =>
             {

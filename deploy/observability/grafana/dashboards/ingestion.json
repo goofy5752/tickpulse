@@ -2239,7 +2239,18 @@
               "filters": []
             }
           ],
-          "transformations": [],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "nested": true
+                },
+                "indexByName": {},
+                "renameByName": {}
+              }
+            }
+          ],
           "fieldConfig": {
             "defaults": {
               "unit": "short",
@@ -2274,6 +2285,10 @@
                   "options": "traceID"
                 },
                 "properties": [
+                  {
+                    "id": "links",
+                    "value": null
+                  },
                   {
                     "id": "links",
                     "value": [
