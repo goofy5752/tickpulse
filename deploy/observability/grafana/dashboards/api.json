@@ -519,7 +519,7 @@
       "id": 7,
       "type": "stat",
       "title": "In-flight",
-      "description": "Requests currently being processed.",
+      "description": "Requests currently being processed. The live SignalR hub connections of open dashboards are left out: each one holds a request open for as long as the page is open, so they are subtracted (signalr.server.active_connections). About 0 at idle.",
       "targets": [
         {
           "refId": "A",
@@ -528,7 +528,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "sum(http_server_active_requests{service_name=\"tickpulse-api\"})",
+          "expr": "clamp_min(sum(http_server_active_requests{service_name=\"tickpulse-api\"}) - (sum(signalr_server_active_connections{service_name=\"tickpulse-api\"}) or vector(0)), 0)",
           "legendFormat": "",
           "range": true,
           "instant": false
@@ -600,7 +600,7 @@
       "id": 9,
       "type": "timeseries",
       "title": "Request rate by route",
-      "description": "Requests per second for each route template.",
+      "description": "Requests per second for each route template. Every dashboard file and the dashboard page count as one route, static; requests that matched no endpoint (404s) show as (no route).",
       "targets": [
         {
           "refId": "A",
@@ -609,7 +609,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__rate_interval]))",
+          "expr": "label_replace(sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__rate_interval])), \"http_route\", \"(no route)\", \"http_route\", \"\")",
           "legendFormat": "{{http_route}}",
           "range": true,
           "instant": false
@@ -703,7 +703,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "(sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\", http_response_status_code=~\"5..\"}[$__rate_interval])) or 0 * sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval]))) / sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval]))",
+          "expr": "label_replace((sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\", http_response_status_code=~\"5..\"}[$__rate_interval])) or 0 * sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval]))) / sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval])), \"http_route\", \"(no route)\", \"http_route\", \"\")",
           "legendFormat": "{{http_route}}",
           "range": true,
           "instant": false
@@ -966,7 +966,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__range]))",
+          "expr": "label_replace(sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\"}[$__range])), \"http_route\", \"(no route)\", \"http_route\", \"\")",
           "legendFormat": "__auto",
           "range": false,
           "instant": true,
@@ -979,7 +979,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "(sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\", http_response_status_code=~\"5..\"}[$__range])) or 0 * sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range]))) / sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range]))",
+          "expr": "label_replace((sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\", http_response_status_code=~\"5..\"}[$__range])) or 0 * sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range]))) / sum by (http_route) (increase(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range])), \"http_route\", \"(no route)\", \"http_route\", \"\")",
           "legendFormat": "__auto",
           "range": false,
           "instant": true,
@@ -992,7 +992,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, http_route) (increase(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range])))",
+          "expr": "label_replace(histogram_quantile(0.95, sum by (le, http_route) (increase(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range]))), \"http_route\", \"(no route)\", \"http_route\", \"\")",
           "legendFormat": "__auto",
           "range": false,
           "instant": true,
@@ -1005,7 +1005,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum by (le, http_route) (increase(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range])))",
+          "expr": "label_replace(histogram_quantile(0.99, sum by (le, http_route) (increase(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__range]))), \"http_route\", \"(no route)\", \"http_route\", \"\")",
           "legendFormat": "__auto",
           "range": false,
           "instant": true,
@@ -1265,7 +1265,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval])))",
+          "expr": "label_replace(histogram_quantile(0.95, sum by (le, http_route) (rate(http_server_request_duration_seconds_bucket{service_name=\"tickpulse-api\", http_route=~\"$route\", http_route!~\"/?(hubs|health)/.*\"}[$__rate_interval]))), \"http_route\", \"(no route)\", \"http_route\", \"\")",
           "legendFormat": "{{http_route}}",
           "range": true,
           "instant": false
@@ -1952,7 +1952,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_response_status_code=\"429\"}[$__rate_interval]))",
+          "expr": "label_replace(sum by (http_route) (rate(http_server_request_duration_seconds_count{service_name=\"tickpulse-api\", http_route=~\"$route\", http_response_status_code=\"429\"}[$__rate_interval])), \"http_route\", \"(no route)\", \"http_route\", \"\")",
           "legendFormat": "429 · {{http_route}}",
           "range": true,
           "instant": false

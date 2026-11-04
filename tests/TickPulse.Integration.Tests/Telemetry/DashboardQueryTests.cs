@@ -69,6 +69,73 @@ public sealed partial class DashboardQueryTests : IAsyncLifetime
         counted.ShouldBe(new Dictionary<string, decimal> { ["BTCUSDT"] = 12_000m, ["ADAUSDT"] = 4_000m });
     }
 
+    [Theory]
+    [InlineData(10, 10, 0)] // idle: every request in flight is a dashboard's live hub connection
+    [InlineData(12, 10, 2)]
+    [InlineData(3, -1, 3)] // no hub connection series at all
+    [InlineData(0, 1, 0)] // a transport counted a moment before its request: never negative
+    public async Task InFlight_LeavesOutTheLiveHubConnections(long activeRequests, long hubConnections, long expected)
+    {
+        var end = DateTimeOffset.FromUnixTimeSeconds(TimeProvider.System.GetUtcNow().ToUnixTimeSeconds() - 30);
+        await PushGaugeAsync("http.server.active_requests", "{request}", "Microsoft.AspNetCore.Hosting", end, activeRequests);
+        if (hubConnections >= 0)
+        {
+            await PushGaugeAsync("signalr.server.active_connections", "{connection}", "Microsoft.AspNetCore.Http.Connections", end, hubConnections);
+        }
+
+        var inFlight = await QueryScalarAsync(PanelExpression("api.json", "In-flight"), end);
+
+        inFlight.ShouldBe(expected);
+    }
+
+    /// <summary>Sends one value of an up-down counter (a non-monotonic cumulative OTLP sum, a Prometheus gauge).</summary>
+    private async Task PushGaugeAsync(string name, string unit, string scope, DateTimeOffset at, long value)
+    {
+        var request = new JsonObject
+        {
+            ["resourceMetrics"] = new JsonArray(new JsonObject
+            {
+                ["resource"] = new JsonObject { ["attributes"] = new JsonArray() },
+                ["scopeMetrics"] = new JsonArray(new JsonObject
+                {
+                    ["scope"] = new JsonObject { ["name"] = scope },
+                    ["metrics"] = new JsonArray(new JsonObject
+                    {
+                        ["name"] = name,
+                        ["unit"] = unit,
+                        ["sum"] = new JsonObject
+                        {
+                            ["aggregationTemporality"] = 2,
+                            ["isMonotonic"] = false,
+                            ["dataPoints"] = new JsonArray(new JsonObject
+                            {
+                                ["attributes"] = Attributes(("service_name", "tickpulse-api"), ("service_instance_id", "p1")),
+                                ["timeUnixNano"] = (at.ToUnixTimeMilliseconds() * 1_000_000).ToString(CultureInfo.InvariantCulture),
+                                ["asInt"] = value.ToString(CultureInfo.InvariantCulture),
+                            }),
+                        },
+                    }),
+                }),
+            }),
+        };
+
+        using var content = new StringContent(request.ToJsonString(), Encoding.UTF8);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        using var response = await Client.PostAsync(new Uri("/api/v1/otlp/v1/metrics", UriKind.Relative), content, Ct);
+        response.IsSuccessStatusCode.ShouldBeTrue(await response.Content.ReadAsStringAsync(Ct));
+    }
+
+    /// <summary>An instant query at <paramref name="at"/> that yields one unlabelled value.</summary>
+    private async Task<decimal> QueryScalarAsync(string expression, DateTimeOffset at)
+    {
+        var uri = $"/api/v1/query?query={Uri.EscapeDataString(expression)}&time={at.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture)}";
+        using var response = await Client.GetAsync(new Uri(uri, UriKind.Relative), Ct);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>(Ct);
+        response.IsSuccessStatusCode.ShouldBeTrue(body.ToString());
+        var result = body.GetProperty("data").GetProperty("result").EnumerateArray().ShouldHaveSingleItem(body.ToString());
+        return decimal.Parse(result.GetProperty("value")[1].GetString()!, NumberStyles.Float, CultureInfo.InvariantCulture);
+    }
+
     private static string PrometheusImage()
     {
         var compose = File.ReadAllText(Path.Combine(RepositoryRoot(), "deploy", "observability", "compose.observability.yml"));
