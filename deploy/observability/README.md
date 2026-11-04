@@ -35,8 +35,8 @@ flowchart LR
 | `otel-collector` | `otel/opentelemetry-collector-contrib:0.164.0` | 128M | — | `127.0.0.1:4317` (gRPC), `127.0.0.1:4318` (HTTP) |
 | `prometheus` | `prom/prometheus:v3.15.1` | 256M | 30 d (and at most 4 GB) | — |
 | `loki` | `grafana/loki:3.7.9` | 256M | 14 d (compactor) | — |
-| `tempo` | `grafana/tempo:3.1.1` | 256M | 14 d (`block_retention: 336h`) | — |
-| `grafana` | `grafana/grafana:13.3.0` | 256M | — | `127.0.0.1:3000` |
+| `tempo` | `grafana/tempo:3.1.1` | 384M | 14 d (`block_retention: 336h`) | — |
+| `grafana` | `grafana/grafana:13.3.0` | 384M | — | `127.0.0.1:3000` |
 
 Every image is pinned to an exact release. Go services also get a `GOMEMLIMIT` below their container
 limit, so the runtime collects garbage before the kernel kills the container. Every service has a

@@ -88,8 +88,8 @@ flowchart LR
 | `otel-collector` | `otel/opentelemetry-collector-contrib:0.164.0` | 128M | — |
 | `prometheus` | `prom/prometheus:v3.15.1` | 256M | — |
 | `loki` | `grafana/loki:3.7.9` | 256M | — |
-| `tempo` | `grafana/tempo:3.1.1` | 256M | — |
-| `grafana` | `grafana/grafana:13.3.0` | 256M | `127.0.0.1:3005` |
+| `tempo` | `grafana/tempo:3.1.1` | 384M | — |
+| `grafana` | `grafana/grafana:13.3.0` | 384M | `127.0.0.1:3005` |
 
 Every container is set up the same way:
 
