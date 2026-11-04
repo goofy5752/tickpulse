@@ -94,6 +94,20 @@ export const HELP = {
   },
 
 
+  chartPrice: {
+    title: 'Candles and line',
+    summary: 'The price per bucket, drawn as candles or as a line of closes. Switch with the icons next to the periods.',
+    items: [
+      { term: 'Candle', text: 'One per bucket. The body runs from the first to the last trade price; the thin wicks reach the highest and lowest.' },
+      { term: 'Teal / rose', text: 'Teal when the bucket closed above its open, rose when it closed below.' },
+      { term: 'Line', text: 'Joins the closes, the last price of each bucket, with a soft fill. Teal when the range shown rose overall, rose when it fell.' },
+    ],
+    details: [
+      'The newest bucket is still open: its candle, or the end of the line, moves with live trades. A gap is a bucket without trades. History from before collection began comes from 1-minute klines loaded from Binance.',
+    ],
+    example: '1d: one candle (or one point) per day, 00:00 to 00:00 UTC',
+  },
+
   chartSma: {
     title: 'SMA line',
     summary: 'The rolling simple moving average, with the same n and p as the SMA figure.',
