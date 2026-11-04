@@ -84,6 +84,7 @@ if the final version differs.
 | [N9](#n9) | The host's own real-IP setting would have denied every visitor | First server setup | Critical | #30 |
 | [N10](#n10) | The Grafana vhost became the host's default server for unknown names | First server setup | Important | #30 |
 | [N11](#n11) | The first deploy was refused: the CD job never uploaded `mask-env.sh` | First deploy | Important | TBD |
+| [N12](#n12) | Grafana could not load its data source plugins on the live site | Owner, live site | Important | TBD |
 
 ---
 
@@ -889,3 +890,17 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
 - **Fix:** the job uploads `deploy/mask-env.sh`. The refusal worked as designed: the server was left untouched.
 - **Test:** `DeployUploadTests.Upload_CarriesEveryScriptDeployShRequires` reads `SCRIPTS` from `deploy.sh` and the
   job's `scp` upload, and fails when a required script is not sent.
+
+### N12
+
+**Grafana could not load its data source plugins on the live site** · Owner, live site · Important · PR TBD
+
+- **Symptom:** every Grafana dashboard on the live site showed "Prometheus plugin failed" (and Loki, Tempo)
+  with "Could not load plugin", and every panel said No data.
+- **Root cause:** PR #30 added `limit_conn tickpulse_conn 40` per visitor to both vhosts. Over HTTP/2 each request
+  counts as one connection, and Grafana's first load fetches dozens of script chunks at once, so the rest got
+  429 (`limiting connections by zone "tickpulse_conn"` in the error log), among them the chunks that load the
+  data source plugins.
+- **Fix:** no per-visitor connection limit on either vhost. The slow-client timeouts stay, and Cloudflare already
+  limits floods at the edge. Applied on the host first, then here.
+- **Check:** the TickPulse API dashboard loads with live panels and no console errors.
