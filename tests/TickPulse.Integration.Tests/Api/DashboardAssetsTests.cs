@@ -87,6 +87,34 @@ public sealed class DashboardAssetsTests(ApiFactory api) : IClassFixture<ApiFact
         (response.Headers.CacheControl?.Extensions ?? []).ShouldNotContain(e => e.Name == "immutable");
     }
 
+    [Theory]
+    [InlineData("Development")]
+    [InlineData("Production")]
+    public async Task WithoutWwwroot_ApiAndHealthWork_AndTheDashboardIsA404Problem(string environment)
+    {
+        await using var bare = new ApiFactory(api.Database).WithoutWebRoot().WithEnvironment(environment);
+        await bare.InitializeAsync();
+        using var client = bare.CreateClient();
+
+        (await client.GetAsync(new Uri("/health/live", UriKind.Relative), Ct)).StatusCode.ShouldBe(HttpStatusCode.OK);
+        using (var symbols = await client.GetAsync(new Uri("/api/symbols", UriKind.Relative), Ct))
+        {
+            symbols.StatusCode.ShouldBe(HttpStatusCode.OK);
+            MediaType(symbols).ShouldBe("application/json");
+        }
+
+        foreach (var path in new[] { "/", "/symbols/BTCUSDT", "/index.html", AssetPath })
+        {
+            using var response = await client.GetAsync(new Uri(path, UriKind.Relative), Ct);
+
+            response.StatusCode.ShouldBe(HttpStatusCode.NotFound, path);
+            MediaType(response).ShouldBe(JsonMediaType, path);
+            var problem = await ReadAsync(response);
+            problem.Type.ShouldBe(TypeBase + "not-found", path);
+            problem.Status.ShouldBe(404, path);
+        }
+    }
+
     // ---- MapStaticAssets with a build manifest, as the published image serves the dashboard ------------------
 
     [Theory]
