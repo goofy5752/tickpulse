@@ -80,7 +80,7 @@ if the final version differs.
 | [N5](#n5) | Every 406 logged a framework Warning | Regression run | Minor | #27 |
 | [N6](#n6) | Seeded symbols reported `NotRequested` while their backfill was queued | Regression run | Minor | #27 |
 | [N7](#n7) | Tempo was killed 1 s after every `down` | Regression run | Minor | #27 |
-| [N8](#n8) | A tick flashed a lighter band across the price tiles | Owner, local run | Minor | TBD |
+| [N8](#n8) | A tick flashed a lighter band across the price tiles | Owner, local run | Minor | #28 |
 
 ---
 
@@ -829,7 +829,7 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
 
 ### N8
 
-**A tick flashed a lighter band across the price tiles** · Owner, local run · Minor · PR TBD
+**A tick flashed a lighter band across the price tiles** · Owner, local run · Minor · PR #28
 
 - **Symptom:** on a new trade the tile's price flashed, and for a frame a lighter band showed across the top of
   the tile; quick ticks made the flash snap rather than glide.
