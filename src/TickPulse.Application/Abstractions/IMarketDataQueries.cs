@@ -14,13 +14,15 @@ public sealed record MinuteRange(DateTime First, DateTime Last);
 /// <summary>Read-side port over ticks and candles.</summary>
 public interface IMarketDataQueries
 {
+    /// <summary>The largest <c>limit</c> that <see cref="GetCandlesAsync"/> accepts; it bounds the scanned time range.</summary>
+    const int MaxCandleLimit = 1000;
+
     Task<AverageWindow?> GetAverageAsync(int symbolId, DateTime fromUtc, DateTime toUtc, CancellationToken ct);
 
     Task<IReadOnlyList<PricePoint>> GetClosesAsync(int symbolId, Period p, SmaWindow w, CancellationToken ct);
 
+    /// <summary>The candles of the latest <paramref name="limit"/> periods, oldest first; <paramref name="limit"/> is in <c>[1, MaxCandleLimit]</c>.</summary>
     Task<IReadOnlyList<CandleRow>> GetCandlesAsync(int symbolId, Period p, int limit, CancellationToken ct);
-
-    Task<decimal?> GetCloseAtOrBeforeAsync(int symbolId, DateTime utc, CancellationToken ct);
 
     /// <summary>
     /// For each of <paramref name="symbolIds"/>, the close and start of its latest 1-minute candle starting at or before

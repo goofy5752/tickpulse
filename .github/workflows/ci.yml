@@ -45,9 +45,10 @@ jobs:
         with:
           global-json-file: global.json
 
+      # Locked: fails when a packages.lock.json no longer matches its project (restore locally and commit the file).
       - name: Restore
         run: |
-          dotnet restore TickPulse.slnx
+          dotnet restore TickPulse.slnx --locked-mode
           dotnet tool restore
 
       - name: Format

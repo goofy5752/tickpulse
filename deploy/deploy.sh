@@ -133,6 +133,14 @@ else
 fi
 target_compose config --quiet || refuse "the compose file does not validate with .env"
 log "the compose file validates"
+# The API refuses to start in Production with an admin key under 32 characters (AdminApiKey.MinLength). Refuse here,
+# before the pull, instead of failing the readiness wait and rolling back. Only the length is ever printed.
+admin_key="$(sed -n 's/^ADMIN_API_KEY=//p' "$ENV_FILE" | tail -n 1 | tr -d '\r')"
+admin_key="${admin_key#[\"\']}"; admin_key="${admin_key%[\"\']}"
+if [ "${#admin_key}" -lt 32 ]; then
+  refuse "ADMIN_API_KEY in $ENV_FILE has ${#admin_key} characters; production needs at least 32 (see docs/deployment.md)"
+fi
+unset admin_key
 
 # 3. Pull with the same compose file.
 if [ "${SKIP_PULL:-0}" != 1 ]; then

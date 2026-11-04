@@ -9,15 +9,8 @@
     <meta name="darkreader-lock" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>TickPulse</title>
-    <script>
-      // Apply the remembered theme before first paint so light-mode visitors never see a dark flash.
-      try {
-        if (localStorage.getItem('tickpulse.theme') === 'light') {
-          document.documentElement.dataset.theme = 'light'
-          document.querySelector('meta[name="theme-color"]').setAttribute('content', '#f3f2fa')
-        }
-      } catch {}
-    </script>
+    <!-- The remembered theme, before first paint. A file, not inline: the Content-Security-Policy allows no inline script. -->
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

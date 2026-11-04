@@ -11,7 +11,9 @@ Until then, [the quick start](#quick-start) runs the same stack locally.
 
 - **App:** <https://tickpulse.dev>
 - **API reference (Scalar):** <https://tickpulse.dev/docs>
-- **Grafana:** <https://grafana.tickpulse.dev> (anonymous, read-only)
+- **Grafana:** <https://grafana.tickpulse.dev> (anonymous, read-only). Anyone can read the raw log
+  lines, exception messages included. The collector scrubs addresses and headers, and the logs never
+  contain secrets ([data exposure](deploy/observability/README.md#query-cost-and-data-exposure)).
 
 ![The TickPulse dashboard: live ticker tiles, a 1d candle chart with a 20-day SMA and its calculation window, and the 24h average and SMA panel](docs/images/dashboard.png)
 
@@ -96,15 +98,15 @@ the three on first start.
 ```bash
 curl -s localhost:8080/api/BTCUSDT/24hAvgPrice
 curl -s -H "Accept: application/xml" "localhost:8080/api/BTCUSDT/SimpleMovingAverage?n=20&p=1d"
-curl -s -H "X-Api-Key: local-dev-key" localhost:8080/api/admin/symbols
+curl -s -H "X-Api-Key: local-dev-admin-key-not-for-production" localhost:8080/api/admin/symbols
 
 docker compose run --rm cli avg BTCUSDT          # console client, against the api container
 docker compose --profile observability up -d     # plus OTel Collector, Prometheus, Loki, Tempo, Grafana on :3000
 docker compose --profile observability down -v   # stop everything and delete the data
 ```
 
-`local-dev-key` is a local default. Copy `.env.example` to `.env` to change it, or any other port or
-setting. The observability stack is described in
+`local-dev-admin-key-not-for-production` is a local default. Copy `.env.example` to `.env` to change it,
+or any other port or setting. The observability stack is described in
 [deploy/observability/README.md](deploy/observability/README.md), and the production deployment in
 [docs/deployment.md](docs/deployment.md).
 
@@ -120,7 +122,7 @@ becomes `__` (`Admin:ApiKey` → `Admin__ApiKey`). Invalid values fail at startu
 | `Database:MaxPoolSize` | `20` | Size of the shared Npgsql pool, unless the connection string sets `Maximum Pool Size`. The tick writer and the leader lock add 5 connections; the total is checked against `max_connections` at startup. |
 | `Database:AllowGssEncryption` | `false` | TickPulse forces GSS encryption off on every connection, because the native Kerberos probe crashed the API under load. `true` keeps an explicit mode from the connection string and needs a custom image with krb5 installed. |
 | **Admin** | | |
-| `Admin:ApiKey` | *(empty)* | Key for `X-Api-Key`. Empty or unset disables the admin endpoints (403). Surrounding whitespace fails startup; fewer than 32 characters logs a warning. |
+| `Admin:ApiKey` | *(empty)* | Key for `X-Api-Key`. Empty or unset disables the admin endpoints (403). Surrounding whitespace fails startup. Fewer than 32 characters fails startup in the Production environment (the container images) and logs a warning elsewhere. |
 | `Admin:MaxActiveSymbols` | `20` | Most symbols active at once, 1–1000. |
 | **Binance** | | |
 | `Binance:WsBaseUrl` | `wss://stream.binance.com:9443` | WebSocket base URL; `/stream` is appended. |
@@ -204,6 +206,14 @@ Symbols are case-insensitive (`btcusdt` works). Responses are JSON by default an
 prefers it; a request that accepts neither gets `406`. Admin routes need `X-Api-Key`. `HEAD` works
 wherever `GET` does.
 
+Every response carries `nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a
+`Content-Security-Policy` that allows only this origin, no inline script and no plugins
+(`object-src 'none'`). Connections are `connect-src 'self'`, which also covers the hub's same-origin
+WebSocket (`'self'` matches `ws:`/`wss:` on the same host in CSP Level 3). The one exception is
+`/docs`: Scalar boots from an inline script, so its policy allows inline scripts, still from this
+origin only (Scalar's CDN fonts, telemetry and AI agent are switched off). See
+`src/TickPulse.Api/Hosting/SecurityHeaders.cs`.
+
 ### 24h average
 
 ```bash
@@ -272,7 +282,7 @@ new symbol's backfill is still running.
 ### Admin
 
 ```bash
-K="X-Api-Key: local-dev-key"
+K="X-Api-Key: local-dev-admin-key-not-for-production"
 curl -s -i -H "$K" -H "Content-Type: application/json" -d '{"symbol":"solusdt"}' localhost:8080/api/admin/symbols
 curl -s -H "$K" localhost:8080/api/admin/symbols/SOLUSDT
 curl -s -i -X DELETE -H "$K" localhost:8080/api/admin/symbols/SOLUSDT

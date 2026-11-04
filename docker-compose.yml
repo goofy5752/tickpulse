@@ -61,8 +61,9 @@ services:
       Database__RunMigrationsOnStartup: "true"
       # Loads ~6 months of 1-minute candles per symbol from Binance REST on first start.
       Backfill__Enabled: "true"
-      # Local default only (the API logs a warning for a short key); set ADMIN_API_KEY anywhere else.
-      Admin__ApiKey: ${ADMIN_API_KEY:-local-dev-key}
+      # Local default only; set ADMIN_API_KEY anywhere else. The API runs as Production here, which refuses keys
+      # shorter than 32 characters.
+      Admin__ApiKey: ${ADMIN_API_KEY:-local-dev-admin-key-not-for-production}
       # Requests arriving through the network's gateway (published port, reverse proxy) may set CF-Connecting-IP,
       # so rate limiting and logs see the real client. Keep it equal to the subnet of the tickpulse network below.
       ForwardedHeaders__KnownNetworks: ${TICKPULSE_SUBNET:-172.30.0.0/24}
