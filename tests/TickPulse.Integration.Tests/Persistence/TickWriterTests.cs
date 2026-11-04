@@ -342,6 +342,49 @@ public sealed class TickWriterTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task WriteBatch_ReplayIntoACompressedChunk_InsertsNothingAndLeavesCandlesAndRollups()
+    {
+        // A gap-fill replays trades up to the replay window back, which reaches chunks the compression policy (two
+        // days) has already compressed. The primary-key conflict must still be detected there.
+        _clock.Advance(TimeSpan.FromDays(5));
+        Tick[] ticks = [T(Btc, 1, 10m, 1m, 1), T(Btc, 2, 20m, 2m, 2), T(Eth, 3, 7m, 1m, 3), T(Btc, 4, 30m, 1m, 70)];
+        var writer = Writer();
+        (await writer.WriteBatchAsync(ticks, Ct)).ShouldBe(4);
+        var candles = await ReadCandlesAsync();
+        var rollups = await ReadRollupsAsync();
+        try
+        {
+            await ExecuteAsync("SELECT compress_chunk(c) FROM show_chunks('price_ticks') AS c");
+            await using (var connection = await _dataSource.OpenConnectionAsync(Ct))
+            await using (var command = new NpgsqlCommand(
+                "SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'price_ticks' AND is_compressed",
+                connection))
+            {
+                ((long)(await command.ExecuteScalarAsync(Ct))!).ShouldBeGreaterThanOrEqualTo(1);
+            }
+
+            var inserted = new Dictionary<int, int>();
+            (await writer.WriteBatchAsync([.. ticks.AsEnumerable().Reverse()], inserted, Ct)).ShouldBe(0);
+
+            inserted.ShouldBeEmpty();
+            (await CountTicksAsync()).ShouldBe(4);
+            (await ReadCandlesAsync()).ShouldBe(candles);
+            (await ReadRollupsAsync()).ShouldBe(rollups);
+
+            // A partial replay: only the one new trade is stored and counted.
+            (await writer.WriteBatchAsync([T(Btc, 2, 20m, 2m, 2), T(Btc, 5, 40m, 1m, 71)], Ct)).ShouldBe(1);
+            (await CountTicksAsync()).ShouldBe(5);
+            var second = (await ReadCandlesAsync()).Single(c => c.SymbolId == Btc && c.BucketStart == Minute.AddMinutes(1));
+            (second.TickCount, second.PriceSum, second.Close).ShouldBe((2L, 70m, 40m));
+        }
+        finally
+        {
+            // Later tests read the ticks table with plans that expect row-store chunks.
+            await ExecuteAsync("SELECT decompress_chunk(c, if_compressed => true) FROM show_chunks('price_ticks') AS c");
+        }
+    }
+
+    [Fact]
     public async Task ReplayWindow_IsInsideRetentionPolicy()
     {
         await using var connection = await _dataSource.OpenConnectionAsync(Ct);
@@ -476,6 +519,29 @@ public sealed class TickWriterTests(TimescaleFixture db) : IAsyncLifetime
         }
 
         return candles;
+    }
+
+    // Every hourly and daily rollup row, as text, in key order.
+    private async Task<List<string>> ReadRollupsAsync()
+    {
+        await using var connection = await _dataSource.OpenConnectionAsync(Ct);
+        await using var command = new NpgsqlCommand(
+            """
+            SELECT 'h ' || r::text FROM candles_1h AS r
+            UNION ALL
+            SELECT 'd ' || r::text FROM candles_1d AS r
+            ORDER BY 1
+            """,
+            connection);
+        await using var reader = await command.ExecuteReaderAsync(Ct);
+        var rows = new List<string>();
+        while (await reader.ReadAsync(Ct))
+        {
+            rows.Add(reader.GetString(0));
+        }
+
+        rows.ShouldNotBeEmpty();
+        return rows;
     }
 
     private sealed record CandleState(
