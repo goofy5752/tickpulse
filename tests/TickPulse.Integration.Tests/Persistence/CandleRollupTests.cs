@@ -180,6 +180,79 @@ public sealed class CandleRollupTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task PlainUpdate_ChangingHighAndMovingMinutesAcrossHourAndDay_KeepsRollupsExact()
+    {
+        // 23:58 and 23:59 of one day, 00:30 of the next. The update lowers a high and moves 23:59 into the next
+        // day's 00:00 hour, so both the old and the new hour and day must be recomputed.
+        var midnight = Now.Date.AddDays(-2);
+        (await CandleWriter().InsertBackfillAsync(
+            Btc,
+            [
+                new Kline(midnight.AddMinutes(-2), 10m, 11m, 9m, 10m, 1m, 10m),
+                new Kline(midnight.AddMinutes(-1), 20m, 500m, 19m, 20m, 2m, 40m),
+                new Kline(midnight.AddMinutes(30), 30m, 31m, 29m, 30m, 3m, 90m),
+            ],
+            Ct)).ShouldBe(3);
+
+        await ExecuteAsync(
+            "UPDATE candles_1m SET high = 21, bucket_start = $2 WHERE symbol_id = $1 AND bucket_start = $3",
+            Int(Btc), Ts(midnight.AddMinutes(5)), Ts(midnight.AddMinutes(-1)));
+
+        (await RollupMismatchesAsync()).ShouldBe(0);
+        (await Queries().GetCandlesAsync(Btc, Period.OneDay, 2, Ct)).ShouldBe(
+        [
+            new CandleRow(midnight.AddDays(-1), 10m, 11m, 9m, 10m, 1m),
+            new CandleRow(midnight, 20m, 31m, 19m, 30m, 5m),
+        ]);
+    }
+
+    [Fact]
+    public async Task OneUpsertInsertingAndUpdating_InSharedAndSeparateHours_KeepsRollupsExact()
+    {
+        // One INSERT ... ON CONFLICT DO UPDATE fires both triggers. Minute :00 is updated, :01 (same hour) and the
+        // next hour's :00 are inserted; the second trigger must still recompute the hour the first did not cover.
+        var hour = Now.AddDays(-2);
+        await CandleWriter().InsertBackfillAsync(Btc, [Candle(hour, 10m)], Ct);
+
+        await ExecuteAsync(
+            """
+            INSERT INTO candles_1m AS k (symbol_id, bucket_start, open, high, low, close, volume, quote_volume, source)
+            SELECT $1, t, 50, 60, 40, 55, 7, 1, 2 FROM unnest($2::timestamptz[]) AS t
+            ON CONFLICT (symbol_id, bucket_start) DO UPDATE SET high = 99, close = 98, volume = k.volume + 4
+            """,
+            Int(Btc),
+            new NpgsqlParameter<DateTime[]> { TypedValue = [hour, hour.AddMinutes(1), hour.AddHours(1)], NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.TimestampTz });
+
+        (await RollupMismatchesAsync()).ShouldBe(0);
+        (await CountAsync("SELECT count(*) FROM candles_1h")).ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task TwoStatementsInOneTransaction_SecondIsRecomputedToo()
+    {
+        // The same transaction writes the same hour twice; the guard that lets the second trigger of one statement
+        // skip covered hours must not let a later statement skip them.
+        var hour = Now.AddDays(-2);
+        await using var connection = await _dataSource.OpenConnectionAsync(Ct);
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, Ct);
+        await InsertMinuteAsync(connection, transaction, hour, close: 10m);
+        await using (var update = new NpgsqlCommand(
+            "UPDATE candles_1m SET close = 20, high = 30 WHERE symbol_id = $1 AND bucket_start = $2", connection, transaction))
+        {
+            update.Parameters.Add(Int(Btc));
+            update.Parameters.Add(Ts(hour));
+            await update.ExecuteNonQueryAsync(Ct);
+        }
+
+        await InsertMinuteAsync(connection, transaction, hour.AddMinutes(1), close: 40m);
+        await transaction.CommitAsync(Ct);
+
+        (await RollupMismatchesAsync()).ShouldBe(0);
+        (await Queries().GetCandlesAsync(Btc, Period.OneDay, 1, Ct)).ShouldHaveSingleItem()
+            .ShouldBe(new CandleRow(hour.Date, 10m, 41m, 9m, 40m, 2m));
+    }
+
+    [Fact]
     public async Task WholeDayPeriods_ReadTheDailyRollup()
     {
         var monday = new DateTime(2026, 3, 9, 0, 0, 0, DateTimeKind.Utc);
@@ -219,9 +292,9 @@ public sealed class CandleRollupTests(TimescaleFixture db) : IAsyncLifetime
             MarketDataQueries.DailyClosesSql, Int(Btc), Interval(Period.OneWeek.Length), Ts(Period.Origin), Ts(day), Ts(Now.Date));
 
         candles.ShouldContain("InitPlan");
-        candles.ShouldMatch(@"Index (Only )?Scan using pk_candles_1d on candles_1d\b[\s\S]*Index Cond: \(\(symbol_id = [^)]+\) AND \(bucket_start >= \(\(InitPlan \d+\)");
+        candles.ShouldMatch(@"(Index|Index Only|Bitmap Index) Scan using pk_candles_1d on candles_1d\b[\s\S]*Index Cond: \(\(symbol_id = [^)]+\) AND \(bucket_start >= \(\(InitPlan \d+\)");
         candles.ShouldNotContain("candles_1m");
-        closes.ShouldMatch(@"Index (Only )?Scan using pk_candles_1d on candles_1d");
+        closes.ShouldMatch(@"(Index|Index Only|Bitmap Index) Scan using pk_candles_1d on candles_1d");
         closes.ShouldNotContain("candles_1m");
     }
 
