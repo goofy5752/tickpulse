@@ -194,8 +194,12 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         var average = await ExplainAsync(
             MarketDataQueries.AverageSql, Int(Btc), Ts(now.AddDays(-1)), Ts(now.AddDays(-1)), Ts(now), Ts(now));
 
+        // The first stream minute would have to filter its way past every backfill minute on the primary key, so the
+        // partial index wins by a wide margin. For the average both indexes give the same bounded range on
+        // (symbol_id, bucket_start) and the choice is cost-only: either is fine, a sequential scan is not.
         firstStream.ShouldContain("ix_candles_1m_stream");
-        average.ShouldContain("ix_candles_1m_stream");
+        average.ShouldMatch(@"(Index|Index Only|Bitmap Index) Scan( Backward)? using (ix_candles_1m_stream|pk_candles_1m)");
+        average.ShouldNotContain("Seq Scan on candles_1m");
     }
 
     [Fact]
@@ -212,7 +216,8 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
 
         // The anchor is an InitPlan (evaluated once); the outer scan is a primary-key range scan bounded by it.
         plan.ShouldContain("InitPlan");
-        plan.ShouldMatch(@"Index (Only )?Scan using pk_candles_1m on candles_1m\b[\s\S]*Index Cond: \(\(symbol_id = [^)]+\) AND \(bucket_start >= \(\(InitPlan \d+\)");
+        // A plain or a bitmap scan of the primary key are both a range scan bounded by the anchor.
+        plan.ShouldMatch(@"(Index|Index Only|Bitmap Index) Scan using pk_candles_1m on candles_1m\b[\s\S]*Index Cond: \(\(symbol_id = [^)]+\) AND \(bucket_start >= \(\(InitPlan \d+\)");
         plan.ShouldNotContain("Seq Scan");
     }
 
@@ -616,7 +621,11 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         (await command.ExecuteNonQueryAsync(Ct)).ShouldBe(1);
     }
 
-    /// <summary>Several days of backfill minutes for two symbols plus a stretch of stream minutes, then fresh statistics.</summary>
+    /// <summary>
+    /// Several days of backfill minutes for two symbols plus a stretch of stream minutes, then a rewritten table and
+    /// fresh statistics. Earlier tests insert and delete many more minutes; the rewrite drops their dead heap and index
+    /// pages, which would otherwise tip the cost-based choice of scan (partial index or primary key, plain or bitmap).
+    /// </summary>
     private async Task SeedMixedSourcesAsync()
     {
         var backfillStart = Start.AddDays(-5);
@@ -624,7 +633,9 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         await CandleWriter().InsertBackfillAsync(Btc, backfill, Ct);
         await CandleWriter().InsertBackfillAsync(Eth, backfill, Ct);
         await Writer().WriteBatchAsync([.. Enumerable.Range(1, 200).Select(i => NewTick(Btc, i, 10m, 1m, Start.AddSeconds(i * 15)))], Ct);
-        await ExecuteAsync("ANALYZE candles_1m");
+        // VACUUM FULL takes an ACCESS EXCLUSIVE lock on candles_1m; that is fine here because the integration tests
+        // run serially (Parallelization(Mode = ParallelMode.None) in TimescaleFixture).
+        await ExecuteAsync("VACUUM (FULL, ANALYZE) candles_1m");
     }
 
     /// <summary>
