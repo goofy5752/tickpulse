@@ -720,8 +720,12 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
   stopped in is over (plus 5 s), one bounded gap-fill pass fetches `aggTrades?fromId=<last delivered + 1>`
   up to that minute's end. It runs in the background, never delays the unsubscribe, moves no watermark and
   never writes past that minute ([ADR 0022](../adr/0022-gap-fill-watermarks-seeded-from-the-database.md)).
+  A reactivation's backfill ends the inactive stretch at the first minute streamed since the reactivation (new
+  column `symbols.reactivated_at`), not at the first stream row after the deactivation: when the UNSUBSCRIBE took
+  effect late, the old stream and its tail-out store a minute after `deactivated_at`, and the stretch would have
+  ended there, unfilled.
 - **Test:** `IngestionWorkerTests.RemovedSymbol_LastStreamedMinuteIsCompletedFromRest`,
-  `GapFillerTests.TailOut_*`.
+  `GapFillerTests.TailOut_*`, `BackfillWorkerTests.Reactivated_LateUnsubscribe_StillFillsTheInactiveStretch`.
 
 ### N3
 
@@ -730,8 +734,9 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
 - **Symptom:** the API dashboard's In-flight stat read about 10 at an idle 1 req/s.
 - **Root cause:** `http_server_active_requests` counts every open request, and each open dashboard holds
   one SignalR request open for as long as it is open. The gauge has no route to filter the hub out.
-- **Fix:** the stat subtracts `signalr_server_active_connections` (the `Microsoft.AspNetCore.Http.Connections`
-  meter, now exported explicitly), clamped at 0; the panel description says so.
+- **Fix:** the stat subtracts the WebSocket transports of `signalr_server_active_connections` (the
+  `Microsoft.AspNetCore.Http.Connections` meter, now exported explicitly; long polling holds no request open between
+  polls), clamped at 0; the panel description says so.
 - **Test:** `DashboardQueryTests.InFlight_LeavesOutTheLiveHubConnections` (the panel's query on a real
   Prometheus).
 
@@ -768,8 +773,11 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
   minutes, until the backfill reached them.
 - **Root cause:** the startup scan queued them without changing their status; only the admin use case set
   `Pending`.
-- **Fix:** the scan marks every unfinished symbol it queues `Pending`, keeping `backfilled_from`.
-- **Test:** `BackfillWorkerTests.StartupScan_MarksEveryQueuedSymbolPending`.
+- **Fix:** the scan marks every unfinished symbol it queues `Pending`, keeping `backfilled_from`. The update is
+  conditional (`is_active` and not `Completed`), so a symbol removed since the scan read it is not left Pending,
+  and a completion written meanwhile by another instance is not overwritten.
+- **Test:** `BackfillWorkerTests.StartupScan_MarksEveryQueuedSymbolPending`,
+  `SymbolRepositoryTests.MarkPendingIfUnfinished_OnlyAnActiveSymbolThatHasNotCompleted`.
 
 ### N7
 
