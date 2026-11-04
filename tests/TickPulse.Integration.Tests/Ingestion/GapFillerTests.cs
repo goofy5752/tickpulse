@@ -27,7 +27,7 @@ public sealed class GapFillerTests
 
         var emitted = await Filler(source).FillAsync(BtcId, "BTCUSDT", 0, () => 2501, _output.Writer, Ct);
 
-        emitted.ShouldBe(2500);
+        emitted.ShouldBe(new GapFillResult(2500, 2500, Complete: true));
         var ticks = Emitted();
         ticks.Select(t => t.AggTradeId).ShouldBe(Enumerable.Range(1, 2500).Select(i => (long)i));
         source.Requests.ShouldBe([1L, 1001L, 2001L]);
@@ -41,7 +41,7 @@ public sealed class GapFillerTests
 
         var emitted = await Filler(source).FillAsync(BtcId, "BTCUSDT", 5, () => null, _output.Writer, Ct);
 
-        emitted.ShouldBe(5);
+        emitted.ShouldBe(new GapFillResult(5, 10, Complete: true));
         Emitted().Select(t => t.AggTradeId).ShouldBe([6L, 7L, 8L, 9L, 10L]);
         source.Requests.ShouldBe([6L]); // a short page means there is nothing more yet
     }
@@ -55,7 +55,7 @@ public sealed class GapFillerTests
 
         var emitted = await Filler(source).FillAsync(BtcId, "BTCUSDT", 0, () => boundary, _output.Writer, Ct);
 
-        emitted.ShouldBe(1499);
+        emitted.ShouldBe(new GapFillResult(1499, 1499, Complete: true));
         source.Requests.ShouldBe([1L, 1001L]);
     }
 
@@ -64,7 +64,7 @@ public sealed class GapFillerTests
     {
         var source = new FakeAggTrades(1, 0);
 
-        (await Filler(source).FillAsync(BtcId, "BTCUSDT", 41, () => null, _output.Writer, Ct)).ShouldBe(0);
+        (await Filler(source).FillAsync(BtcId, "BTCUSDT", 41, () => null, _output.Writer, Ct)).ShouldBe(new GapFillResult(0, null, Complete: true));
 
         source.Requests.ShouldBe([42L]);
         Emitted().ShouldBeEmpty();
@@ -77,7 +77,7 @@ public sealed class GapFillerTests
 
         var emitted = await Filler(source, maxPages: 2).FillAsync(BtcId, "BTCUSDT", 0, () => null, _output.Writer, Ct);
 
-        emitted.ShouldBe(2000);
+        emitted.ShouldBe(new GapFillResult(2000, 2000, Complete: false)); // the gap stays open after the cap
         source.Requests.ShouldBe([1L, 1001L]);
         new GapFiller(source, _clock, NullLogger<GapFiller>.Instance).MaxPages.ShouldBe(GapFiller.DefaultMaxPages);
     }
@@ -98,7 +98,7 @@ public sealed class GapFillerTests
             },
             "the retry");
 
-        (await fill.WaitAsync(IngestionTestHost.WaitTimeout, Ct)).ShouldBe(3);
+        (await fill.WaitAsync(IngestionTestHost.WaitTimeout, Ct)).ShouldBe(new GapFillResult(3, 3, Complete: true));
         source.Requests.ShouldBe([1L, 1L]);
     }
 
@@ -108,7 +108,7 @@ public sealed class GapFillerTests
         var source = new FakeAggTrades(1, 3);
         source.Failures.Enqueue(new BinanceApiException("bad request", HttpStatusCode.BadRequest, isTransient: false, null));
 
-        (await Filler(source).FillAsync(BtcId, "BTCUSDT", 0, () => null, _output.Writer, Ct)).ShouldBe(0);
+        (await Filler(source).FillAsync(BtcId, "BTCUSDT", 0, () => null, _output.Writer, Ct)).ShouldBe(new GapFillResult(0, null, Complete: false));
 
         source.Requests.ShouldBe([1L]);
     }
@@ -119,7 +119,7 @@ public sealed class GapFillerTests
         var source = new FakeAggTrades(1, 3);
         source.Failures.Enqueue(new BinanceBannedException(T0.AddHours(2)));
 
-        (await Filler(source).FillAsync(BtcId, "BTCUSDT", 0, () => null, _output.Writer, Ct)).ShouldBe(0);
+        (await Filler(source).FillAsync(BtcId, "BTCUSDT", 0, () => null, _output.Writer, Ct)).ShouldBe(new GapFillResult(0, null, Complete: false));
     }
 
     private GapFiller Filler(IAggTradeSource source, int maxPages = GapFiller.DefaultMaxPages) =>

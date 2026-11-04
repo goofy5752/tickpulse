@@ -11,7 +11,12 @@ namespace TickPulse.Infrastructure.Persistence;
 /// restart, failover, network cut, <c>pg_terminate_backend</c>) the server releases it, so another instance can take
 /// over, and this one must stop at once. <see cref="CheckAsync"/> detects that.
 /// </summary>
-/// <remarks>Thread-safe: every operation on the connection is serialised.</remarks>
+/// <remarks>
+/// <para><b>Single owner.</b> Exactly one component owns an instance: the ingestion worker, which creates it itself (it is
+/// not registered in the container). <see cref="ReleaseAsync"/> gives the lock up for the whole process, so a second
+/// user would silently lose it; other leader-only components read <c>IngestionState.IsLeader</c> instead.</para>
+/// <para>Thread-safe: every operation on the connection is serialised.</para>
+/// </remarks>
 public sealed partial class PostgresLeaderLock : IAsyncDisposable
 {
     /// <summary>The advisory lock key, <c>"TICK"</c> in ASCII.</summary>

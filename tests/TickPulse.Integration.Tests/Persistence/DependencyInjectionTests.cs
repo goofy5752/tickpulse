@@ -68,7 +68,8 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
         provider.GetRequiredService<ISymbolChangeSignal>().ShouldBeSameAs(provider.GetRequiredService<ISymbolChangeSignal>());
         provider.GetRequiredService<IngestionState>().ShouldBeSameAs(provider.GetRequiredService<IngestionState>());
         provider.GetRequiredService<IAggTradeSource>().ShouldBeOfType<BinanceRestClient>();
-        provider.GetRequiredService<PostgresLeaderLock>().IsHeld.ShouldBeFalse();
+        provider.GetService<PostgresLeaderLock>().ShouldBeNull(); // owned by the worker alone
+        provider.GetRequiredService<IGapFillWatermark>().ShouldBeSameAs(provider.GetRequiredService<GapFillWatermarks>());
 
         var options = provider.GetRequiredService<IOptions<IngestionOptions>>().Value;
         options.RotationInterval.ShouldBe(TimeSpan.FromHours(23));

@@ -40,6 +40,7 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     };
 
     private TaskCompletionSource _changed = NewSignal();
+    private TaskCompletionSource? _aggTradesHold;
     private (int Code, string Msg)? _rejectNext;
     private bool _suppressNextAck;
     private int _rateLimitDisconnects;
@@ -208,6 +209,8 @@ public sealed class FakeBinanceServer : IAsyncLifetime
             return;
         }
 
+        ResumeAggTrades();
+
         foreach (var connection in SnapshotConnections())
         {
             connection.Abort();
@@ -256,6 +259,31 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         }
     }
 
+    /// <summary>
+    /// Holds every <c>aggTrades</c> request (it is recorded in <see cref="ReceivedRequests"/> first) until
+    /// <see cref="ResumeAggTrades"/>; the response then reflects the trades at that moment.
+    /// </summary>
+    public void PauseAggTrades()
+    {
+        lock (_gate)
+        {
+            _aggTradesHold ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    /// <summary>Releases the requests held by <see cref="PauseAggTrades"/>.</summary>
+    public void ResumeAggTrades()
+    {
+        TaskCompletionSource? hold;
+        lock (_gate)
+        {
+            hold = _aggTradesHold;
+            _aggTradesHold = null;
+        }
+
+        hold?.TrySetResult();
+    }
+
     /// <summary>The next WebSocket command is applied but gets no reply, so the client's ack wait never ends.</summary>
     public void SuppressNextAck()
     {
@@ -291,20 +319,24 @@ public sealed class FakeBinanceServer : IAsyncLifetime
 
     /// <summary>
     /// Adds a trade to the REST data and sends it to every connection subscribed to
-    /// <c>{symbol}@aggTrade</c>. Returns once it has been written to those sockets.
+    /// <c>{symbol}@aggTrade</c>. Returns once it has been written to those sockets, with the number of them.
     /// </summary>
-    public async Task PushTradeAsync(string symbol, long id, decimal price, DateTime t, decimal quantity = 1m)
+    public async Task<int> PushTradeAsync(string symbol, long id, decimal price, DateTime t, decimal quantity = 1m)
     {
         var trade = AddTrade(symbol, id, price, t, quantity);
         var stream = StreamName(trade.Symbol);
         var payload = AggTradeMessage(stream, trade);
+        var sent = 0;
         foreach (var connection in SnapshotConnections())
         {
             if (connection.IsSubscribed(stream))
             {
                 await connection.TrySendAsync(payload);
+                sent++;
             }
         }
+
+        return sent;
     }
 
     /// <summary>Sends raw text to every open connection, regardless of subscriptions.</summary>
@@ -766,6 +798,17 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     // GET /api/v3/aggTrades?symbol&fromId&startTime&endTime&limit (default 500, max 1000)
     private async Task HandleAggTradesAsync(HttpContext context)
     {
+        Task? hold;
+        lock (_gate)
+        {
+            hold = _aggTradesHold?.Task;
+        }
+
+        if (hold is not null)
+        {
+            await hold.WaitAsync(context.RequestAborted);
+        }
+
         if (!TryResolveSymbol(context, out var symbol, out var error))
         {
             await WriteAsync(context, StatusCodes.Status400BadRequest, error!);

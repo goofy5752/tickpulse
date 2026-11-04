@@ -80,9 +80,8 @@ public static class DependencyInjection
             WsBaseUrl(configuration),
             sp.GetRequiredService<TimeProvider>(),
             sp.GetService<ILoggerFactory>() ?? NullLoggerFactory.Instance));
-        services.TryAddSingleton(sp => new PostgresLeaderLock(
-            RequiredConnectionString(configuration),
-            sp.GetService<ILogger<PostgresLeaderLock>>()));
+        services.TryAddSingleton<GapFillWatermarks>();
+        services.TryAddSingleton<IGapFillWatermark>(sp => sp.GetRequiredService<GapFillWatermarks>());
         services.TryAddSingleton<TickBatchWriter>();
         services.TryAddSingleton(sp => new GapFiller(
             sp.GetRequiredService<IAggTradeSource>(),
@@ -92,13 +91,15 @@ public static class DependencyInjection
             sp.GetRequiredService<ISymbolRepository>(),
             sp.GetRequiredService<SymbolIdCache>(),
             sp.GetService<ILogger<SymbolReconciler>>() ?? NullLogger<SymbolReconciler>.Instance));
+        // The worker is the lock's only owner, so the lock is created here and not registered.
         services.AddHostedService(sp => new IngestionWorker(
-            sp.GetRequiredService<PostgresLeaderLock>(),
+            new PostgresLeaderLock(RequiredConnectionString(configuration), sp.GetService<ILogger<PostgresLeaderLock>>()),
             sp.GetRequiredService<IStreamConnectionFactory>(),
             sp.GetRequiredService<SymbolReconciler>(),
             sp.GetRequiredService<TickBatchWriter>(),
             sp.GetRequiredService<GapFiller>(),
             sp.GetRequiredService<SymbolIdCache>(),
+            sp.GetRequiredService<GapFillWatermarks>(),
             sp.GetRequiredService<ISymbolChangeSignal>(),
             sp.GetRequiredService<IngestionState>(),
             sp.GetRequiredService<IOptions<IngestionOptions>>(),

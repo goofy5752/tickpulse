@@ -9,7 +9,7 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// boundaries for gap-fill).
 /// </summary>
 /// <remarks>
-/// <see cref="Subscribed"/> and <see cref="Unknown"/> belong to the supervisor's control loop, the only code that
+/// <see cref="Subscribed"/>, <see cref="Unknown"/> and <see cref="GapFillHandled"/> belong to the supervisor's control loop, the only code that
 /// sends commands; nothing else may touch them. The trade ids are written by the pump and read concurrently.
 /// </remarks>
 internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsyncDisposable
@@ -27,6 +27,12 @@ internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsync
     /// <summary>Symbols whose last command timed out: Binance may or may not have applied it.</summary>
     public HashSet<string> Unknown { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Subscribed symbols already considered for gap-fill on this link. A symbol acked later (for example after its
+    /// first SUBSCRIBE timed out) is considered when it is acked.
+    /// </summary>
+    public HashSet<string> GapFillHandled { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Pumps <see cref="BinanceWebSocketConnection.Trades"/> into the tick channel; ends when the connection does.</summary>
     public Task Pump { get; set; } = Task.CompletedTask;
 
@@ -43,9 +49,10 @@ internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsync
     /// <summary>The first trade id this link delivered for the symbol, if any yet.</summary>
     public long? FirstId(string symbol) => _firstIds.TryGetValue(symbol, out var id) ? id : null;
 
-    /// <summary>Drops the trade ids of a symbol that is no longer monitored.</summary>
+    /// <summary>Drops the bookkeeping of a symbol that is no longer monitored. Control loop only.</summary>
     public void Forget(string symbol)
     {
+        GapFillHandled.Remove(symbol);
         _firstIds.TryRemove(symbol, out _);
         _lastIds.TryRemove(symbol, out _);
     }

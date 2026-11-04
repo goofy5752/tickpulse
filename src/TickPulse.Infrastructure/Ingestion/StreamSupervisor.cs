@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using TickPulse.Application.Abstractions;
@@ -18,6 +17,10 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// its send lock then). Each connection has a pump task that only moves trades from its socket into the tick channel
 /// and never sends anything. Gap-fills and retirements run in the background; the supervisor tracks every background
 /// task so <see cref="StopAsync"/> can wait for them.</para>
+/// <para><b>Gap-fill.</b> A connection that ends unexpectedly opens a gap for every known symbol
+/// (<see cref="GapFillWatermarks"/>). Each symbol is gap-filled on the next connection as soon as its SUBSCRIBE is
+/// acknowledged there, which may be a later reconcile pass than the first one, and the gap closes only when the fill
+/// completed.</para>
 /// <para><b>Shutdown</b> is split so the worker can order it: cancel the token passed to <see cref="RunAsync"/> (no
 /// more commands, pumps and gap-fills stop writing), <see cref="StopAsync"/> (wait for them), then the worker
 /// completes and flushes the channel, then <see cref="DisposeAsync"/> closes the connections.</para>
@@ -33,7 +36,7 @@ internal sealed partial class StreamSupervisor(
     TimeProvider clock,
     ILogger logger,
     ChannelWriter<Tick> output,
-    ConcurrentDictionary<string, long> knownLastIds) : IAsyncDisposable
+    GapFillWatermarks watermarks) : IAsyncDisposable
 {
     /// <summary>A connect that takes longer is abandoned and retried.</summary>
     public static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
@@ -44,8 +47,14 @@ internal sealed partial class StreamSupervisor(
     /// <summary>Next reconcile after a pass that left some state unknown.</summary>
     public static readonly TimeSpan ReconcileRetryDelay = TimeSpan.FromSeconds(2);
 
-    /// <summary>Next rotation attempt after one that could not open or subscribe its new connection.</summary>
+    /// <summary>
+    /// Next rotation attempt after one that could not open or fully subscribe its new connection (or the rotation
+    /// interval, if that is shorter).
+    /// </summary>
     public static readonly TimeSpan RotationRetryDelay = TimeSpan.FromSeconds(30);
+
+    // Log a trade for a symbol without an id once, then once per this many.
+    private const int UnknownSymbolLogEvery = 10_000;
 
     private readonly Lock _gate = new();
     private readonly HashSet<StreamLink> _links = [];
@@ -83,7 +92,7 @@ internal sealed partial class StreamSupervisor(
 
                 reconnecting = true;
                 var upSince = UtcNow;
-                StartGapFill(link, ct);
+                StartGapFills(link, pendingOnly: true, ct);
 
                 var ended = await ServeAsync(link, outcome, ct).ConfigureAwait(false);
                 state.SetDisconnected();
@@ -94,7 +103,7 @@ internal sealed partial class StreamSupervisor(
                 }
 
                 LogConnectionEnded(upFor.TotalSeconds, ended.Connection.Completion.IsFaulted);
-                Retire(ended);
+                Retire(ended, gap: true);
                 await Task.Delay(backoff.Next(), clock, ct).ConfigureAwait(false);
             }
         }
@@ -123,11 +132,9 @@ internal sealed partial class StreamSupervisor(
             await Task.WhenAll(pending).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
         }
 
-        // The pumps are done: keep the last ids of the open links, for gap-fill in a later session.
-        foreach (var link in OpenLinks())
-        {
-            Merge(link);
-        }
+        // The pumps are done. Keep the open links' last ids, and since this session ends with the stream still
+        // running on the exchange, open a gap for the next session to fill.
+        watermarks.Merge(OpenLinks().SelectMany(l => l.LastIds), gap: true);
     }
 
     /// <summary>Closes the connections that are still open.</summary>
@@ -163,6 +170,7 @@ internal sealed partial class StreamSupervisor(
     private async Task<StreamLink> ServeAsync(StreamLink current, ReconcileOutcome initial, CancellationToken ct)
     {
         var interval = options.RotationInterval;
+        var rotationRetry = interval < RotationRetryDelay ? interval : RotationRetryDelay;
         state.SetConnected(current.ConnectedAtUtc, current.ConnectedAtUtc + interval);
         LogConnected(current.Subscribed.Count, current.ConnectedAtUtc + interval);
         var nextRotation = current.ConnectedAtUtc + interval;
@@ -201,19 +209,23 @@ internal sealed partial class StreamSupervisor(
                     current = r.Link;
                     nextRotation = r.Link.ConnectedAtUtc + interval;
                     nextReconcile = NextReconcile(r.Outcome);
-                }
-                else
-                {
-                    nextRotation = UtcNow + RotationRetryDelay;
+                    continue;
                 }
 
-                continue;
+                nextRotation = UtcNow + rotationRetry;
+                if (!signalled)
+                {
+                    continue;
+                }
+
+                // The rotation consumed a signal but changed nothing: the current connection still has to follow it.
             }
 
             if (signalled || UtcNow >= nextReconcile)
             {
                 var outcome = await reconciler.ReconcileAsync(current, ct).ConfigureAwait(false);
                 Forget(current, outcome.Unsubscribed);
+                StartGapFills(current, pendingOnly: true, ct);
                 nextReconcile = NextReconcile(outcome);
             }
         }
@@ -229,30 +241,31 @@ internal sealed partial class StreamSupervisor(
         var opened = await OpenLinkAsync(ct).ConfigureAwait(false);
         if (opened is null)
         {
-            LogRotationFailed();
+            LogRotationFailed(0);
             return null;
         }
 
-        var (next, outcome) = opened.Value;
-        if (outcome.RetrySoon)
+        var (next, _) = opened.Value;
+
+        // Every still-active symbol the old connection streams must be confirmed on the new one, or closing the old
+        // one would lose trades (a timed-out or rejected SUBSCRIBE).
+        var missing = old.Subscribed.Count(s => symbols.IsActive(s) && !next.Subscribed.Contains(s));
+        if (missing > 0)
         {
-            // Its subscriptions are not confirmed: closing the old connection now could lose trades.
-            LogRotationFailed();
-            Retire(next);
+            LogRotationFailed(missing);
+            Retire(next, gap: false);
             return null;
         }
 
         // The old connection is idle from here on: only this loop sends commands, and it has moved to the new one.
         var oldEndedEarly = old.Connection.Completion.IsCompleted;
         state.SetConnected(next.ConnectedAtUtc, next.ConnectedAtUtc + options.RotationInterval);
-        Retire(old);
+        Retire(old, gap: oldEndedEarly);
         LogRotated(next.Subscribed.Count);
-        if (oldEndedEarly)
-        {
-            // The old connection broke before the new one was subscribed; trades may have been missed in between.
-            StartGapFill(next, ct);
-        }
 
+        // The overlap covers a clean rotation; only gaps that are still open get filled. If the old connection broke
+        // before the new one was subscribed, Retire opened a gap for every symbol.
+        StartGapFills(next, pendingOnly: true, ct);
         return opened;
     }
 
@@ -302,6 +315,7 @@ internal sealed partial class StreamSupervisor(
     {
         await Task.Yield();
         var trades = link.Connection.Trades;
+        Dictionary<string, long>? unknown = null;
         try
         {
             while (await trades.WaitToReadAsync(ct).ConfigureAwait(false))
@@ -310,7 +324,13 @@ internal sealed partial class StreamSupervisor(
                 {
                     if (!symbols.TryGetId(trade.Symbol, out var symbolId))
                     {
-                        LogUnknownSymbol(trade.Symbol);
+                        unknown ??= new(StringComparer.OrdinalIgnoreCase);
+                        var count = unknown[trade.Symbol] = unknown.GetValueOrDefault(trade.Symbol) + 1;
+                        if (count % UnknownSymbolLogEvery == 1)
+                        {
+                            LogUnknownSymbol(trade.Symbol, count);
+                        }
+
                         continue;
                     }
 
@@ -336,45 +356,74 @@ internal sealed partial class StreamSupervisor(
         }
     }
 
-    private void StartGapFill(StreamLink link, CancellationToken ct)
+    // Considers every subscribed symbol not yet considered on this link (control loop only).
+    private void StartGapFills(StreamLink link, bool pendingOnly, CancellationToken ct)
     {
+        var toFill = new List<string>();
+        foreach (var symbol in link.Subscribed)
+        {
+            if (link.GapFillHandled.Add(symbol))
+            {
+                toFill.Add(symbol);
+            }
+        }
+
+        if (toFill.Count == 0)
+        {
+            return;
+        }
+
         Task[] retiring;
         lock (_gate)
         {
             retiring = [.. _retiring];
         }
 
-        string[] subscribed = [.. link.Subscribed];
-        Track(GapFillAsync(link, retiring, subscribed, ct));
+        Track(GapFillAsync(link, retiring, [.. toFill], pendingOnly, ct));
     }
 
-    private async Task GapFillAsync(StreamLink link, Task[] retiring, string[] subscribed, CancellationToken ct)
+    private async Task GapFillAsync(StreamLink link, Task[] retiring, string[] toFill, bool pendingOnly, CancellationToken ct)
     {
-        // The retired connections' pumps must have finished, so their last ids are final.
+        // The retired connections' pumps must have finished, so their last ids (and the gaps they opened) are final.
         await Task.WhenAll(retiring).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-        try
+        foreach (var symbol in toFill)
         {
-            foreach (var symbol in subscribed)
+            if (ct.IsCancellationRequested)
             {
-                if (knownLastIds.TryGetValue(symbol, out var lastId) && symbols.TryGetId(symbol, out var symbolId))
+                return;
+            }
+
+            if (!watermarks.TryGetStart(symbol, pendingOnly, out var lastId, out var version) || !symbols.TryGetId(symbol, out var symbolId))
+            {
+                continue;
+            }
+
+            try
+            {
+                var result = await gapFiller.FillAsync(symbolId, symbol, lastId, () => link.FirstId(symbol), output, ct).ConfigureAwait(false);
+                if (result.Complete)
                 {
-                    await gapFiller.FillAsync(symbolId, symbol, lastId, () => link.FirstId(symbol), output, ct).ConfigureAwait(false);
+                    watermarks.Filled(symbol, version);
+                }
+                else if (result.LastEmittedId is { } recovered)
+                {
+                    watermarks.Advance(symbol, recovered, version);
                 }
             }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            // The session is ending.
-        }
-        catch (Exception ex)
-        {
-            LogGapFillFailed(ex);
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return; // the session is ending; the gap stays open
+            }
+            catch (Exception ex)
+            {
+                LogGapFillFailed(ex, symbol);
+            }
         }
     }
 
-    private void Retire(StreamLink link)
+    private void Retire(StreamLink link, bool gap)
     {
-        var retire = RetireAsync(link);
+        var retire = RetireAsync(link, gap);
         lock (_gate)
         {
             _retiring.RemoveAll(t => t.IsCompleted);
@@ -384,25 +433,17 @@ internal sealed partial class StreamSupervisor(
         Track(retire);
     }
 
-    private async Task RetireAsync(StreamLink link)
+    private async Task RetireAsync(StreamLink link, bool gap)
     {
         await link.DisposeAsync().ConfigureAwait(false);
         Observe(link);
 
         // The pump drains what the socket had buffered, then ends.
         await link.Pump.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-        Merge(link);
+        watermarks.Merge(link.LastIds, gap);
         lock (_gate)
         {
             _links.Remove(link);
-        }
-    }
-
-    private void Merge(StreamLink link)
-    {
-        foreach (var (symbol, lastId) in link.LastIds)
-        {
-            knownLastIds.AddOrUpdate(symbol, static (_, id) => id, static (_, known, id) => Math.Max(known, id), lastId);
         }
     }
 
@@ -412,7 +453,8 @@ internal sealed partial class StreamSupervisor(
         foreach (var symbol in unsubscribed)
         {
             link.Forget(symbol);
-            knownLastIds.TryRemove(symbol, out _);
+            watermarks.Forget(symbol);
+            state.ForgetSymbol(symbol);
         }
     }
 
@@ -443,15 +485,15 @@ internal sealed partial class StreamSupervisor(
     [LoggerMessage(Level = LogLevel.Information, Message = "Rotated the Binance stream connection ({Count} subscription(s))")]
     private partial void LogRotated(int count);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Rotation failed; keeping the current connection and retrying later")]
-    private partial void LogRotationFailed();
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Rotation failed ({Missing} subscription(s) not confirmed on the new connection); keeping the current one and retrying later")]
+    private partial void LogRotationFailed(int missing);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Trade pump failed; replacing the connection")]
     private partial void LogPumpFailed(Exception exception);
 
-    [LoggerMessage(Level = LogLevel.Error, Message = "Gap-fill failed")]
-    private partial void LogGapFillFailed(Exception exception);
+    [LoggerMessage(Level = LogLevel.Error, Message = "Gap-fill for {Symbol} failed; the gap stays open")]
+    private partial void LogGapFillFailed(Exception exception, string symbol);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Dropped a trade for {Symbol}, which has no known id")]
-    private partial void LogUnknownSymbol(string symbol);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Dropped trade(s) for {Symbol}, which has no known id ({Count} so far on this connection)")]
+    private partial void LogUnknownSymbol(string symbol, long count);
 }

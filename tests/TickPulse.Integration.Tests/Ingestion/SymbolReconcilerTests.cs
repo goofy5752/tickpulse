@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using TickPulse.Application.Ingestion;
 using TickPulse.Domain;
 using TickPulse.Infrastructure.Ingestion;
 using TickPulse.Integration.Tests.Fixtures;
@@ -78,6 +79,41 @@ public sealed class SymbolReconcilerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ResubscribeAckLost_OnReconnect_GapFilledOnceAcked()
+    {
+        await using var host = await StartHostAsync();
+        var t0 = Now.AddSeconds(-30);
+        for (var i = 1; i <= 5; i++)
+        {
+            await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+        }
+
+        await WaitForTradeCountAsync(db, "BTCUSDT", 5);
+        for (var i = 6; i <= 10; i++)
+        {
+            _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i)); // missed while disconnected
+        }
+
+        // The reconnect's SUBSCRIBE is applied but never acked: no symbol counts as subscribed, so nothing is
+        // gap-filled with it. Its trades still stream, and the connection's first trade id must not hide the gap.
+        _server.SuppressNextAck();
+        await _server.DropAllConnectionsAsync();
+        await WaitForAsync(() => host.Logs.Count("LogTimedOut") == 1, "the reconnect SUBSCRIBE timed out");
+        for (var i = 11; i <= 15; i++)
+        {
+            await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+        }
+
+        // The retry pass gets the ack; BTCUSDT is gap-filled then.
+        await WaitForTradeCountAsync(db, "BTCUSDT", 15);
+        (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 15).Select(i => (long)i));
+        (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(15);
+        _server.ReceivedRequests.ShouldContain("/api/v3/aggTrades?symbol=BTCUSDT&fromId=6&limit=1000");
+        Commands("SUBSCRIBE", "BTCUSDT").Length.ShouldBe(3); // first connection, the lost one, the retry
+        _server.AcceptedConnections.ShouldBe(2);
+    }
+
+    [Fact]
     public async Task SubscribeRejected_RetriedOnTheNextPass()
     {
         await using var host = await StartHostAsync(reconcileInterval: "00:00:01");
@@ -103,6 +139,7 @@ public sealed class SymbolReconcilerTests(TimescaleFixture db) : IAsyncLifetime
             services => services.AddSingleton<IStreamConnectionFactory>(sp => new StreamConnectionFactory(
                 _server.WsBaseUrl, TimeProvider.System, sp.GetRequiredService<ILoggerFactory>(), AckTimeout)));
         await _server.WaitUntilAsync(s => s.ActiveConnections == 1 && s.SubscribedStreams.SetEquals(Seeded.Select(Stream)), WaitTimeout, Ct);
+        await WaitForAsync(() => host.State.Status == WsState.Connected, "the worker connected");
         return host;
     }
 

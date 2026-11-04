@@ -21,6 +21,7 @@ public sealed class TickBatchWriterTests
     private readonly Channel<Tick> _channel = Channel.CreateUnbounded<Tick>();
     private readonly RecordingTickWriter _writer = new();
     private readonly SymbolIdCache _symbols = new();
+    private readonly RecordingWatermark _watermark = new();
     private readonly IngestionState _state;
 
     public TickBatchWriterTests()
@@ -108,7 +109,7 @@ public sealed class TickBatchWriterTests
     [Fact]
     public async Task Run_PersistentConflict_GivesUpAfterMaxAttempts()
     {
-        for (var i = 0; i < TickBatchWriter.MaxAttempts; i++)
+        for (var i = 0; i < TickBatchWriter.MaxConflictAttempts; i++)
         {
             _writer.Failures.Enqueue(new PostgresException("deadlock", "ERROR", "ERROR", PostgresErrorCodes.DeadlockDetected));
         }
@@ -120,9 +121,10 @@ public sealed class TickBatchWriterTests
         await AdvanceUntilAsync(() => run.IsCompleted);
         await run;
 
-        _writer.Attempts.ShouldBe(TickBatchWriter.MaxAttempts);
+        _writer.Attempts.ShouldBe(TickBatchWriter.MaxConflictAttempts);
         _writer.Batches.ShouldBeEmpty();
         _state.Latest.ShouldBeEmpty();
+        _watermark.Lowered.ShouldBe([("BTCUSDT", 1L)]);
     }
 
     [Fact]
@@ -137,6 +139,108 @@ public sealed class TickBatchWriterTests
 
         _writer.Attempts.ShouldBe(2);
         _writer.Batches.ShouldHaveSingleItem().ShouldHaveSingleItem().AggTradeId.ShouldBe(2);
+        _watermark.Lowered.ShouldBe([("BTCUSDT", 1L)]);
+    }
+
+    [Fact]
+    public async Task Run_TransientFailures_RetriedUntilStoredWithNothingLost()
+    {
+        // The database restarts: refused connections, an admin shutdown, a broken connection, a timeout.
+        _writer.Failures.Enqueue(new NpgsqlException("Failed to connect", new System.Net.Sockets.SocketException(10061)));
+        _writer.Failures.Enqueue(new PostgresException("terminating connection due to administrator command", "FATAL", "FATAL", PostgresErrorCodes.AdminShutdown));
+        _writer.Failures.Enqueue(new PostgresException("the database system is starting up", "FATAL", "FATAL", PostgresErrorCodes.CannotConnectNow));
+        _writer.Failures.Enqueue(new PostgresException("connection failure", "FATAL", "FATAL", PostgresErrorCodes.ConnectionFailure));
+        _writer.Failures.Enqueue(new NpgsqlException("Exception while reading from stream", new IOException("reset")));
+        _writer.Failures.Enqueue(new TimeoutException());
+        for (var i = 1; i <= 5; i++)
+        {
+            _channel.Writer.TryWrite(T(Btc, i));
+        }
+
+        _channel.Writer.Complete();
+
+        var run = Writer().RunAsync(_channel.Reader, Ct);
+        await AdvanceUntilAsync(() => run.IsCompleted, step: TimeSpan.FromSeconds(1));
+        await run;
+
+        _writer.Attempts.ShouldBe(7);
+        _writer.Batches.ShouldHaveSingleItem().Select(t => t.AggTradeId).ShouldBe([1L, 2L, 3L, 4L, 5L]);
+        _watermark.Lowered.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Run_TransientFailures_BackOffUpToTheCap()
+    {
+        for (var i = 0; i < 12; i++)
+        {
+            _writer.Failures.Enqueue(new TimeoutException());
+        }
+
+        _channel.Writer.TryWrite(T(Btc, 1));
+        _channel.Writer.Complete();
+        var started = _clock.GetUtcNow();
+
+        var run = Writer().RunAsync(_channel.Reader, Ct);
+        await AdvanceUntilAsync(() => run.IsCompleted, step: TimeSpan.FromSeconds(1));
+        await run;
+
+        // 0.25, 0.5, 1, 2, 4, 8, 16, then 30 s capped five times: at least 181.75 s of waiting in total.
+        (_clock.GetUtcNow() - started).ShouldBeGreaterThanOrEqualTo(TimeSpan.FromSeconds(181.75));
+        (_clock.GetUtcNow() - started).ShouldBeLessThan(TimeSpan.FromSeconds(181.75 + 60)); // uncapped it would be over 1,100 s
+        _writer.Batches.ShouldHaveSingleItem();
+    }
+
+    [Fact]
+    public async Task Run_PermanentFailure_LowersTheWatermarkPerSymbol()
+    {
+        _writer.Failures.Enqueue(new PostgresException("value too long", "ERROR", "ERROR", PostgresErrorCodes.StringDataRightTruncation));
+        _channel.Writer.TryWrite(T(Btc, 12));
+        _channel.Writer.TryWrite(T(Btc, 10));
+        _channel.Writer.TryWrite(T(Eth, 7));
+        _channel.Writer.TryWrite(T(Btc, 11));
+        _channel.Writer.Complete();
+
+        await Writer().RunAsync(_channel.Reader, Ct);
+
+        _writer.Attempts.ShouldBe(1);
+        _writer.Batches.ShouldBeEmpty();
+        _watermark.Lowered.ShouldBe([("BTCUSDT", 10L), ("ETHUSDT", 7L)], ignoreOrder: true);
+    }
+
+    [Fact]
+    public async Task Run_Abandoned_RecordsUnwrittenTicksAsAGap()
+    {
+        for (var i = 0; i < 100; i++)
+        {
+            _writer.Failures.Enqueue(new TimeoutException()); // the database stays down
+        }
+
+        _channel.Writer.TryWrite(T(Btc, 5));
+        _channel.Writer.TryWrite(T(Btc, 6));
+        using var abandon = new CancellationTokenSource();
+        var run = Writer(maxSize: 1).RunAsync(_channel.Reader, abandon.Token);
+        await IngestionTestHost.WaitForAsync(() => _writer.Attempts >= 1, "the first attempt");
+        _channel.Writer.TryWrite(T(Eth, 3));
+
+        await abandon.CancelAsync();
+        await run.WaitAsync(IngestionTestHost.WaitTimeout, Ct);
+
+        _writer.Batches.ShouldBeEmpty();
+        _watermark.Lowered.ShouldBe([("BTCUSDT", 5L), ("ETHUSDT", 3L)], ignoreOrder: true);
+    }
+
+    [Fact]
+    public async Task Run_InactiveSymbol_NotPublishedAsLivePrice()
+    {
+        _symbols.Update([new MonitoredSymbol(Btc, "BTCUSDT", true, T0, null, BackfillStatus.NotRequested, null)]); // ETH removed
+        _channel.Writer.TryWrite(T(Btc, 1));
+        _channel.Writer.TryWrite(T(Eth, 2));
+        _channel.Writer.Complete();
+
+        await Writer().RunAsync(_channel.Reader, Ct);
+
+        _state.Latest.Keys.ShouldBe(["BTCUSDT"]);
+        _writer.Batches.ShouldHaveSingleItem().Count.ShouldBe(2); // its in-flight ticks are still stored
     }
 
     private static Tick T(int symbolId, long id, decimal price = 100m, int ms = 0) =>
@@ -146,12 +250,13 @@ public sealed class TickBatchWriterTests
         _writer,
         _state,
         _symbols,
+        _watermark,
         Options.Create(new IngestionOptions { BatchMaxSize = maxSize, BatchMaxDelay = TimeSpan.FromMilliseconds(500) }),
         _clock,
         NullLogger<TickBatchWriter>.Instance);
 
     // Timers on the fake clock are registered asynchronously, so keep nudging it until the condition holds.
-    private Task AdvanceUntilAsync(Func<bool> condition) =>
+    private Task AdvanceUntilAsync(Func<bool> condition, TimeSpan? step = null) =>
         IngestionTestHost.WaitForAsync(
             () =>
             {
@@ -160,10 +265,19 @@ public sealed class TickBatchWriterTests
                     return true;
                 }
 
-                _clock.Advance(TimeSpan.FromMilliseconds(100));
+                _clock.Advance(step ?? TimeSpan.FromMilliseconds(100));
                 return condition();
             },
             "the fake clock to release the writer");
+
+    private sealed class RecordingWatermark : IGapFillWatermark
+    {
+        private readonly ConcurrentQueue<(string Symbol, long FirstMissingId)> _lowered = new();
+
+        public IReadOnlyList<(string Symbol, long FirstMissingId)> Lowered => [.. _lowered];
+
+        public void Lower(string symbol, long firstMissingId) => _lowered.Enqueue((symbol, firstMissingId));
+    }
 
     private sealed class RecordingTickWriter : ITickWriter
     {

@@ -60,6 +60,11 @@ public sealed class IngestionState(TimeProvider clock)
     }
 
     /// <summary>Whether this process holds the leader lock and therefore ingests.</summary>
+    /// <remarks>
+    /// The single source of leadership for every other component (for example the backfill worker): only the ingestion
+    /// worker owns the lock; nobody else may touch it. It turns <see langword="false"/> as soon as a session starts to
+    /// end, before the remaining ticks are written; a lost lock is noticed within the leader check interval.
+    /// </remarks>
     public bool IsLeader
     {
         get
@@ -163,6 +168,13 @@ public sealed class IngestionState(TimeProvider clock)
             _connectedSinceUtc = connectedSinceUtc;
             _nextRotationUtc = nextRotationUtc;
         }
+    }
+
+    /// <summary>Drops the live price of a symbol that is no longer monitored.</summary>
+    public void ForgetSymbol(string symbol)
+    {
+        ArgumentNullException.ThrowIfNull(symbol);
+        _latest.TryRemove(symbol, out _);
     }
 
     /// <summary>A connection replaced one that was lost.</summary>

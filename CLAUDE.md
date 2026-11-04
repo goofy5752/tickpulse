@@ -72,7 +72,9 @@ npm --prefix web run dev | build | lint | typecheck
   `rate-limited`, `internal`.
 - **Config keys** (env uses `__`): `ConnectionStrings:TickPulse`, `Admin:*`, `Binance:*`,
   `Ingestion:*`, `Backfill:*`, `Database:RunMigrationsOnStartup`, `Otel:Endpoint`.
-  Defaults are listed in the plan's Global Constraints.
+  Defaults are listed in the plan's Global Constraints, plus two leader-election keys:
+  `Ingestion:LeaderRetryInterval` (`00:00:10`, how often a standby instance tries the lock) and
+  `Ingestion:LeaderCheckInterval` (`00:00:05`, how often the leader probes it).
 - **Clearing tables**: in SQL and shell scripts, clear tables with `DELETE FROM`.
 - **Packages**: versions live only in `Directory.Packages.props` (Central Package Management).
   Add a `PackageReference` only to the project that needs it.
