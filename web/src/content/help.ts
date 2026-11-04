@@ -81,9 +81,12 @@ export const HELP = {
   },
 
   chartPeriod: {
-    title: 'Candle period',
-    summary: 'The width of one candle. It also sets the SMA period p in the panel beside the chart.',
-    details: ['Buckets are aligned to UTC, so every client sees the same candles.'],
+    title: 'Period',
+    summary: 'The width of one candle, or of one point in the line view. It also sets the SMA period p beside the chart.',
+    details: [
+      'Candles show the first, highest, lowest and last price of each bucket; the line joins the last prices (closes). Switch between them with the icons on the left.',
+      'Buckets are aligned to UTC, so every client sees the same candles.',
+    ],
     items: [
       { term: '1m', mono: true, text: 'One minute, starting on the minute.' },
       { term: '5m', mono: true, text: 'Five minutes, starting at :00, :05, :10 …' },
