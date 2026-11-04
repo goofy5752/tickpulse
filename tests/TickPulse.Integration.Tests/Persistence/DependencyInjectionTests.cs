@@ -2,6 +2,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Testing;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using TickPulse.Application.Abstractions;
@@ -134,6 +136,134 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
         Should.Throw<OptionsValidationException>(() => provider.GetRequiredService<IOptions<BackfillOptions>>().Value)
             .Message.ShouldContain("Depth");
     }
+
+    // Require is the discriminating case: the test database has no GSS encryption, so a connection that kept the
+    // mode could not open at all. The queries below open real connections on every data source and the context.
+    [Theory]
+    [InlineData("")]
+    [InlineData(";GSS Encryption Mode=Prefer")]
+    [InlineData(";GSS Encryption Mode=Require")]
+    public async Task AddTickPulseInfrastructure_EveryDataSourceAndTheDbContext_HaveGssEncryptionDisabled(string setting)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:TickPulse"] = db.ConnectionString + setting })
+            .Build();
+        await using var provider = new ServiceCollection()
+            .AddLogging()
+            .AddTickPulseInfrastructure(configuration)
+            .BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
+        var ct = TestContext.Current.CancellationToken;
+
+        var shared = provider.GetRequiredService<NpgsqlDataSource>();
+        var writer = provider.GetRequiredKeyedService<NpgsqlDataSource>(DependencyInjection.TickWriterDataSourceKey);
+        await using var scope = provider.CreateAsyncScope();
+        var context = scope.ServiceProvider.GetRequiredService<TickPulseDbContext>();
+
+        GssMode(shared.ConnectionString).ShouldBe(GssEncryptionMode.Disable);
+        GssMode(writer.ConnectionString).ShouldBe(GssEncryptionMode.Disable);
+        GssMode(context.Database.GetDbConnection().ConnectionString).ShouldBe(GssEncryptionMode.Disable);
+
+        await using (var command = shared.CreateCommand("SELECT 1"))
+        {
+            (await command.ExecuteScalarAsync(ct)).ShouldBe(1);
+        }
+
+        await using (var command = writer.CreateCommand("SELECT 1"))
+        {
+            (await command.ExecuteScalarAsync(ct)).ShouldBe(1);
+        }
+
+        // The migrator goes through this same context.
+        (await context.Database.GetAppliedMigrationsAsync(ct)).ShouldNotBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(";GSS Encryption Mode=Prefer", true)]
+    [InlineData(";GSS Encryption Mode=Disable", false)]
+    [InlineData("", false)]
+    public void AddTickPulseInfrastructure_AnIgnoredGssEncryptionMode_IsLoggedAsAWarning(string setting, bool warned)
+    {
+        using var logs = new FakeLoggerProvider();
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:TickPulse"] = db.ConnectionString + setting })
+            .Build();
+        using var provider = new ServiceCollection()
+            .AddLogging(b => b.AddProvider(logs))
+            .AddTickPulseInfrastructure(configuration)
+            .BuildServiceProvider();
+
+        _ = provider.GetRequiredService<NpgsqlDataSource>();
+
+        var warnings = logs.Collector.GetSnapshot().Where(r => r.Level == LogLevel.Warning && r.Message.Contains("GSS Encryption Mode", StringComparison.Ordinal)).ToList();
+        warnings.Count.ShouldBe(warned ? 1 : 0);
+        if (warned)
+        {
+            warnings[0].Message.ShouldBe(
+                "GSS Encryption Mode=Prefer in the connection string is ignored; TickPulse disables GSS encryption unless Database:AllowGssEncryption=true");
+        }
+    }
+
+    [Fact]
+    public void AddTickPulseInfrastructure_WithTheOptIn_KeepsAnExplicitGssEncryptionMode()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:TickPulse"] = db.ConnectionString + ";GSS Encryption Mode=Require",
+                [NpgsqlConnectionPolicy.AllowGssEncryptionKey] = "true",
+            })
+            .Build();
+        using var provider = new ServiceCollection()
+            .AddTickPulseInfrastructure(configuration)
+            .BuildServiceProvider();
+
+        GssMode(provider.GetRequiredService<NpgsqlDataSource>().ConnectionString).ShouldBe(GssEncryptionMode.Require);
+        GssMode(provider.GetRequiredKeyedService<NpgsqlDataSource>(DependencyInjection.TickWriterDataSourceKey).ConnectionString)
+            .ShouldBe(GssEncryptionMode.Require);
+    }
+
+    [Theory]
+    [InlineData(";GSS Encryption Mode=Prefer")]
+    [InlineData(";GSS Encryption Mode=Require")]
+    public async Task PostgresLeaderLock_HasGssEncryptionDisabled_AndAcquires(string setting)
+    {
+        await using var leaderLock = new PostgresLeaderLock(db.ConnectionString + setting);
+
+        GssMode(leaderLock.ConnectionString).ShouldBe(GssEncryptionMode.Disable);
+        (await leaderLock.TryAcquireAsync(TestContext.Current.CancellationToken)).ShouldBeTrue();
+        await leaderLock.ReleaseAsync();
+    }
+
+    [Fact]
+    public async Task PostgresLeaderLock_WithTheOptIn_KeepsAnExplicitGssEncryptionMode()
+    {
+        await using var leaderLock = new PostgresLeaderLock(db.ConnectionString + ";GSS Encryption Mode=Require", allowGssEncryption: true);
+
+        GssMode(leaderLock.ConnectionString).ShouldBe(GssEncryptionMode.Require);
+    }
+
+    [Fact]
+    public void BuildDataSources_ForceGssEncryptionOff_ForDirectCallersToo()
+    {
+        var connectionString = db.ConnectionString + ";GSS Encryption Mode=Require";
+
+        using var shared = DependencyInjection.BuildDataSource(connectionString, null);
+        using var writer = DependencyInjection.BuildTickWriterDataSource(connectionString, null);
+
+        GssMode(shared.ConnectionString).ShouldBe(GssEncryptionMode.Disable);
+        GssMode(writer.ConnectionString).ShouldBe(GssEncryptionMode.Disable);
+    }
+
+    [Fact]
+    public void DesignTimeFactory_HasGssEncryptionDisabled()
+    {
+        using var context = new TickPulseDbContextDesignTimeFactory().CreateDbContext([]);
+
+        GssMode(context.Database.GetDbConnection().ConnectionString).ShouldBe(GssEncryptionMode.Disable);
+    }
+
+    private static GssEncryptionMode GssMode(string connectionString) =>
+        new NpgsqlConnectionStringBuilder(connectionString).GssEncryptionMode;
 
     [Fact]
     public void AddTickPulseInfrastructure_MissingConnectionString_FailsOnResolve()

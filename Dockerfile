@@ -42,8 +42,8 @@ RUN dotnet publish src/TickPulse.Api/TickPulse.Api.csproj -c Release --no-restor
 # ---------- api: the deployable host ----------
 # Alpine has no ICU, which is fine: every project sets InvariantGlobalization.
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine AS api
-# Npgsql probes for GSSAPI on every new connection; without the library each probe prints a load error to stderr.
-RUN apk add --no-cache krb5-libs
+# No Kerberos/GSSAPI libraries (krb5-libs): TickPulse forces Npgsql's GSS encryption off (NpgsqlConnectionPolicy), so
+# nothing loads libgssapi_krb5, and the native GSS negotiation that crashed this musl image under load never runs.
 WORKDIR /app
 ENV DOTNET_NOLOGO=1
 # COPY leaves the files owned by root, so the process (the image's unprivileged "app" user) cannot modify them.
