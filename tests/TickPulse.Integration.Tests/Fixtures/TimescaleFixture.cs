@@ -30,7 +30,17 @@ public sealed class TimescaleFixture : IAsyncLifetime
         .WithPassword("tickpulse")
         .Build();
 
+    /// <summary>
+    /// The database with <see cref="NpgsqlConnectionPolicy"/> applied (GSS encryption off, the default pool size), like
+    /// every connection the app opens. Use it for helper connections and for hosts under test.
+    /// </summary>
     public string ConnectionString { get; private set; } = string.Empty;
+
+    /// <summary>
+    /// The connection string exactly as the container reports it, with no policy applied. Only for tests of
+    /// <see cref="NpgsqlConnectionPolicy"/> itself, which need to see what an unset keyword turns into.
+    /// </summary>
+    public string RawConnectionString { get; private set; } = string.Empty;
 
     /// <summary>The <c>symbols</c> rows exactly as the migrations left them, read before any test ran.</summary>
     public IReadOnlyList<SymbolEntity> InitialSymbols { get; private set; } = [];
@@ -38,7 +48,8 @@ public sealed class TimescaleFixture : IAsyncLifetime
     public async ValueTask InitializeAsync()
     {
         await _container.StartAsync();
-        ConnectionString = _container.GetConnectionString();
+        RawConnectionString = _container.GetConnectionString();
+        ConnectionString = NpgsqlConnectionPolicy.Apply(RawConnectionString, NpgsqlPolicySettings.Default);
 
         var options = new DbContextOptionsBuilder<TickPulseDbContext>()
             .UseNpgsql(ConnectionString)

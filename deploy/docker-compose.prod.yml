@@ -46,7 +46,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-tickpulse}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
       # timescaledb-tune (first init only) sizes the other settings for this limit, not for the whole host, and for
-      # 40 connections: the api uses at most 24 (Maximum Pool Size=20 below, plus 4 for the tick writer).
+      # 40 connections: the api uses at most 25 (Maximum Pool Size=20 below, 4 for the tick writer, 1 for the leader
+      # lock), which leaves 12 free after the 3 superuser slots.
       TS_TUNE_MEMORY: 512MB
       TS_TUNE_MAX_CONNS: "40"
       TIMESCALEDB_TELEMETRY: "off"
@@ -59,6 +60,8 @@ services:
       - /tmp
       - /var/run/postgresql
     shm_size: 128m
+    # A clean PostgreSQL shutdown (checkpoint) instead of a kill and crash recovery on the next start; see the api.
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -77,7 +80,8 @@ services:
         condition: service_started
     environment:
       # Keep POSTGRES_PASSWORD free of ';' (it ends a connection-string field). The pool stays well inside the
-      # database's max_connections (TS_TUNE_MAX_CONNS above); Npgsql's default of 100 would not.
+      # database's max_connections (TS_TUNE_MAX_CONNS above); Npgsql's default of 100 would not. 20 is also the code
+      # default (Database:MaxPoolSize), so this only states it.
       ConnectionStrings__TickPulse: "Host=db;Port=5432;Database=${POSTGRES_DB:-tickpulse};Username=${POSTGRES_USER:-tickpulse};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env};Maximum Pool Size=20"
       Database__RunMigrationsOnStartup: "true"
       # Six months of 1-minute candles per symbol, loaded once from Binance REST; afterwards only the gaps.
@@ -95,6 +99,10 @@ services:
       - "127.0.0.1:8085:8080"
     tmpfs:
       - /tmp
+    # A stop needs about 2 s and at most about 24 s (src/TickPulse.Api/Hosting/HostShutdown.cs). Without this, Compose
+    # gives the container a 1 s stop timeout and kills it (exit 137) before the leader lock is released and the logs
+    # are flushed.
+    stop_grace_period: 30s
     mem_limit: 512m
 
   # ---------- observability: the services of observability/compose.observability.yml ----------

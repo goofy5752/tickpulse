@@ -39,10 +39,23 @@ public static class DependencyInjection
 
         services.TryAddSingleton(TimeProvider.System);
 
-        services.AddSingleton(sp => BuildDataSource(RequiredConnectionString(configuration), sp.GetService<ILoggerFactory>()));
+        // Every connection the app opens comes from these two data sources or the leader lock, and each applies
+        // NpgsqlConnectionPolicy itself (GSS encryption off, a bounded pool: Database:*). EF Core, and so the
+        // migrator, run on the shared data source.
+        services.AddSingleton(sp =>
+        {
+            var connectionString = RequiredConnectionString(configuration);
+            var settings = NpgsqlConnectionPolicy.Settings(configuration);
+            var loggerFactory = sp.GetService<ILoggerFactory>();
+            NpgsqlConnectionPolicy.WarnIfOverridden(connectionString, settings, loggerFactory);
+            return BuildDataSource(connectionString, loggerFactory, settings);
+        });
         services.AddKeyedSingleton(
             TickWriterDataSourceKey,
-            (sp, _) => BuildTickWriterDataSource(RequiredConnectionString(configuration), sp.GetService<ILoggerFactory>()));
+            (sp, _) => BuildTickWriterDataSource(
+                RequiredConnectionString(configuration),
+                sp.GetService<ILoggerFactory>(),
+                NpgsqlConnectionPolicy.Settings(configuration)));
 
         services.AddDbContext<TickPulseDbContext>((sp, options) => options.UseNpgsql(sp.GetRequiredService<NpgsqlDataSource>()));
 
@@ -101,7 +114,10 @@ public static class DependencyInjection
             sp.GetService<ILogger<SymbolReconciler>>() ?? NullLogger<SymbolReconciler>.Instance));
         // The worker is the lock's only owner, so the lock is created here and not registered.
         services.AddHostedService(sp => new IngestionWorker(
-            new PostgresLeaderLock(RequiredConnectionString(configuration), sp.GetService<ILogger<PostgresLeaderLock>>()),
+            new PostgresLeaderLock(
+                RequiredConnectionString(configuration),
+                sp.GetService<ILogger<PostgresLeaderLock>>(),
+                NpgsqlConnectionPolicy.Settings(configuration)),
             sp.GetRequiredService<IStreamConnectionFactory>(),
             sp.GetRequiredService<SymbolReconciler>(),
             sp.GetRequiredService<TickBatchWriter>(),
@@ -149,9 +165,13 @@ public static class DependencyInjection
     }
 
     /// <summary>The shared data source used by every component except the tick writer.</summary>
-    public static NpgsqlDataSource BuildDataSource(string connectionString, ILoggerFactory? loggerFactory)
+    /// <param name="connectionString">The TickPulse database.</param>
+    /// <param name="loggerFactory">Npgsql's logger factory, if any.</param>
+    /// <param name="settings">The <c>Database</c> settings (see <see cref="NpgsqlConnectionPolicy"/>); defaults when null.</param>
+    public static NpgsqlDataSource BuildDataSource(string connectionString, ILoggerFactory? loggerFactory, NpgsqlPolicySettings? settings = null)
     {
         var builder = new NpgsqlDataSourceBuilder(connectionString);
+        NpgsqlConnectionPolicy.Apply(builder.ConnectionStringBuilder, settings ?? NpgsqlPolicySettings.Default);
         if (loggerFactory is not null)
         {
             builder.UseLoggerFactory(loggerFactory);
@@ -170,11 +190,17 @@ public static class DependencyInjection
     /// because migrations run before the writer starts. It is always empty between batches: a committed
     /// batch is cleared by <c>ON COMMIT DELETE ROWS</c>, a failed one by its rollback.
     /// </remarks>
-    public static NpgsqlDataSource BuildTickWriterDataSource(string connectionString, ILoggerFactory? loggerFactory)
+    /// <param name="connectionString">The TickPulse database.</param>
+    /// <param name="loggerFactory">Npgsql's logger factory, if any.</param>
+    /// <param name="settings">The <c>Database</c> settings (see <see cref="NpgsqlConnectionPolicy"/>); defaults when null.</param>
+    public static NpgsqlDataSource BuildTickWriterDataSource(string connectionString, ILoggerFactory? loggerFactory, NpgsqlPolicySettings? settings = null)
     {
         var builder = new NpgsqlDataSourceBuilder(connectionString);
+        NpgsqlConnectionPolicy.Apply(builder.ConnectionStringBuilder, settings ?? NpgsqlPolicySettings.Default);
         builder.ConnectionStringBuilder.NoResetOnClose = true;
         builder.ConnectionStringBuilder.MaxPoolSize = TickWriterMaxPoolSize;
+        // A Minimum Pool Size meant for the shared pool would exceed the writer's maximum, and Npgsql would refuse it.
+        builder.ConnectionStringBuilder.MinPoolSize = Math.Min(builder.ConnectionStringBuilder.MinPoolSize, TickWriterMaxPoolSize);
         if (loggerFactory is not null)
         {
             builder.UseLoggerFactory(loggerFactory);

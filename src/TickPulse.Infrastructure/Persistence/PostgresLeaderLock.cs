@@ -34,20 +34,29 @@ public sealed partial class PostgresLeaderLock : ILeaderLock
 
     /// <param name="connectionString">The TickPulse database; pooling is turned off for the lock's connection.</param>
     /// <param name="logger">Logger for acquisitions and losses.</param>
-    public PostgresLeaderLock(string connectionString, ILogger<PostgresLeaderLock>? logger = null)
+    /// <param name="settings">
+    /// The <c>Database</c> settings (see <see cref="NpgsqlConnectionPolicy"/>); defaults when null. The pool size does not
+    /// apply: the lock's connection is unpooled.
+    /// </param>
+    public PostgresLeaderLock(string connectionString, ILogger<PostgresLeaderLock>? logger = null, NpgsqlPolicySettings? settings = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 
         // Unpooled: closing the connection must end the session, which is what releases the lock.
-        _connectionString = new NpgsqlConnectionStringBuilder(connectionString)
+        var builder = new NpgsqlConnectionStringBuilder(connectionString)
         {
             Pooling = false,
             TcpKeepAlive = true,
             CommandTimeout = CommandTimeoutSeconds,
             ApplicationName = "tickpulse-leader",
-        }.ConnectionString;
+        };
+        NpgsqlConnectionPolicy.Apply(builder, settings ?? NpgsqlPolicySettings.Default);
+        _connectionString = builder.ConnectionString;
         _logger = (ILogger?)logger ?? NullLogger.Instance;
     }
+
+    /// <summary>The effective settings of the lock's connection.</summary>
+    internal string ConnectionString => _connectionString;
 
     /// <summary>Whether the lock is held: it was acquired and its connection has not broken or been closed since.</summary>
     /// <remarks>A silently dead connection is only discovered by the next <see cref="CheckAsync"/>.</remarks>

@@ -38,6 +38,8 @@ services:
       retries: 10
       start_period: 10s
     restart: unless-stopped
+    # A clean PostgreSQL shutdown (checkpoint) instead of a kill and crash recovery on the next start; see the api.
+    stop_grace_period: 30s
     logging: *logging
     networks: [tickpulse]
 
@@ -53,7 +55,9 @@ services:
       db:
         condition: service_healthy
     environment:
-      ConnectionStrings__TickPulse: "Host=db;Port=5432;Database=${POSTGRES_DB:-tickpulse};Username=${POSTGRES_USER:-tickpulse};Password=${POSTGRES_PASSWORD:-tickpulse}"
+      # Maximum Pool Size=20 is also the code default (Database:MaxPoolSize), stated here as in production. With the tick
+      # writer (4) and the leader lock (1), the api needs at most 25 of the database's 100 connections.
+      ConnectionStrings__TickPulse: "Host=db;Port=5432;Database=${POSTGRES_DB:-tickpulse};Username=${POSTGRES_USER:-tickpulse};Password=${POSTGRES_PASSWORD:-tickpulse};Maximum Pool Size=20"
       Database__RunMigrationsOnStartup: "true"
       # Loads ~6 months of 1-minute candles per symbol from Binance REST on first start.
       Backfill__Enabled: "true"
@@ -77,6 +81,10 @@ services:
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     restart: unless-stopped
+    # A stop needs about 2 s and at most about 24 s (src/TickPulse.Api/Hosting/HostShutdown.cs). Without this, Compose
+    # gives the container a 1 s stop timeout and kills it (exit 137) before the leader lock is released and the logs
+    # are flushed.
+    stop_grace_period: 30s
     logging: *logging
     networks: [tickpulse]
 
