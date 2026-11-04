@@ -113,7 +113,7 @@ Binance WS (combined stream, dynamic SUBSCRIBE)
 - **Idempotency:** PK `(symbol_id, agg_trade_id, trade_time)`, so replays and overlaps never duplicate.
 - **Leader election:** `pg_try_advisory_lock` on a dedicated connection. Only the lock holder ingests; other replicas serve the API and retry every 10 s.
 - **Symbol changes:** the admin use case writes to the DB and signals the ingestion service in-process. Ingestion also reconciles against the DB every 30 s, which covers changes made by other replicas.
-- **Gap-fill (goal 7):** after a reconnect, fetch the missed trades via REST `aggTrades?fromId=last+1`.
+- **Gap-fill (goal 7):** after a reconnect, fetch the missed trades via REST `aggTrades?fromId=last+1`. Every leadership session (start-up, restart, redeploy, handover) first seeds the starting points from the database: each active symbol's highest stored `agg_trade_id` of the last 24 h. So the trades that happened while no instance led are recovered too. A symbol that starts streaming with nothing known (first start, added, reactivated) is filled from the start of the minute it was subscribed in (`aggTrades?startTime`) up to its first streamed trade. Its first candle is then complete.
 
 ### 5.2 Data model (PostgreSQL + TimescaleDB)
 

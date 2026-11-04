@@ -81,8 +81,11 @@ Rules of thumb:
    losing leadership: stop ingesting.
 5. **One WebSocket connection**, runtime `SUBSCRIBE`/`UNSUBSCRIBE` at ≤ 5 messages/s, rotation at
    ~23 h make-before-break, reconnect with jittered exponential backoff (cap 30 s), gap-fill via
-   REST `aggTrades?fromId=last+1`. Symbol changes signal ingestion in-process and are also
-   reconciled against the DB every 30 s.
+   REST `aggTrades?fromId=last+1`. Every leadership session seeds the gap-fill watermarks from
+   the DB (max `agg_trade_id` per active symbol, last 24 h) before it subscribes, so restarts and
+   handovers lose nothing. A symbol that starts streaming with no watermark gets a lead-in from
+   the start of its first minute (`aggTrades?startTime`), so that candle is never partial.
+   Symbol changes signal ingestion in-process and are also reconciled against the DB every 30 s.
 6. **Bounded channel** with `FullMode=Wait` (backpressure, never drop). Batches flush at 500 ms or
    5,000 ticks.
 
