@@ -52,7 +52,7 @@ if the final version differs.
 | [RV-26](#rv-26) | `http2` on the vhosts would switch HTTP/2 on for every site on the host's port 443 | Review (T25) | Important | #11 |
 | [RV-27](#rv-27) | A rollback restored the image but not the deployed files | Review (T25) | Important | #11 |
 | [F1](#f1) | A load burst knocked out telemetry and fired the WebSocket alert falsely | E2E run | Important | #14 |
-| [F2](#f2) | Trades lost on every API restart, redeploy or leadership handover | E2E run | Important | #20, #TBD |
+| [F2](#f2) | Trades lost on every API restart, redeploy or leadership handover | E2E run | Important | #20, #26 |
 | [F3](#f3) | `change24hPercent` wildly wrong while a backfill runs | E2E run | Important | #15 |
 | [F4](#f4) | Long-period analytics aggregated minutes at query time (p95 83 ms) | E2E run | Important | #12 |
 | [F5](#f5) | Uncaught `AbortError`s in the dashboard console | E2E run | Important | #13 |
@@ -385,7 +385,7 @@ if the final version differs.
 
 ### F2
 
-**Trades lost on every API restart, redeploy or leadership handover** · E2E run · Important · PR #20, PR #TBD
+**Trades lost on every API restart, redeploy or leadership handover** · E2E run · Important · PR #20, PR #26
 
 - **Symptom:** after `docker restart` of the api, `agg_trade_id` gaps (13 BTC and 31 ETH trades in one
   restart) and restart-minute candles that differed from Binance.
@@ -408,7 +408,7 @@ if the final version differs.
   0 gaps, 0 missing ids and 0 duplicates over restarts.
 - **Known limitation:** a hole below the newest stored trade that only another, or a crashed, process
   knew about is invisible to the seed.
-- **What the final review found** (fixed in PR #TBD):
+- **What the final review found** (fixed in PR #26):
   - *An outage longer than the 1-day seed window left a permanent hole.* The symbol got only a lead-in,
     and the backfill skipped completed symbols. The seed now looks back 12 days: the 13-day replay
     window less a day of headroom for the fill. It reads the newest trade with an ordered ChunkAppend,
