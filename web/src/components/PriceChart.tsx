@@ -1,4 +1,5 @@
 import {
+  AreaSeries,
   CandlestickSeries,
   ColorType,
   createChart,
@@ -20,16 +21,21 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CandleResponse, IsoDateTime, LivePrice, Period, SmaResponse } from '@/api/types'
 import { InfoTip } from '@/components/InfoTip'
-import { setSeriesData, type CandleRow } from '@/lib/chartSeries'
+import { setSeriesData, toCloseRow, type CandleRow } from '@/lib/chartSeries'
 import { fillGaps, windowIndexRange, type WindowRange } from '@/lib/chartData'
 import { mergeTrade, reconcileBar, type OhlcBar } from '@/lib/liveBar'
 import { formatPercent, formatPlainPrice, formatPrice, formatTickmarks, formatUtc, priceDecimals } from '@/lib/format'
 import { PERIOD_SECONDS, rollingSma, toUnixSeconds, withPoint } from '@/lib/sma'
 import { cn } from '@/lib/utils'
 
+/** How the price is drawn: OHLC candles, or a line of closes with a soft fill. */
+export type ChartType = 'candles' | 'line'
+
 export interface PriceChartProps {
   candles: CandleResponse[]
   period: Period
+  /** Candles (default) or the line of closes. */
+  type?: ChartType
   /** Draws the rolling SMA with the same n, and shades its window unless `highlight` says otherwise. */
   sma?: SmaResponse
   /** The shaded calculation window; defaults to `sma.windowStart..windowEnd` (end exclusive). */
@@ -119,6 +125,11 @@ class WindowShade implements ISeriesPrimitive {
   detached() {
     this.chart = null
     this.requestUpdate = null
+  }
+
+  /** Repaints with the current range, e.g. after moving to another series. */
+  refresh() {
+    this.requestUpdate?.()
   }
 
   paneViews() {
@@ -216,11 +227,16 @@ interface Hover {
   sma: number | undefined
 }
 
-export function PriceChart({ candles, period, sma, highlight, live, symbol, fitKey, className }: PriceChartProps) {
+export function PriceChart({ candles, period, type = 'candles', sma, highlight, live, symbol, fitKey, className }: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const smaSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
+  const closeSeriesRef = useRef<ISeriesApi<'Area'> | null>(null)
+  /** The series the window shade is attached to: the visible price series. */
+  const shadeHostRef = useRef<ISeriesApi<'Candlestick'> | ISeriesApi<'Area'> | null>(null)
+  /** Every drawn bar by time, so the readout works whichever price series is visible. */
+  const barsRef = useRef(new Map<number, Bar>())
   const shadeRef = useRef<WindowShade | null>(null)
   const priceLineRef = useRef<IPriceLine | null>(null)
   const fittedKeyRef = useRef<string | null>(null)
@@ -322,6 +338,14 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
       priceLineColor: withAlpha(palette.crosshair, 0.6),
       priceLineStyle: LineStyle.Dotted,
     })
+    const closeSeries = chart.addSeries(AreaSeries, {
+      lineWidth: 2,
+      priceLineStyle: LineStyle.Dotted,
+      priceLineColor: withAlpha(palette.crosshair, 0.6),
+      crosshairMarkerRadius: 4,
+      crosshairMarkerBorderWidth: 2,
+      visible: false,
+    })
     const smaSeries = chart.addSeries(LineSeries, {
       color: palette.sma,
       lineWidth: 2,
@@ -335,20 +359,29 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
 
     chartRef.current = chart
     candleSeriesRef.current = candleSeries
+    closeSeriesRef.current = closeSeries
+    shadeHostRef.current = candleSeries
     smaSeriesRef.current = smaSeries
     shadeRef.current = shade
     priceLineRef.current = null
     fittedKeyRef.current = null
 
     const onCrosshair = (param: MouseEventParams) => {
-      const bar = param.seriesData.get(candleSeries)
-      if (!bar || !('open' in bar)) {
+      // A hidden series may be left out of seriesData; the bar map covers the line view.
+      const fromSeries = param.seriesData.get(candleSeries)
+      const bar =
+        fromSeries && 'open' in fromSeries
+          ? (fromSeries as Bar)
+          : param.time === undefined
+            ? undefined
+            : barsRef.current.get(param.time as number)
+      if (!bar) {
         setHover(null)
         return
       }
       const smaPoint = param.seriesData.get(smaSeries)
       setHover({
-        bar: bar as Bar,
+        bar,
         sma: smaPoint && 'value' in smaPoint ? smaPoint.value : undefined,
       })
     }
@@ -373,19 +406,39 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
       chart.remove()
       chartRef.current = null
       candleSeriesRef.current = null
+      closeSeriesRef.current = null
+      shadeHostRef.current = null
       smaSeriesRef.current = null
       shadeRef.current = null
       priceLineRef.current = null
     }
   }, [])
 
+  // Candles or line: show one price series, and keep the window shade on the visible one.
+  useEffect(() => {
+    const candleSeries = candleSeriesRef.current
+    const closeSeries = closeSeriesRef.current
+    const shade = shadeRef.current
+    if (!candleSeries || !closeSeries || !shade) return
+    candleSeries.applyOptions({ visible: type === 'candles' })
+    closeSeries.applyOptions({ visible: type === 'line' })
+    const host = type === 'line' ? closeSeries : candleSeries
+    if (shadeHostRef.current !== host) {
+      shadeHostRef.current?.detachPrimitive(shade)
+      host.attachPrimitive(shade)
+      shadeHostRef.current = host
+      shade.refresh()
+    }
+  }, [type])
+
   // Data, colours and the shaded window.
   useEffect(() => {
     const chart = chartRef.current
     const candleSeries = candleSeriesRef.current
     const smaSeries = smaSeriesRef.current
+    const closeSeries = closeSeriesRef.current
     const shade = shadeRef.current
-    if (!chart || !candleSeries || !smaSeries || !shade) return
+    if (!chart || !candleSeries || !smaSeries || !closeSeries || !shade) return
 
     const palette = readPalette()
     const precision = priceDecimals(lastBar?.close ?? 1)
@@ -411,13 +464,25 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
     })
     smaSeries.applyOptions({ color: palette.sma, crosshairMarkerBorderColor: palette.sma, priceFormat })
 
+    const bars = rows.map((row): CandleRow => (row.candle ? toBar(row.candle) : { time: row.time as UTCTimestamp }))
+    barsRef.current = new Map(rows.flatMap((row) => (row.candle ? [[row.time, toBar(row.candle)] as const] : [])))
+
+    // The line takes the colour of the move across the range shown, as price apps do.
+    const firstClose = candles[0]?.close
+    const rising = firstClose === undefined || lastBar === undefined || lastBar.close >= firstClose
+    const lineColor = rising ? palette.up : palette.down
+    closeSeries.applyOptions({
+      lineColor,
+      topColor: withAlpha(lineColor, 0.26),
+      bottomColor: withAlpha(lineColor, 0),
+      crosshairMarkerBackgroundColor: lineColor,
+      crosshairMarkerBorderColor: palette.label,
+      priceLineColor: withAlpha(palette.crosshair, 0.6),
+      priceFormat,
+    })
+
     // Never leaves the SMA series empty; see setSeriesData for the charting-library bug it avoids.
-    setSeriesData(
-      candleSeries,
-      smaSeries,
-      rows.map((row): CandleRow => (row.candle ? toBar(row.candle) : { time: row.time as UTCTimestamp })),
-      smaLine,
-    )
+    setSeriesData(candleSeries, smaSeries, bars, smaLine, closeSeries)
 
     if (priceLineRef.current) smaSeries.removePriceLine(priceLineRef.current)
     priceLineRef.current = sma
@@ -437,20 +502,25 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
     // setData dropped the live-accumulated newest bar; put it back if it belongs to this series.
     const accumulated = latestRef.current
     if (accumulated?.key === liveKey && accumulated.bar && lastBar && accumulated.bar.time >= lastBar.time) {
-      safeUpdate(candleSeries, accumulated.bar)
+      safeUpdate(candleSeries, closeSeries, accumulated.bar)
+      barsRef.current.set(accumulated.bar.time, toChartBar(accumulated.bar))
     }
 
     if (fittedKeyRef.current !== fitKey && rows.length > 0) {
       chart.timeScale().fitContent()
       fittedKeyRef.current = fitKey
     }
-  }, [rows, smaLine, sma, range, period, lastBar, fitKey, themeVersion, liveKey])
+  }, [rows, candles, smaLine, sma, range, period, lastBar, fitKey, themeVersion, liveKey])
 
   // Live trades move the newest candle between refetches.
   useEffect(() => {
     latestRef.current = { key: liveKey, bar: latest }
     const series = candleSeriesRef.current
-    if (series && latest && latest !== lastBar) safeUpdate(series, latest)
+    const closeSeries = closeSeriesRef.current
+    if (series && closeSeries && latest && latest !== lastBar) {
+      safeUpdate(series, closeSeries, latest)
+      barsRef.current.set(latest.time, toChartBar(latest))
+    }
   }, [latest, lastBar, liveKey])
 
   const shown = hover?.bar ?? latest
@@ -471,10 +541,16 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
               <span className="text-ink-faint">
                 {formatUtc(new Date(shown.time * 1000).toISOString(), period)}
               </span>
-              <Ohlc label="O" value={shown.open} />
-              <Ohlc label="H" value={shown.high} />
-              <Ohlc label="L" value={shown.low} />
-              <Ohlc label="C" value={shown.close} />
+              {type === 'line' ? (
+                <Ohlc label="Close" value={shown.close} />
+              ) : (
+                <>
+                  <Ohlc label="O" value={shown.open} />
+                  <Ohlc label="H" value={shown.high} />
+                  <Ohlc label="L" value={shown.low} />
+                  <Ohlc label="C" value={shown.close} />
+                </>
+              )}
               {change !== undefined && (
                 <span className={cn(change > 0 && 'text-up', change < 0 && 'text-down')}>{formatPercent(change)}</span>
               )}
@@ -503,9 +579,11 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
 }
 
 /** `update` throws for a bar older than the series' newest one; a stale trade must not crash the page. */
-function safeUpdate(series: ISeriesApi<'Candlestick'>, bar: OhlcBar) {
+function safeUpdate(series: ISeriesApi<'Candlestick'>, closeSeries: ISeriesApi<'Area'>, bar: OhlcBar) {
   try {
-    series.update(toChartBar(bar))
+    const chartBar = toChartBar(bar)
+    series.update(chartBar)
+    closeSeries.update(toCloseRow(chartBar))
   } catch {
     // The next refetch redraws the series from the API anyway.
   }

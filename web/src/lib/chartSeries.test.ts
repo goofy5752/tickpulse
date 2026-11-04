@@ -1,4 +1,4 @@
-import { CandlestickSeries, createChart, LineSeries, type IChartApi, type UTCTimestamp } from 'lightweight-charts'
+import { AreaSeries, CandlestickSeries, createChart, LineSeries, type IChartApi, type UTCTimestamp } from 'lightweight-charts'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { TimeValue } from '@/lib/sma'
 import { setSeriesData, type CandleRow } from './chartSeries'
@@ -58,6 +58,36 @@ describe('setSeriesData', () => {
       expect(candles.dataByIndex(week), `week ${week}`).toMatchObject({ time: t(week) })
     }
     expect(sma.dataByIndex(19)).toMatchObject({ time: t(19), value: 119 })
+  })
+
+  it('SetSeriesData_LineView_HoldsEveryCloseOnTheSameTimeGrid', () => {
+    const candles = chart.addSeries(CandlestickSeries)
+    const sma = chart.addSeries(LineSeries)
+    const closes = chart.addSeries(AreaSeries, { visible: false })
+
+    // The same fast switches as above, with the line view's series alongside.
+    setSeriesData(candles, sma, full(), line([19, 20, 21]), closes)
+    setSeriesData(candles, sma, full(), [], closes)
+    setSeriesData(candles, sma, gappy(), line([25]), closes)
+    setSeriesData(candles, sma, full(), line([19, 20, 21]), closes)
+
+    for (let week = 0; week < WEEKS; week++) {
+      expect(candles.dataByIndex(week), `candle week ${week}`).toMatchObject({ time: t(week) })
+      expect(closes.dataByIndex(week), `close week ${week}`).toMatchObject({ time: t(week), value: 101 + week })
+    }
+  })
+
+  it('SetSeriesData_LineView_KeepsGapsAsGaps', () => {
+    const candles = chart.addSeries(CandlestickSeries)
+    const sma = chart.addSeries(LineSeries)
+    const closes = chart.addSeries(AreaSeries)
+
+    setSeriesData(candles, sma, gappy(), [], closes)
+
+    // Only traded weeks carry a close; an empty week draws no point and no line through it.
+    expect(closes.data().filter((point) => 'value' in point)).toHaveLength(14)
+    expect(closes.dataByIndex(13)).toBeNull()
+    expect(closes.dataByIndex(26)).toMatchObject({ time: t(26), value: 2 })
   })
 
   it('SetSeriesData_NoLine_LeavesTheSmaSeriesWithoutPoints', () => {

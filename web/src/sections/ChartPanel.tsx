@@ -1,8 +1,9 @@
-import { lazy, memo, Suspense, useId, useState, type ReactNode } from 'react'
+import { lazy, memo, Suspense, useCallback, useId, useState, type ReactNode } from 'react'
 import { ApiError } from '@/api/client'
 import { isValidSmaN, SMA_MAX_POINTS, useCandles, useSma } from '@/api/queries'
 import { PERIODS, type CandleResponse, type LivePrice, type Period } from '@/api/types'
 import { InfoTip } from '@/components/InfoTip'
+import type { ChartType } from '@/components/PriceChart'
 import { Skeleton } from '@/components/Skeleton'
 import { formatPrice, splitSymbol } from '@/lib/format'
 import { SECTION_IDS } from '@/lib/links'
@@ -20,6 +21,30 @@ const CANDLE_LIMITS: Record<Period, number> = { '1m': 360, '5m': 288, '30m': 336
 function candleLimit(p: Period, n: number): number {
   const forWindow = isValidSmaN(n) ? n + Math.ceil(n / 4) : 0
   return Math.min(SMA_MAX_POINTS, Math.max(CANDLE_LIMITS[p], forWindow))
+}
+
+/** The viewer's last choice of candles or line, remembered per browser. */
+export const CHART_TYPE_STORAGE_KEY = 'tickpulse.chartType'
+
+function storedChartType(): ChartType {
+  try {
+    return localStorage.getItem(CHART_TYPE_STORAGE_KEY) === 'line' ? 'line' : 'candles'
+  } catch {
+    return 'candles'
+  }
+}
+
+function useChartType() {
+  const [type, setType] = useState<ChartType>(storedChartType)
+  const choose = useCallback((next: ChartType) => {
+    setType(next)
+    try {
+      localStorage.setItem(CHART_TYPE_STORAGE_KEY, next)
+    } catch {
+      // Storage can be unavailable (private mode, blocked site data); the choice still applies.
+    }
+  }, [])
+  return [type, choose] as const
 }
 
 interface ChartPanelProps {
@@ -42,6 +67,7 @@ export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsCha
   const limit = candleLimit(params.p, params.n)
   const candles = useCandles(symbol, params.p, limit)
   const sma = useSma(symbol, params.n, params.p, startToIso(params.s))
+  const [chartType, setChartType] = useChartType()
 
   // Keep drawing the last complete answer (dimmed) while the next symbol or period loads, so the
   // chart stays mounted, and never mix one period's candles with another period's bucket width.
@@ -97,6 +123,7 @@ export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsCha
           <InfoTip topic="chartSection" />
         </div>
         <div className="flex items-center gap-2">
+          <ChartTypeToggle value={chartType} onChange={setChartType} />
           <PeriodPicker
             value={params.p}
             onChange={(p) => {
@@ -114,6 +141,7 @@ export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsCha
               symbol={view.symbol}
               candles={view.candles}
               period={view.period}
+              type={chartType}
               sma={smaForChart}
               live={stale ? undefined : live}
               fitKey={`${view.symbol}|${view.period}`}
@@ -153,7 +181,12 @@ export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsCha
         )}
       </div>
 
-      <Legend period={view?.period ?? params.p} n={smaForChart?.requestedDataPoints} note={windowNote(view, smaForChart)} />
+      <Legend
+        period={view?.period ?? params.p}
+        type={chartType}
+        n={smaForChart?.requestedDataPoints}
+        note={windowNote(view, smaForChart)}
+      />
     </section>
   )
 })
@@ -209,16 +242,87 @@ function PeriodPicker({ value, onChange }: { value: Period; onChange: (p: Period
   )
 }
 
-function Legend({ period, n, note }: { period: Period; n: number | undefined; note: string | null }) {
+const CHART_TYPES: readonly { value: ChartType; label: string; icon: ReactNode }[] = [
+  {
+    value: 'candles',
+    label: 'Candles',
+    icon: (
+      <svg viewBox="0 0 16 16" aria-hidden="true" className="size-4" fill="none">
+        <path d="M4.5 2.5v11M11.5 1.5v10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        <rect x="2.75" y="5" width="3.5" height="6" rx="0.8" fill="currentColor" />
+        <rect x="9.75" y="3.5" width="3.5" height="5" rx="0.8" stroke="currentColor" strokeWidth="1.2" />
+      </svg>
+    ),
+  },
+  {
+    value: 'line',
+    label: 'Line',
+    icon: (
+      <svg viewBox="0 0 16 16" aria-hidden="true" className="size-4" fill="none">
+        <path
+          d="M1.5 11.5 5 7.5l3 2.5 6.5-6.5"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    ),
+  },
+]
+
+/** Candles or a line of closes, as an icon switch next to the periods. */
+function ChartTypeToggle({ value, onChange }: { value: ChartType; onChange: (type: ChartType) => void }) {
+  const name = useId()
+  return (
+    <fieldset className="flex rounded-full border border-glass-border bg-glass p-0.5">
+      <legend className="sr-only">Chart type</legend>
+      {CHART_TYPES.map((option) => (
+        <label key={option.value} className="relative" title={option.label}>
+          <input
+            type="radio"
+            name={name}
+            value={option.value}
+            checked={value === option.value}
+            onChange={() => {
+              onChange(option.value)
+            }}
+            aria-label={option.label}
+            className="peer sr-only"
+          />
+          <span className="grid h-7 w-8 cursor-pointer place-items-center rounded-full text-ink-muted transition-colors duration-150 peer-checked:bg-glass-strong peer-checked:text-ink peer-checked:shadow-[inset_0_0_0_1px_var(--color-glass-border)] peer-focus-visible:outline-2 peer-focus-visible:outline-offset-1 peer-focus-visible:outline-sma hover:text-ink">
+            {option.icon}
+          </span>
+        </label>
+      ))}
+    </fieldset>
+  )
+}
+
+function Legend({
+  period,
+  type,
+  n,
+  note,
+}: {
+  period: Period
+  type: ChartType
+  n: number | undefined
+  note: string | null
+}) {
   return (
     <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-[0.75rem] text-ink-muted">
       <ul className="contents">
         <li className="flex items-center gap-2">
-          <span aria-hidden="true" className="flex items-end gap-[2px]">
-            <span className="h-2.5 w-[5px] rounded-[1px] bg-up" />
-            <span className="h-3.5 w-[5px] rounded-[1px] bg-down" />
-          </span>
-          {period} candles
+          {type === 'line' ? (
+            <span aria-hidden="true" className="h-0.5 w-4 rounded-full bg-ink-muted" />
+          ) : (
+            <span aria-hidden="true" className="flex items-end gap-[2px]">
+              <span className="h-2.5 w-[5px] rounded-[1px] bg-up" />
+              <span className="h-3.5 w-[5px] rounded-[1px] bg-down" />
+            </span>
+          )}
+          {type === 'line' ? `${period} closes` : `${period} candles`}
           <InfoTip topic="chartCandles" className="-ml-0.5" />
         </li>
         {n !== undefined && (
