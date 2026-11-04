@@ -399,7 +399,7 @@
       "id": 5,
       "type": "stat",
       "title": "Ingest lag p95",
-      "description": "Time from Binance trade time to the row being persisted, 95th percentile.",
+      "description": "Time from Binance trade time to the row being persisted (newest tick of each stored batch), 95th percentile.",
       "targets": [
         {
           "refId": "A",
@@ -976,7 +976,7 @@
       "id": 13,
       "type": "timeseries",
       "title": "Ingest lag",
-      "description": "Binance trade time → persisted, p50 / p95 / p99. The dashed line is the 5 s alert threshold.",
+      "description": "Binance trade time → persisted for the newest tick of each stored batch, p50 / p95 / p99. The dashed line is the 5 s alert threshold.",
       "targets": [
         {
           "refId": "A",
@@ -1148,7 +1148,7 @@
       "id": 14,
       "type": "heatmap",
       "title": "Ingest lag distribution",
-      "description": "How many ticks landed in each lag bucket over time.",
+      "description": "How many stored batches landed in each lag bucket over time (one sample per batch: the lag of its newest tick).",
       "targets": [
         {
           "refId": "A",

@@ -1,12 +1,16 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using System.Net;
 using System.Threading.Channels;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using TickPulse.Application.Abstractions;
+using TickPulse.Application.Ingestion;
 using TickPulse.Domain;
 using TickPulse.Infrastructure.Binance;
 using TickPulse.Infrastructure.Ingestion;
+using TickPulse.Infrastructure.Telemetry;
 
 namespace TickPulse.Integration.Tests.Ingestion;
 
@@ -79,7 +83,7 @@ public sealed class GapFillerTests
 
         emitted.ShouldBe(new GapFillResult(2000, 2000, Complete: false)); // the gap stays open after the cap
         source.Requests.ShouldBe([1L, 1001L]);
-        new GapFiller(source, _clock, NullLogger<GapFiller>.Instance).MaxPages.ShouldBe(GapFiller.DefaultMaxPages);
+        new GapFiller(source, _clock, NullLogger<GapFiller>.Instance, Metrics()).MaxPages.ShouldBe(GapFiller.DefaultMaxPages);
     }
 
     [Fact]
@@ -123,7 +127,10 @@ public sealed class GapFillerTests
     }
 
     private GapFiller Filler(IAggTradeSource source, int maxPages = GapFiller.DefaultMaxPages) =>
-        new(source, _clock, NullLogger<GapFiller>.Instance, maxPages);
+        new(source, _clock, NullLogger<GapFiller>.Instance, Metrics(), maxPages);
+
+    private static TickPulseMetrics Metrics() =>
+        new(new ServiceCollection().AddMetrics().BuildServiceProvider().GetRequiredService<IMeterFactory>(), new IngestionState(TimeProvider.System), new SymbolIdCache());
 
     private Tick[] Emitted()
     {

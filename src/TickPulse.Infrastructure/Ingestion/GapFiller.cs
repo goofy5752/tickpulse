@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using TickPulse.Application.Abstractions;
 using TickPulse.Domain;
 using TickPulse.Infrastructure.Binance;
+using TickPulse.Infrastructure.Telemetry;
 
 namespace TickPulse.Infrastructure.Ingestion;
 
@@ -16,7 +18,12 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// <see cref="MaxPages"/> pages were read. Only trades below the stream's first id are emitted. The result says
 /// whether the gap was closed.
 /// </remarks>
-public sealed partial class GapFiller(IAggTradeSource source, TimeProvider clock, ILogger<GapFiller> logger, int maxPages = GapFiller.DefaultMaxPages)
+public sealed partial class GapFiller(
+    IAggTradeSource source,
+    TimeProvider clock,
+    ILogger<GapFiller> logger,
+    TickPulseMetrics metrics,
+    int maxPages = GapFiller.DefaultMaxPages)
 {
     /// <summary>Trades per REST page (the Binance maximum).</summary>
     public const int PageSize = 1000;
@@ -55,42 +62,79 @@ public sealed partial class GapFiller(IAggTradeSource source, TimeProvider clock
             throw new ArgumentException($"'{symbol}' is not a valid symbol.", nameof(symbol));
         }
 
+        using var activity = TickPulseMetrics.ActivitySource.StartActivity(TickPulseMetrics.GapFillSpan);
+        activity?.SetTag("tickpulse.symbol", name.Value);
+        activity?.SetTag("tickpulse.gapfill.from_id", lastKnownId + 1);
+        try
+        {
+            var result = await FillPagesAsync(symbolId, name, lastKnownId, firstStreamId, output, ct).ConfigureAwait(false);
+            activity?.SetTag("tickpulse.gapfill.emitted", result.Emitted);
+            activity?.SetTag("tickpulse.gapfill.complete", result.Complete);
+            return result;
+        }
+        catch (Exception ex) when (activity is not null)
+        {
+            activity.SetStatus(ActivityStatusCode.Error, ex.GetType().Name);
+            throw;
+        }
+    }
+
+    private async Task<GapFillResult> FillPagesAsync(
+        int symbolId,
+        SymbolName name,
+        long lastKnownId,
+        Func<long?> firstStreamId,
+        ChannelWriter<Tick> output,
+        CancellationToken ct)
+    {
         var emitted = 0;
         long? lastEmitted = null;
         var next = lastKnownId + 1;
         for (var page = 1; page <= MaxPages; page++)
         {
-            var trades = await GetPageAsync(name, next, ct).ConfigureAwait(false);
-            if (trades is null)
+            var pageStart = emitted;
+            try
             {
-                return new GapFillResult(emitted, lastEmitted, Complete: false);
-            }
+                var trades = await GetPageAsync(name, next, ct).ConfigureAwait(false);
+                if (trades is null)
+                {
+                    return new GapFillResult(emitted, lastEmitted, Complete: false);
+                }
 
-            if (trades.Count == 0)
-            {
-                return Done(name, emitted, lastEmitted, page);
-            }
-
-            var boundary = firstStreamId();
-            var receivedAt = clock.GetUtcNow().UtcDateTime;
-            foreach (var (id, price, quantity, timeUtc) in trades)
-            {
-                if (id >= boundary)
+                if (trades.Count == 0)
                 {
                     return Done(name, emitted, lastEmitted, page);
                 }
 
-                await output.WriteAsync(new Tick(symbolId, id, price, quantity, timeUtc, receivedAt), ct).ConfigureAwait(false);
-                emitted++;
-                lastEmitted = id;
-            }
+                var boundary = firstStreamId();
+                var receivedAt = clock.GetUtcNow().UtcDateTime;
+                foreach (var (id, price, quantity, timeUtc) in trades)
+                {
+                    if (id >= boundary)
+                    {
+                        return Done(name, emitted, lastEmitted, page);
+                    }
 
-            if (trades.Count < PageSize)
+                    await output.WriteAsync(new Tick(symbolId, id, price, quantity, timeUtc, receivedAt), ct).ConfigureAwait(false);
+                    emitted++;
+                    lastEmitted = id;
+                }
+
+                if (trades.Count < PageSize)
+                {
+                    return Done(name, emitted, lastEmitted, page);
+                }
+
+                next = trades[^1].Id + 1;
+            }
+            finally
             {
-                return Done(name, emitted, lastEmitted, page);
+                // Once per page, including one cut short by a cancellation: those trades already reached the channel.
+                if (emitted > pageStart)
+                {
+                    metrics.GapFillTrades(name.Value, emitted - pageStart);
+                }
             }
-
-            next = trades[^1].Id + 1;
         }
 
         LogCapReached(name.Value, MaxPages, emitted);

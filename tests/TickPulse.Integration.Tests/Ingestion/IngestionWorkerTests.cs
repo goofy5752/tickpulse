@@ -11,6 +11,7 @@ using TickPulse.Domain;
 using TickPulse.Infrastructure;
 using TickPulse.Infrastructure.Ingestion;
 using TickPulse.Infrastructure.Persistence;
+using TickPulse.Infrastructure.Telemetry;
 using TickPulse.Integration.Tests.Fixtures;
 using static TickPulse.Integration.Tests.Ingestion.IngestionTestHost;
 
@@ -383,7 +384,8 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
             state,
             provider.GetRequiredService<IOptions<IngestionOptions>>(),
             TimeProvider.System,
-            provider.GetRequiredService<ILoggerFactory>());
+            provider.GetRequiredService<ILoggerFactory>(),
+            provider.GetRequiredService<TickPulseMetrics>());
         await worker.StartAsync(ct);
         try
         {

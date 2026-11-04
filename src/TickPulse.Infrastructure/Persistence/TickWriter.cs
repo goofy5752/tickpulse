@@ -82,13 +82,23 @@ public sealed class TickWriter(NpgsqlDataSource dataSource, TimeProvider clock) 
                 volume         = CASE WHEN k.source = 2 THEN excluded.volume ELSE k.volume + excluded.volume END,
                 quote_volume   = CASE WHEN k.source = 2 THEN excluded.quote_volume ELSE k.quote_volume + excluded.quote_volume END,
                 source         = 1)
-        SELECT count(*)::integer FROM ins
+        SELECT symbol_id, count(*)::integer FROM ins GROUP BY symbol_id
         """;
 
     /// <inheritdoc />
-    public async Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, CancellationToken ct)
+    public Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, CancellationToken ct) => WriteAsync(ticks, null, ct);
+
+    /// <inheritdoc />
+    public Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, IDictionary<int, int> insertedPerSymbol, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(insertedPerSymbol);
+        return WriteAsync(ticks, insertedPerSymbol, ct);
+    }
+
+    private async Task<int> WriteAsync(IReadOnlyList<Tick> ticks, IDictionary<int, int>? insertedPerSymbol, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(ticks);
+        insertedPerSymbol?.Clear();
         if (ticks.Count == 0)
         {
             return 0;
@@ -121,7 +131,8 @@ public sealed class TickWriter(NpgsqlDataSource dataSource, TimeProvider clock) 
             await importer.CompleteAsync(ct);
         }
 
-        int inserted;
+        // One row per symbol that got new ticks; none when everything was a replay.
+        var inserted = 0;
         await using (var upsert = new NpgsqlCommand(UpsertSql, connection, transaction))
         {
             upsert.Parameters.Add(new NpgsqlParameter<DateTime>
@@ -129,7 +140,16 @@ public sealed class TickWriter(NpgsqlDataSource dataSource, TimeProvider clock) 
                 TypedValue = clock.GetUtcNow().UtcDateTime - ReplayWindow,
                 NpgsqlDbType = NpgsqlDbType.TimestampTz,
             });
-            inserted = (int)(await upsert.ExecuteScalarAsync(ct))!;
+            await using var reader = await upsert.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var count = reader.GetInt32(1);
+                inserted += count;
+                if (insertedPerSymbol is not null)
+                {
+                    insertedPerSymbol[reader.GetInt32(0)] = count;
+                }
+            }
         }
 
         await transaction.CommitAsync(ct);
