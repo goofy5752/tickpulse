@@ -89,9 +89,9 @@ internal static class TickPulseCli
         ArgumentNullException.ThrowIfNull(environment);
 
         var parse = Build(environment).Parse(args);
+        var secrets = SecretValues(args, environment, parse);
         if (parse.Action is ParseErrorAction)
         {
-            var secrets = ApiKeyValues(args);
             ProblemView.RenderUsage(
                 environment.Error,
                 parse.Errors.Select(e => Redact(e.Message, secrets)).Distinct(StringComparer.Ordinal),
@@ -100,10 +100,11 @@ internal static class TickPulseCli
         }
 
         // The default may come from TICKPULSE_API_URL, which no parser validator sees: check the value in effect.
-        if (parse.Action is not ExamplesHelpAction
+        // --help and --version need no API, so a bad URL must not stop them.
+        if (!IsInformational(parse)
             && CliOptions.ValidateApiUrl(parse.GetValue<string>("--api-url"), out _) is { } urlError)
         {
-            ProblemView.RenderUsage(environment.Error, [urlError], CommandPath(parse.CommandResult));
+            ProblemView.RenderUsage(environment.Error, [Redact(urlError, secrets)], CommandPath(parse.CommandResult));
             return ExitCodes.Usage;
         }
 
@@ -116,30 +117,83 @@ internal static class TickPulseCli
         return await parse.InvokeAsync(invocation, ct).ConfigureAwait(false);
     }
 
+    private static bool IsInformational(ParseResult parse) =>
+        parse.Action is ExamplesHelpAction
+        || parse.RootCommandResult.Children.OfType<OptionResult>().Any(r => r.Option is VersionOption);
+
     /// <summary>
-    /// The values given to <c>--api-key</c>/<c>-k</c> (as the next token, or after <c>=</c> or <c>:</c>), so a usage
-    /// error never prints a key, even when the parser quotes a token back ("Cannot parse argument '…'").
+    /// Everything on the command line that may be an API key, so no usage error prints one, even when the parser
+    /// quotes a token back ("Unrecognized argument '…'", "Cannot parse argument '…'"). Deliberately broad:
+    /// <list type="bullet">
+    /// <item>the token after any option-like token (<c>-</c> or <c>/</c>) whose name contains <c>key</c> in any case,
+    /// such as <c>--api-key</c>, <c>--API-KEY</c> or <c>--apikey</c>, and the token after <c>-k</c>;</item>
+    /// <item>such a token with an attached value (<c>--api-key=…</c>, <c>-k:…</c>), and any <c>-k…</c> token, whole
+    /// and without its prefix;</item>
+    /// <item>as a final net, the key in effect: the parsed <c>--api-key</c> and <c>TICKPULSE_API_KEY</c>.</item>
+    /// </list>
+    /// Longest first, so a secret that contains another is replaced whole.
     /// </summary>
-    private static List<string> ApiKeyValues(string[] args)
+    private static List<string> SecretValues(string[] args, CliEnvironment environment, ParseResult parse)
     {
-        string[] prefixes = ["--api-key=", "--api-key:", "-k=", "-k:"];
-        var values = new List<string>();
+        var secrets = new List<string>();
         for (var i = 0; i < args.Length; i++)
         {
-            if (args[i] is "--api-key" or "-k")
+            var arg = args[i];
+            var isKeyOption = IsKeyOption(arg, out var attached);
+            if (arg == "-k" || (isKeyOption && attached is null))
             {
                 if (i + 1 < args.Length)
                 {
-                    values.Add(args[i + 1]);
+                    secrets.Add(args[i + 1]);
                 }
-
-                continue;
             }
-
-            values.AddRange(prefixes.Where(p => args[i].StartsWith(p, StringComparison.Ordinal)).Select(p => args[i][p.Length..]));
+            else if (arg.StartsWith("-k", StringComparison.Ordinal))
+            {
+                secrets.Add(arg);
+                secrets.Add(arg[2..].TrimStart('=', ':'));
+            }
+            else if (isKeyOption)
+            {
+                secrets.Add(arg);
+                secrets.Add(attached!);
+            }
         }
 
-        return [.. values.Where(v => v.Length > 0)];
+        secrets.Add(environment.GetEnvironmentVariable(CliEnvironment.ApiKeyVariable) ?? string.Empty);
+        try
+        {
+            secrets.Add(parse.GetValue<string>("--api-key") ?? string.Empty);
+        }
+        catch (InvalidOperationException)
+        {
+            // The option itself failed to parse; its tokens are covered above.
+        }
+
+        return [.. secrets.Where(s => s.Trim().Length > 0).Distinct(StringComparer.Ordinal).OrderByDescending(s => s.Length)];
+    }
+
+    /// <summary>
+    /// Whether <paramref name="arg"/> looks like an option (<c>-</c>, <c>--</c> or <c>/</c>) whose name contains
+    /// <c>key</c>; <paramref name="attached"/> is the value after <c>=</c> or <c>:</c>, if any.
+    /// </summary>
+    private static bool IsKeyOption(string arg, out string? attached)
+    {
+        attached = null;
+        if (arg.Length < 2 || (arg[0] != '-' && arg[0] != '/'))
+        {
+            return false;
+        }
+
+        var body = arg.TrimStart('-', '/');
+        var separator = body.IndexOfAny(['=', ':']);
+        var name = separator < 0 ? body : body[..separator];
+        if (!name.Contains("key", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        attached = separator < 0 ? null : body[(separator + 1)..];
+        return true;
     }
 
     private static string Redact(string message, List<string> secrets) =>

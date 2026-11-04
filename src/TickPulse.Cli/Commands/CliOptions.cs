@@ -195,11 +195,25 @@ internal static partial class CliOptions
         return null;
     }
 
-    /// <summary><c>https://user:pw@host</c> → <c>https://***@host</c>; works on text that is not a valid URL.</summary>
-    private static string RedactUserInfo(string value) => UserInfoPattern().Replace(value.Trim(), "${scheme}***@");
+    /// <summary>
+    /// <c>https://user:pw@host</c> → <c>https://***@host</c>. Everything between <c>://</c> (or the start, without a
+    /// scheme) and the <em>last</em> <c>@</c> is replaced, so a password containing <c>/</c>, <c>?</c>, <c>#</c> or
+    /// <c>@</c> is still hidden, and text that is not a valid URL is handled too. An <c>@</c> later in the path makes
+    /// this hide more than the user info, never less.
+    /// </summary>
+    private static string RedactUserInfo(string value)
+    {
+        var text = value.Trim();
+        var at = text.LastIndexOf('@');
+        if (at < 0)
+        {
+            return text;
+        }
 
-    [GeneratedRegex(@"(?<scheme>^[^:/?#\s]+://)[^/?#]*@", RegexOptions.CultureInvariant)]
-    private static partial Regex UserInfoPattern();
+        var scheme = text.IndexOf("://", StringComparison.Ordinal);
+        var start = scheme >= 0 && scheme < at ? scheme + 3 : 0;
+        return string.Concat(text.AsSpan(0, start), "***", text.AsSpan(at));
+    }
 
     private static DateTime? ParseStart(ArgumentResult result)
     {

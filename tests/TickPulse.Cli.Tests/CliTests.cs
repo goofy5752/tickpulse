@@ -465,6 +465,13 @@ public sealed class CliTests
     [InlineData("frobnicate", "--api-key=" + SecretKey)]
     [InlineData("sma", "BTCUSDT", "-n", SecretKey, "-p", "1d", "--api-key", SecretKey)]
     [InlineData("sma", "BTCUSDT", "-n", SecretKey, "-p", "1d", "-k:" + SecretKey)]
+    [InlineData("avg", "BTCUSDT", "-k" + SecretKey, "bogus")]
+    [InlineData("avg", "BTCUSDT", "bogus", "-k" + SecretKey)]
+    [InlineData("avg", "BTCUSDT", "--API-KEY", SecretKey)]
+    [InlineData("avg", "BTCUSDT", "--apikey", SecretKey)]
+    [InlineData("avg", "BTCUSDT", "--key", SecretKey)]
+    [InlineData("avg", "BTCUSDT", "/ApiKey", SecretKey)]
+    [InlineData("symbols", "add", "--Api_Key=" + SecretKey)]
     public async Task UsageError_NeverEchoesApiKey(params string[] args)
     {
         using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, Json, AverageJson));
@@ -547,6 +554,9 @@ public sealed class CliTests
     [InlineData("https://api.test/?region=eu", "query")]
     [InlineData("https://api.test/#top", "fragment")]
     [InlineData("ftp://api.test", "absolute")]
+    [InlineData("https://user:hunter2/x?y#z@api.test", "")]
+    [InlineData("https://us@er:hunter2@api.test", "")]
+    [InlineData("user:hunter2@api.test", "")]
     public async Task ApiUrl_Rejected_WithoutEchoingCredentials(string url, string reason)
     {
         using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, Json, AverageJson));
@@ -587,4 +597,32 @@ public sealed class CliTests
     }
 
     private static int ExitCodesFor(HttpStatusCode status) => (int)status >= 500 ? 2 : 1;
+
+    [Fact]
+    public async Task UsageError_EnvironmentKeyInText_IsRedacted()
+    {
+        using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, Json, AverageJson));
+        cli.Variables[CliEnvironment.ApiKeyVariable] = "key-of-env-42";
+
+        // The key pasted where the symbol belongs is quoted back by the symbol parser.
+        (await cli.RunAsync("symbols", "add", "key-of-env-42")).ShouldBe(64);
+
+        cli.Error.Output.ShouldContain("***");
+        cli.Error.Output.ShouldNotContain("key-of-env-42");
+    }
+
+    [Theory]
+    [InlineData("--version")]
+    [InlineData("--help")]
+    [InlineData("sma", "--help")]
+    public async Task InformationalOptions_IgnoreInvalidEnvironmentUrl(params string[] args)
+    {
+        using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, Json, AverageJson));
+        cli.Variables[CliEnvironment.ApiUrlVariable] = "not a url";
+
+        (await cli.RunAsync(args)).ShouldBe(0);
+
+        cli.Help.ToString().ShouldNotBeEmpty();
+        cli.Error.Output.ShouldBeEmpty();
+    }
 }
