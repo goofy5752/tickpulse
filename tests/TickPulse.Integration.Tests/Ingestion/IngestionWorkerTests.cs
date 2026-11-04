@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -161,7 +163,7 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         await using var host = await StartAsync(db, _server);
         await WaitForSeededSubscriptionAsync(host);
         var ct = TestContext.Current.CancellationToken;
-        var t0 = Now.AddSeconds(-30);
+        var t0 = Now.AddMinutes(-5); // before any lead-in window, so only the reconnect gap-fill fetches them
 
         for (var i = 1; i <= 5; i++)
         {
@@ -181,7 +183,7 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
 
         // Hold the gap-fill request until the new connection has streamed trades 11..1015, so that its first page
         // (6..1005, a full page) can only stop at the stream boundary, trade 11.
-        await _server.WaitUntilAsync(s => s.ReceivedRequests.Any(r => r.StartsWith("/api/v3/aggTrades", StringComparison.Ordinal)), WaitTimeout, ct);
+        await _server.WaitUntilAsync(s => s.ReceivedRequests.Any(r => r.Contains("&fromId=", StringComparison.Ordinal)), WaitTimeout, ct);
         for (var i = 11; i <= 1015; i++)
         {
             (await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i))).ShouldBe(1);
@@ -194,8 +196,11 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 1015).Select(i => (long)i));
         (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(1015);
         await WaitForAsync(() => host.Logs.Entries.Any(e => e.EventName == "LogRecovered" && e.Message.Contains("5 BTCUSDT", StringComparison.Ordinal)), "gap-fill done");
-        _server.ReceivedRequests.Where(r => r.StartsWith("/api/v3/aggTrades", StringComparison.Ordinal))
+        _server.ReceivedRequests.Where(r => r.Contains("&fromId=", StringComparison.Ordinal))
             .ShouldBe(["/api/v3/aggTrades?symbol=BTCUSDT&fromId=6&limit=1000"]); // one page; the other symbols had no gap
+
+        // The lead-in ran once per symbol, when the first connection subscribed; a reconnect does not repeat it.
+        _server.ReceivedRequests.Count(r => r.Contains("&startTime=", StringComparison.Ordinal)).ShouldBe(Seeded.Length);
         host.State.LastReconnectUtc.ShouldNotBeNull();
         _server.AcceptedConnections.ShouldBe(2);
     }
@@ -252,11 +257,92 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task FirstStreamedMinute_IsCompletedFromRest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        _server.PauseAggTrades();
+        await using var host = await StartAsync(db, _server);
+        await WaitForSeededSubscriptionAsync(host);
+
+        // Nothing is stored yet, so each symbol fills from the start of the minute its stream started in.
+        await _server.WaitUntilAsync(s => s.ReceivedRequests.Any(r => r.Contains("&startTime=", StringComparison.Ordinal)), WaitTimeout, ct);
+        var startTime = long.Parse(
+            Regex.Match(_server.ReceivedRequests.First(r => r.Contains("&startTime=", StringComparison.Ordinal)), @"startTime=(\d+)").Groups[1].Value,
+            CultureInfo.InvariantCulture);
+        var minute = DateTimeOffset.FromUnixTimeMilliseconds(startTime).UtcDateTime;
+        minute.ShouldBe(Period.OneMinute.AlignDown(minute));
+        minute.ShouldBeGreaterThan(Now.AddMinutes(-2));
+
+        // Trades 1..5 of that minute traded before the subscription took effect: only REST has them.
+        for (var i = 1; i <= 5; i++)
+        {
+            _server.AddTrade("BTCUSDT", i, 100m + i, minute.AddMilliseconds(i), quantity: 2m);
+        }
+
+        _server.ResumeAggTrades();
+        for (var i = 6; i <= 10; i++)
+        {
+            await _server.PushTradeAsync("BTCUSDT", i, 100m + i, minute.AddMilliseconds(100 + i), quantity: 2m);
+        }
+
+        await WaitForTradeCountAsync(db, "BTCUSDT", 10);
+        (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 10).Select(i => (long)i));
+
+        // The minute's candle is the whole minute, as the exchange has it.
+        await using var connection = new NpgsqlConnection(db.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new NpgsqlCommand(
+            """
+            SELECT c.open, c.high, c.low, c.close, c.first_trade_id, c.last_trade_id, c.tick_count, c.price_sum, c.volume, c.source
+              FROM candles_1m c JOIN symbols s ON s.id = c.symbol_id
+             WHERE s.name = 'BTCUSDT' AND c.bucket_start = $1
+            """,
+            connection);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = minute, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        (await reader.ReadAsync(ct)).ShouldBeTrue();
+        (reader.GetDecimal(0), reader.GetDecimal(1), reader.GetDecimal(2), reader.GetDecimal(3)).ShouldBe((101m, 110m, 101m, 110m));
+        (reader.GetInt64(4), reader.GetInt64(5), reader.GetInt64(6)).ShouldBe((1L, 10L, 10L));
+        reader.GetDecimal(7).ShouldBe(Enumerable.Range(101, 10).Sum(p => (decimal)p));
+        reader.GetDecimal(8).ShouldBe(20m);
+        reader.GetInt16(9).ShouldBe((short)1);
+    }
+
+    [Fact]
+    public async Task ReactivatedSymbol_FirstStreamedMinuteIsCompletedAgain()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var host = await StartAsync(db, _server);
+        await WaitForSeededSubscriptionAsync(host);
+        await _server.WaitUntilAsync(s => s.ReceivedRequests.Count(r => r.Contains("&startTime=", StringComparison.Ordinal)) == Seeded.Length, WaitTimeout, ct);
+        var eth = Symbol("ETHUSDT");
+        (await host.Symbols.DeactivateAsync(eth, ct)).ShouldBeTrue();
+        host.Signal.Notify();
+        await _server.WaitUntilAsync(s => !s.SubscribedStreams.Contains(Stream("ETHUSDT")), WaitTimeout, ct);
+
+        _server.PauseAggTrades();
+        (await host.Symbols.AddOrReactivateAsync(eth, 20, ct)).Status.ShouldBe(SymbolAddStatus.Reactivated);
+        host.Signal.Notify();
+        static bool IsEthLeadIn(string r) => r.Contains("symbol=ETHUSDT&startTime=", StringComparison.Ordinal);
+        await _server.WaitUntilAsync(s => s.ReceivedRequests.Count(IsEthLeadIn) == 2, WaitTimeout, ct);
+        var minute = DateTimeOffset.FromUnixTimeMilliseconds(long.Parse(
+            Regex.Match(_server.ReceivedRequests.Last(IsEthLeadIn), @"startTime=(\d+)").Groups[1].Value,
+            CultureInfo.InvariantCulture)).UtcDateTime;
+
+        _server.AddTrade("ETHUSDT", 1, 3000m, minute.AddMilliseconds(1)); // before the new subscription
+        _server.ResumeAggTrades();
+        await _server.PushTradeAsync("ETHUSDT", 2, 3001m, minute.AddMilliseconds(2));
+
+        await WaitForTradeCountAsync(db, "ETHUSDT", 2);
+        (await TradeIdsAsync(db, "ETHUSDT")).ShouldBe([1L, 2L]);
+    }
+
+    [Fact]
     public async Task Rotation_OverlapsWithoutLossOrDuplicates()
     {
         await using var host = await StartAsync(db, _server, new Dictionary<string, string?> { ["Ingestion:RotationInterval"] = "00:00:02" });
         await WaitForSeededSubscriptionAsync(host);
-        var t0 = Now.AddMinutes(-1);
+        var t0 = Now.AddMinutes(-10); // before the lead-in window
 
         // A concurrent pusher streams trades as fast as the server sends them, across at least two rotations, so trades
         // really arrive while both connections are subscribed.
@@ -287,7 +373,8 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(LongRange(1, count)); // none lost, none stored twice
         (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(count);
         _server.PeakConnections.ShouldBe(2);                  // make-before-break: the old one closes after the new one is up
-        _server.ReceivedRequests.ShouldBeEmpty();               // a clean rotation needs no gap-fill
+        _server.ReceivedRequests.Count.ShouldBe(Seeded.Length); // a clean rotation needs no gap-fill: only the
+        _server.ReceivedRequests.ShouldAllBe(r => r.Contains("&startTime=", StringComparison.Ordinal)); // first lead-ins
         host.State.LastReconnectUtc.ShouldBeNull();             // and is not a reconnect
     }
 

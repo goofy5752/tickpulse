@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using TickPulse.Application.Abstractions;
@@ -141,24 +142,56 @@ public sealed partial class GapFiller(
         return new GapFillResult(emitted, lastEmitted, Complete: false);
     }
 
+    /// <summary>
+    /// The id of the first trade of <paramref name="symbol"/> at or after <paramref name="fromUtc"/> (and within the
+    /// hour after it), from REST <c>aggTrades?startTime</c>. <see langword="null"/> when there is none or the request
+    /// failed. A symbol that starts streaming fills from there to its first streamed trade, so the minute it started in
+    /// is complete.
+    /// </summary>
+    public async Task<long?> FirstTradeIdFromAsync(string symbol, DateTime fromUtc, CancellationToken ct)
+    {
+        if (!SymbolName.TryCreate(symbol, out var name))
+        {
+            throw new ArgumentException($"'{symbol}' is not a valid symbol.", nameof(symbol));
+        }
+
+        var trades = await WithRetriesAsync(
+            name,
+            "time " + fromUtc.ToString("O", CultureInfo.InvariantCulture),
+            token => source.GetAggTradesFromTimeAsync(name, fromUtc, 1, token),
+            ct).ConfigureAwait(false);
+        return trades is [var first, ..] ? first.Id : null;
+    }
+
     // Null when the symbol has to be given up: a permanent error, a ban, or transient errors that persisted.
-    private async Task<IReadOnlyList<(long Id, decimal Price, decimal Qty, DateTime TimeUtc)>?> GetPageAsync(
-        SymbolName name, long fromId, CancellationToken ct)
+    private Task<IReadOnlyList<(long Id, decimal Price, decimal Qty, DateTime TimeUtc)>?> GetPageAsync(
+        SymbolName name, long fromId, CancellationToken ct) =>
+        WithRetriesAsync(
+            name,
+            "id " + fromId.ToString(CultureInfo.InvariantCulture),
+            token => source.GetAggTradesFromAsync(name, fromId, PageSize, token),
+            ct);
+
+    private async Task<IReadOnlyList<(long Id, decimal Price, decimal Qty, DateTime TimeUtc)>?> WithRetriesAsync(
+        SymbolName name,
+        string from,
+        Func<CancellationToken, Task<IReadOnlyList<(long Id, decimal Price, decimal Qty, DateTime TimeUtc)>>> request,
+        CancellationToken ct)
     {
         for (var attempt = 0; ; attempt++)
         {
             try
             {
-                return await source.GetAggTradesFromAsync(name, fromId, PageSize, ct).ConfigureAwait(false);
+                return await request(ct).ConfigureAwait(false);
             }
             catch (BinanceApiException ex) when (ex.IsTransient && attempt < MaxTransientRetries)
             {
-                LogRetrying(ex, name.Value, fromId);
+                LogRetrying(ex, name.Value, from);
                 await Task.Delay(TransientRetryDelay, clock, ct).ConfigureAwait(false);
             }
             catch (BinanceApiException ex)
             {
-                LogFailed(ex, name.Value, fromId);
+                LogFailed(ex, name.Value, from);
                 return null;
             }
             catch (BinanceBannedException ex)
@@ -185,11 +218,11 @@ public sealed partial class GapFiller(
     [LoggerMessage(Level = LogLevel.Warning, Message = "Gap-fill for {Symbol} stopped at the {Pages}-page cap after {Count} trade(s)")]
     private partial void LogCapReached(string symbol, int pages, int count);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Gap-fill for {Symbol} from id {FromId} failed transiently; retrying")]
-    private partial void LogRetrying(Exception exception, string symbol, long fromId);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Gap-fill for {Symbol} from {From} failed transiently; retrying")]
+    private partial void LogRetrying(Exception exception, string symbol, string from);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Gap-fill for {Symbol} from id {FromId} failed; the gap stays open")]
-    private partial void LogFailed(Exception exception, string symbol, long fromId);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Gap-fill for {Symbol} from {From} failed; the gap stays open")]
+    private partial void LogFailed(Exception exception, string symbol, string from);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Gap-fill for {Symbol} skipped: Binance banned this IP until {BannedUntilUtc:o}")]
     private partial void LogBanned(Exception exception, string symbol, DateTime bannedUntilUtc);

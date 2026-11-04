@@ -19,9 +19,14 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// and never sends anything. Gap-fills and retirements run in the background; the supervisor tracks every background
 /// task so <see cref="StopAsync"/> can wait for them.</para>
 /// <para><b>Gap-fill.</b> A connection that ends unexpectedly opens a gap for every known symbol
-/// (<see cref="GapFillWatermarks"/>). Each symbol is gap-filled on the next connection as soon as its SUBSCRIBE is
-/// acknowledged there, which may be a later reconcile pass than the first one, and the gap closes only when the fill
-/// completed.</para>
+/// (<see cref="GapFillWatermarks"/>), and so does the start of a session for every symbol with stored trades (the
+/// worker seeds the watermarks from the database). Each symbol is gap-filled on the next connection as soon as its
+/// SUBSCRIBE is acknowledged there, which may be a later reconcile pass than the first one, and the gap closes only
+/// when the fill completed.</para>
+/// <para><b>Lead-in.</b> A symbol that starts streaming in this session (first subscription, an added or reactivated
+/// symbol) with no watermark at all is filled from the start of the minute its SUBSCRIBE was acknowledged in, up to its
+/// first streamed trade. Without it that minute's candle would only hold the trades after the subscription, and the
+/// backfill (which stops before the first streamed minute) never completes it.</para>
 /// <para><b>Shutdown</b> is split so the worker can order it: cancel the token passed to <see cref="RunAsync"/> (no
 /// more commands, pumps and gap-fills stop writing), <see cref="StopAsync"/> (wait for them), then the worker
 /// completes and flushes the channel, then <see cref="DisposeAsync"/> closes the connections.</para>
@@ -55,6 +60,12 @@ internal sealed partial class StreamSupervisor(
     /// </summary>
     public static readonly TimeSpan RotationRetryDelay = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// The lead-in starts at the minute of <c>ack time − LeadInClockSkew</c>, so a local clock slightly ahead of the
+    /// exchange's trade times cannot start it after the first streamed trade's minute.
+    /// </summary>
+    public static readonly TimeSpan LeadInClockSkew = TimeSpan.FromSeconds(5);
+
     // Log a trade for a symbol without an id once, then once per this many.
     private const int UnknownSymbolLogEvery = 10_000;
 
@@ -62,6 +73,9 @@ internal sealed partial class StreamSupervisor(
     private readonly HashSet<StreamLink> _links = [];
     private readonly List<Task> _background = [];
     private readonly List<Task> _retiring = [];
+
+    // Symbols that started streaming in this session (control loop only): only their first ack gets a lead-in.
+    private readonly HashSet<string> _started = new(StringComparer.OrdinalIgnoreCase);
     private Task _signalWait = Task.CompletedTask;
 
     private DateTime UtcNow => clock.GetUtcNow().UtcDateTime;
@@ -395,11 +409,16 @@ internal sealed partial class StreamSupervisor(
     private void StartGapFills(StreamLink link, bool pendingOnly, CancellationToken ct)
     {
         var toFill = new List<string>();
+        var leadIn = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var symbol in link.Subscribed)
         {
             if (link.GapFillHandled.Add(symbol))
             {
                 toFill.Add(symbol);
+                if (_started.Add(symbol))
+                {
+                    leadIn.Add(symbol);
+                }
             }
         }
 
@@ -414,10 +433,13 @@ internal sealed partial class StreamSupervisor(
             retiring = [.. _retiring];
         }
 
-        Track(GapFillAsync(link, retiring, [.. toFill], pendingOnly, ct));
+        // Taken now, right after the acks: the fills below may run long after.
+        var leadInFrom = Period.OneMinute.AlignDown(UtcNow - LeadInClockSkew);
+        Track(GapFillAsync(link, retiring, [.. toFill], leadIn, leadInFrom, pendingOnly, ct));
     }
 
-    private async Task GapFillAsync(StreamLink link, Task[] retiring, string[] toFill, bool pendingOnly, CancellationToken ct)
+    private async Task GapFillAsync(
+        StreamLink link, Task[] retiring, string[] toFill, HashSet<string> leadIn, DateTime leadInFrom, bool pendingOnly, CancellationToken ct)
     {
         // The retired connections' pumps must have finished, so their last ids (and the gaps they opened) are final.
         await Task.WhenAll(retiring).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
@@ -428,13 +450,25 @@ internal sealed partial class StreamSupervisor(
                 return;
             }
 
-            if (!watermarks.TryGetStart(symbol, pendingOnly, out var lastId, out var version) || !symbols.TryGetId(symbol, out var symbolId))
+            if (!symbols.TryGetId(symbol, out var symbolId))
             {
                 continue;
             }
 
             try
             {
+                // Nothing known about a symbol that starts streaming: fill from the start of its first minute.
+                if (leadIn.Contains(symbol) && !watermarks.Contains(symbol)
+                    && await gapFiller.FirstTradeIdFromAsync(symbol, leadInFrom, ct).ConfigureAwait(false) is { } firstId)
+                {
+                    watermarks.Lower(symbol, firstId);
+                }
+
+                if (!watermarks.TryGetStart(symbol, pendingOnly, out var lastId, out var version))
+                {
+                    continue;
+                }
+
                 var result = await gapFiller.FillAsync(symbolId, symbol, lastId, () => link.FirstId(symbol), output, ct).ConfigureAwait(false);
                 if (result.Complete)
                 {
@@ -490,6 +524,7 @@ internal sealed partial class StreamSupervisor(
         // A symbol that is re-added later starts fresh instead of gap-filling from where it was dropped.
         foreach (var symbol in unsubscribed)
         {
+            _started.Remove(symbol);
             link.Forget(symbol);
             watermarks.Forget(symbol);
             state.ForgetSymbol(symbol);
