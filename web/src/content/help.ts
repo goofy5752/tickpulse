@@ -215,75 +215,14 @@ export const HELP = {
 
   // ---- API playground --------------------------------------------------------------------------
 
-  playSection: {
-    title: 'API playground',
-    summary: 'Sends real requests to the public API and shows each answer exactly as it arrives.',
-    details: [
-      'Pick an endpoint, fill in its parameters, choose JSON or XML, then send. Values go out as typed, so an invalid one gets the API\'s own validation answer.',
-      'The public API allows 300 requests a minute per client by default; beyond that it answers 429.',
-    ],
-  },
 
-  playAccept: {
-    title: 'Accept header',
-    summary: 'Content negotiation: the same request answered as JSON or as XML.',
-    details: [
-      'After the first send, switching re-sends the request at once so you can compare. Errors follow the same choice, as application/problem+json or application/problem+xml.',
-    ],
-    example: 'JSON: {"symbol":"BTCUSDT","averagePrice":78292.65925926,…}\nXML:  <averagePrice xmlns="https://tickpulse.dev/schema/v1"><symbol>BTCUSDT</symbol>…',
-  },
 
-  playEndpoint: {
-    title: 'Endpoint',
-    summary: 'Which public route the request goes to.',
-    items: [
-      { term: '24h average', text: '/api/{symbol}/24hAvgPrice: mean of the trades collected in the last 24 h, with coverage.' },
-      { term: 'Moving average', text: '/api/{symbol}/SimpleMovingAverage?n=&p=&s=: SMA of n bucket closes.' },
-      { term: 'Candles', text: '/api/{symbol}/candles?p=&limit=: OHLCV candles, oldest first, the last one still open.' },
-      { term: 'Symbols', text: '/api/symbols: every symbol with its latest price, 24h change and backfill state.' },
-    ],
-  },
 
-  playSymbol: {
-    title: 'Symbol',
-    summary: 'The pair to ask about. Suggestions list the monitored symbols.',
-    details: ['Case does not matter: the API upper-cases it. A pair that was never monitored gets 404 unknown-symbol.'],
-    example: 'btcusdt → /api/BTCUSDT/24hAvgPrice',
-  },
 
-  playN: {
-    title: 'n',
-    summary: 'Number of buckets to average, required, from 1 to 1,000.',
-    example: 'n=0 → 400 validation\n"n must be between 1 and 1000."',
-  },
 
-  playP: {
-    title: 'p',
-    summary: 'The bucket width, required: 1w, 1d, 30m, 5m or 1m.',
-    details: ['Weeks start Monday 00:00 UTC, days at 00:00 UTC. Any other value gets 400 validation.'],
-  },
 
-  playS: {
-    title: 's',
-    summary: 'Optional window start as an ISO-8601 time; UTC when it has no offset.',
-    details: [
-      'The window starts at the first bucket at or after s and runs forward n buckets, clipped at the last complete one. Leave it empty for the last n buckets ending now. A time in the future gets 400.',
-    ],
-    example: '2026-10-01T00:00:00Z\n2026-10-01T02:00:00+02:00 (the same instant)\n2026-10-01 (midnight UTC)',
-  },
 
-  playCandlesP: {
-    title: 'p',
-    summary: 'The candle width: 1w, 1d, 30m, 5m or 1m.',
-    details: ['Candles are UTC-aligned; weeks start on Monday.'],
-  },
 
-  playLimit: {
-    title: 'limit',
-    summary: 'How many of the latest candles to return, from 1 to 1,000.',
-    details: ['The API returns 300 when the parameter is left out; the playground always sends it.'],
-    example: 'p=1d&limit=2 → yesterday\'s candle and today\'s open one',
-  },
 
 
 
@@ -300,11 +239,6 @@ export const HELP = {
 
 
 
-  playContentType: {
-    title: 'Content-Type',
-    summary: 'The media type the API chose for the answer.',
-    example: 'application/json; charset=utf-8\napplication/xml; charset=utf-8\napplication/problem+json (errors)',
-  },
 
 
   // ---- Admin -----------------------------------------------------------------------------------
