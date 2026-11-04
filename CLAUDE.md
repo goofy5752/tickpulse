@@ -75,7 +75,7 @@ npm --prefix web run dev | build | lint | typecheck
   `X-Api-Key`), `upstream-unavailable` (503: Binance cannot confirm a symbol being added right now),
   `method-not-allowed` (405, with `Allow`), `unsupported-media-type` (415: a request body that is
   neither JSON nor XML). `HEAD` works wherever `GET` does.
-- **Config keys** (env uses `__`): `ConnectionStrings:TickPulse`, `Database:*`, `Admin:*`,
+- **Config keys** (env uses `__`): `ConnectionStrings:TickPulse`, `Database:*` (`MaxPoolSize` 20; `AllowGssEncryption` false, needs a krb5 image), `Admin:*`,
   `Binance:*`, `Ingestion:*`, `Backfill:*`, `RateLimiting:*`, `MarketHub:*`, `SystemStats:*`,
   `ForwardedHeaders:*`, `Otel:*`, `Serilog:*`. Defaults: the README configuration table, which lists
   every key; keep it in step when adding one. `ForwardedHeaders:KnownNetworks` takes CIDRs (the

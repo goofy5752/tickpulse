@@ -117,6 +117,8 @@ becomes `__` (`Admin:ApiKey` → `Admin__ApiKey`). Invalid values fail at startu
 |---|---|---|
 | `ConnectionStrings:TickPulse` | *(required)* | Npgsql connection string. Startup fails without it. |
 | `Database:RunMigrationsOnStartup` | `true` | Apply EF Core migrations and the seed before the workers start. |
+| `Database:MaxPoolSize` | `20` | Size of the shared Npgsql pool, unless the connection string sets `Maximum Pool Size`. The tick writer and the leader lock add 5 connections; the total is checked against `max_connections` at startup. |
+| `Database:AllowGssEncryption` | `false` | TickPulse forces GSS encryption off on every connection, because the native Kerberos probe crashed the API under load. `true` keeps an explicit mode from the connection string and needs a custom image with krb5 installed. |
 | **Admin** | | |
 | `Admin:ApiKey` | *(empty)* | Key for `X-Api-Key`. Empty or unset disables the admin endpoints (403). Surrounding whitespace fails startup; fewer than 32 characters logs a warning. |
 | `Admin:MaxActiveSymbols` | `20` | Most symbols active at once, 1–1000. |

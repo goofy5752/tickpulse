@@ -43,7 +43,7 @@ The full list is in [docs/adr/](docs/adr/README.md). The ones that shape the cod
 | [Own candle table](docs/adr/0012-own-candle-table-not-a-continuous-aggregate.md), [rollups by triggers](docs/adr/0015-candle-rollups-maintained-by-triggers.md) | Backfill can write candles; no query depends on a TimescaleDB TSL feature |
 | [MVC for XML](docs/adr/0013-mvc-controllers-for-xml-negotiation.md), [naming parity](docs/adr/0021-xml-element-names-match-json-property-names.md) | Every success and every error is negotiated, with one vocabulary |
 | [Workers never crash the host](docs/adr/0020-hosted-workers-never-crash-the-host.md) | A bug in a background worker cannot take the public API down |
-| [Watermarks seeded from the DB](docs/adr/0022-gap-fill-watermarks-seeded-from-the-database.md) | Restarts, redeploys and handovers recover the trades they missed (in review as of 2026-11-04) |
+| [Watermarks seeded from the DB](docs/adr/0022-gap-fill-watermarks-seeded-from-the-database.md) | Restarts, redeploys and handovers recover the trades they missed |
 
 ## How the work was done with AI agents
 
@@ -140,17 +140,17 @@ evidence that could be re-run.
 
 | | |
 |---|---|
-Figures marked *as of 2026-11-04* are still moving while the last fixes are in review.
+Figures marked *as of 2026-11-04* are the state when the last fix PRs had merged.
 
 | | |
 |---|---|
-| .NET tests on `main` | **961**, all passing, as of 2026-11-04: Domain 56, Application 133, Cli 100, Architecture 13, Integration 659 |
+| .NET tests on `main` | **1,088**, all passing, as of 2026-11-04: Domain 56, Application 133, Cli 100, Architecture 13, Integration 786 |
 | Web tests | **148** in 18 files (Vitest), all passing, as of 2026-11-04 |
 | Line coverage | **93.8 %** overall, as of 2026-11-04; Domain 100 %, Application 98.2 %, Api 95.1 %, Infrastructure 93.3 %, Cli 91.6 % (gates: Domain ≥ 95 %, overall ≥ 80 %) |
-| Pull requests | **16 merged** (#1–#16) after the bootstrap commit, and two fix PRs in review, as of 2026-11-04 |
-| Reviews | **27** first reviews (21 for plan items, 6 for end-to-end fix PRs) and **33** completed fix rounds, each followed by a scoped re-review, as of 2026-11-04; one more fix round in progress |
+| Pull requests | **20 merged** (#1–#20) after the bootstrap commit, plus the final documentation PR, as of 2026-11-04 |
+| Reviews | **27** first reviews (21 for plan items, 6 for end-to-end fix PRs) and **33** completed fix rounds, each followed by a scoped re-review, as of 2026-11-04 |
 | Defects caught in review | **41 Important** findings in the plan-item reviews and re-reviews; **3 Critical and 7 Important** in the reviews of the fix PRs, as of 2026-11-04 |
-| End-to-end run | **55 checks**, 48 passed and 7 failed on the first run. **19 findings** (F1–F19): 1 Critical, 6 Important, 12 Minor. F18 and F19 showed up only under the heavier load that followed. |
+| End-to-end run | **55 checks**, 48 passed and 7 failed on the first run. **19 findings** (F1–F19): 1 Critical, 6 Important, 12 Minor, all fixed except the limitation tracked as [issue #19](https://github.com/goofy5752/tickpulse/issues/19). F18 and F19 showed up only under the heavier load that followed. |
 | Latency after fixes | p95 12.7 ms for `24hAvgPrice` at 6.4k req/s; 12–21 ms for 1d/1w SMA and candles (was up to 1,368 ms) |
 | Ingest lag | p95 803 ms, trade time to persisted, target < 1 s |
 | Dashboard | first contentful paint 48 ms on the local stack |
@@ -206,11 +206,11 @@ database's `max_connections` ([F19](docs/ai/defects-log.md#f19)).
 Two lessons from this:
 
 - **Separate reviewers find real defects.** Every plan item's review led to at least one fix round, and
-  several fix rounds introduced a new problem that the re-review caught. The restart gap-fill fix
-  ([F2](docs/ai/defects-log.md#f2)) is the clearest case. As of 2026-11-04 it has had a first review and
-  three re-reviews, and each re-review found a new Critical loss path in the fix itself. After the third,
-  the loop was escalated: a fresh implementer on a more capable model took over for the fourth round,
-  which is still in progress.
+  ([F2](docs/ai/defects-log.md#f2)) is the clearest case. It took 5 review rounds, and most of them found a
+  new loss path in the fix itself. After the third, the loop was escalated: a fresh implementer on a more
+  capable model wrote down the model first (what may move a watermark, and why), and replaced the
+  accumulated flags with one rule. The remaining hole is tracked as
+  [issue #19](https://github.com/goofy5752/tickpulse/issues/19).
 - **Tests pass on what they model.** The fake Binance server never restarted the process, so no test
   noticed that watermarks lived in memory. The end-to-end run, a real restart and a comparison of trade ids
   with Binance did.
@@ -239,7 +239,8 @@ Two lessons from this:
 - While the database is down and the leader lock holds, back-pressure stops reading the WebSocket, and
   Binance eventually disconnects. Recovery is through gap-fill, at most 50,000 trades per symbol per
   trigger.
-- A gap-fill hole known only to another, or a crashed, process is not visible to the next leader's seed.
+- A gap-fill hole known only to another, or a crashed, process is not visible to the next leader's seed
+  ([issue #19](https://github.com/goofy5752/tickpulse/issues/19)).
 - A deactivation within the reconcile latency of a minute boundary can, rarely, make a trailing stream
   minute the end of the inactive stretch, so that stretch is not backfilled.
 - The status lag in `/api/system/stats` and `/health` can spike when a gap-fill batch is written, because
@@ -247,14 +248,11 @@ Two lessons from this:
 - Symbols backfill one after another, at about 2 minutes each, so after a fresh start the third seeded
   symbol has its long-period SMAs about 6 minutes after start.
 - Admin calls share the public rate limit.
-- The local compose connection string has no pool cap and can exceed `max_connections` under heavy load
-  ([F19](docs/ai/defects-log.md#f19); the fix is in review as of 2026-11-04).
-- On shutdown, the API can take longer than Docker's default 10 s stop timeout.
 
 ## What's next
 
-1. Merge the two fixes in review as of 2026-11-04: the restart gap-fill, and the GSS crash together
-   with the local pool cap.
+1. Close the limitation tracked as [issue #19](https://github.com/goofy5752/tickpulse/issues/19): a gap-fill
+   hole that only another, or a crashed, process knew about.
 2. Deploy to `tickpulse.dev` and run the rollback drill and the external uptime check from the
    [deployment guide](docs/deployment.md).
 3. Isolate poison ticks per row instead of per batch.
