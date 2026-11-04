@@ -82,6 +82,11 @@ npm --prefix web run dev | build | lint | typecheck
   Docker bridge `172.16.0.0/12`), each an array or comma-separated and added to loopback: the
   proxies whose `CF-Connecting-IP` is trusted as the client IP (`X-Forwarded-For` is never read);
   `Otel:IpSalt`, the salt of the logged client-IP hash (random per process when unset).
+- **Telemetry**: the `TickPulse` meter and activity source live in
+  `Infrastructure/Telemetry/TickPulseMetrics.cs`; their names, units and tags are a contract with
+  the dashboards and alerts (`deploy/observability/README.md`). Record per batch, never per tick.
+  Logging is Serilog only (JSON console, plus OTLP when `Otel:Endpoint` is set; empty = off); levels
+  live under `Serilog:MinimumLevel`. Never log raw IPs, keys or secrets: use `client_ip_hash`.
 - **Error negotiation**: problems go through `IProblemDetailsService` with two writers, XML
   (`application/problem+xml`) when `Accept` prefers XML, otherwise JSON. Higher q wins; at equal q
   a concrete type beats a wildcard, and between concrete types the first listed wins. The host

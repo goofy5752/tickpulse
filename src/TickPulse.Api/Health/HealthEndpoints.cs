@@ -12,6 +12,7 @@ namespace TickPulse.Api.Health;
 /// </summary>
 internal static class HealthEndpoints
 {
+    public const string PathPrefix = "/health";
     public const string LivePath = "/health/live";
     public const string ReadyPath = "/health/ready";
     private const string ReadyTag = "ready";

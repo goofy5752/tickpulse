@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.Metrics;
 using System.Threading.Channels;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -8,10 +10,11 @@ using TickPulse.Application.Abstractions;
 using TickPulse.Application.Ingestion;
 using TickPulse.Domain;
 using TickPulse.Infrastructure.Ingestion;
+using TickPulse.Infrastructure.Telemetry;
 
 namespace TickPulse.Integration.Tests.Ingestion;
 
-public sealed class TickBatchWriterTests
+public sealed class TickBatchWriterTests : IDisposable
 {
     private const int Btc = 1;
     private const int Eth = 3;
@@ -23,6 +26,7 @@ public sealed class TickBatchWriterTests
     private readonly SymbolIdCache _symbols = new();
     private readonly RecordingWatermark _watermark = new();
     private readonly IngestionState _state;
+    private readonly ServiceProvider _meters = new ServiceCollection().AddMetrics().BuildServiceProvider();
 
     public TickBatchWriterTests()
     {
@@ -35,6 +39,8 @@ public sealed class TickBatchWriterTests
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    public void Dispose() => _meters.Dispose();
 
     [Fact]
     public async Task Run_SizeReached_WritesFullBatches()
@@ -253,7 +259,8 @@ public sealed class TickBatchWriterTests
         _watermark,
         Options.Create(new IngestionOptions { BatchMaxSize = maxSize, BatchMaxDelay = TimeSpan.FromMilliseconds(500) }),
         _clock,
-        NullLogger<TickBatchWriter>.Instance);
+        NullLogger<TickBatchWriter>.Instance,
+        new TickPulseMetrics(_meters.GetRequiredService<IMeterFactory>(), _state, _symbols));
 
     // Timers on the fake clock are registered asynchronously, so keep nudging it until the condition holds.
     private Task AdvanceUntilAsync(Func<bool> condition, TimeSpan? step = null) =>
@@ -290,7 +297,10 @@ public sealed class TickBatchWriterTests
 
         public int Attempts => Volatile.Read(ref _attempts);
 
-        public Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, CancellationToken ct)
+        public Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, CancellationToken ct) =>
+            WriteBatchAsync(ticks, new Dictionary<int, int>(), ct);
+
+        public Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, IDictionary<int, int> insertedPerSymbol, CancellationToken ct)
         {
             Interlocked.Increment(ref _attempts);
             if (Failures.TryDequeue(out var failure))
@@ -299,6 +309,12 @@ public sealed class TickBatchWriterTests
             }
 
             _batches.Enqueue([.. ticks]);
+            insertedPerSymbol.Clear();
+            foreach (var group in ticks.GroupBy(t => t.SymbolId))
+            {
+                insertedPerSymbol[group.Key] = group.Count();
+            }
+
             return Task.FromResult(ticks.Count);
         }
     }
