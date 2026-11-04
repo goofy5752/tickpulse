@@ -619,11 +619,11 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         var t0 = Now.AddMinutes(-5);
         await ExecuteSqlAsync(db, "UPDATE symbols SET is_active = false WHERE name <> 'BTCUSDT'");
         var logs = new LogCapture();
-        DropOnceTickWriter? dropping = null;
+        DroppingTickWriter? dropping = null;
         await using var services = IngestionServices(
             logs,
             overrides: new Dictionary<string, string?> { ["Ingestion:ReconcileInterval"] = "00:00:01" },
-            replace: s => s.AddSingleton<ITickWriter>(sp => dropping = new DropOnceTickWriter(
+            replace: s => s.AddSingleton<ITickWriter>(sp => dropping = new DroppingTickWriter(
                 new TickWriter(sp.GetRequiredKeyedService<NpgsqlDataSource>(DependencyInjection.TickWriterDataSourceKey), TimeProvider.System),
                 dropFromId: 6)));
         var state = services.GetRequiredService<IngestionState>();
@@ -647,6 +647,7 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
             }
 
             await dropping.ShouldNotBeNull().Dropped.Task.WaitAsync(WaitTimeout, ct);
+            dropping.Dropping = false;
             for (var i = 11; i <= 15; i++)
             {
                 await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
@@ -658,6 +659,79 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
             (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(15);
             _server.AcceptedConnections.ShouldBe(1);
             await WaitForAsync(() => !services.GetRequiredService<GapFillWatermarks>().IsPending("BTCUSDT"), "the gap closed");
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task DroppedBatch_RestBehindTheStream_FillDoesNotCloseTheGap_UntilRestCatchesUp()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var t0 = Now.AddMinutes(-5);
+        await ExecuteSqlAsync(db, "UPDATE symbols SET is_active = false WHERE name <> 'BTCUSDT'");
+        var logs = new LogCapture();
+        DroppingTickWriter? dropping = null;
+        await using var services = IngestionServices(
+            logs,
+            overrides: new Dictionary<string, string?> { ["Ingestion:ReconcileInterval"] = "00:00:01", ["Ingestion:RotationInterval"] = "00:00:02" },
+            replace: s => s.AddSingleton<ITickWriter>(sp => dropping = new DroppingTickWriter(
+                new TickWriter(sp.GetRequiredKeyedService<NpgsqlDataSource>(DependencyInjection.TickWriterDataSourceKey), TimeProvider.System),
+                dropFromId: 6)));
+        var state = services.GetRequiredService<IngestionState>();
+        using var worker = NewWorker(services, new PostgresLeaderLock(db.ConnectionString));
+        await worker.StartAsync(ct);
+        try
+        {
+            await _server.WaitUntilAsync(s => s.ActiveConnections >= 1 && s.SubscribedStreams.SetEquals([Stream("BTCUSDT")]), WaitTimeout, ct);
+            await WaitForAsync(() => state.Status == WsState.Connected, "connected");
+            for (var i = 1; i <= 5; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 5);
+
+            // Every batch holding 6.. is dropped: 6..10, which REST has, and 11..15, which only the stream has (REST lags).
+            for (var i = 6; i <= 10; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            for (var i = 11; i <= 15; i++)
+            {
+                await _server.PushRawAsync(AggTradeJson("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i)));
+            }
+
+            await WaitForAsync(() => dropping.ShouldNotBeNull().MaxSeen >= 15, "the writer dropped everything up to 15");
+            dropping!.Dropping = false;
+
+            // The fill from 6 is bounded by the stream's last id + 1 (16). REST's short page 6..10 is not the end of the
+            // data, so the gap must stay open past 10.
+            await _server.WaitUntilAsync(s => s.ReceivedRequests.Contains("/api/v3/aggTrades?symbol=BTCUSDT&fromId=6&limit=1000"), WaitTimeout, ct);
+            await WaitForTradeCountAsync(db, "BTCUSDT", 10);
+
+            // A rotation replaces the connection cleanly; REST then catches up and the new connection streams on.
+            var rotations = logs.Count("LogRotated");
+            await WaitForAsync(() => logs.Count("LogRotated") > rotations, "a rotation");
+            for (var i = 11; i <= 15; i++)
+            {
+                _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await _server.WaitUntilAsync(s => s.ActiveConnections == 1, WaitTimeout, ct);
+            for (var i = 16; i <= 20; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 20);
+            (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 20).Select(i => (long)i));
+            (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(20);
+            await WaitForAsync(() => !services.GetRequiredService<GapFillWatermarks>().IsPending("BTCUSDT"), "the gap closed");
+            state.LastReconnectUtc.ShouldBeNull();
         }
         finally
         {
@@ -955,6 +1029,15 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
     private static long LeadInStart(string request) =>
         long.Parse(Regex.Match(request, @"startTime=(\d+)").Groups[1].Value, CultureInfo.InvariantCulture);
 
+    // A combined-stream aggTrade message as the fake server would send it, for a trade that is not in its REST data.
+    private static string AggTradeJson(string symbol, long id, decimal price, DateTime t)
+    {
+        var ms = new DateTimeOffset(t).ToUnixTimeMilliseconds();
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $$$"""{"stream":"{{{Stream(symbol)}}}","data":{"e":"aggTrade","E":{{{ms}}},"s":"{{{symbol}}}","a":{{{id}}},"p":"{{{price:0.00000000}}}","q":"1.00000000","f":{{{id}}},"l":{{{id}}},"T":{{{ms}}},"m":false,"M":true}}""");
+    }
+
     // One process's ingestion services, as the API registers them (its own symbol cache, watermarks and state).
     private ServiceProvider IngestionServices(
         LogCapture logs,
@@ -1031,12 +1114,20 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         public ValueTask DisposeAsync() => inner.DisposeAsync();
     }
 
-    /// <summary>The real writer, except that the first batch holding an id from <paramref name="dropFromId"/> on fails for good.</summary>
-    private sealed class DropOnceTickWriter(ITickWriter inner, long dropFromId) : ITickWriter
+    /// <summary>
+    /// The real writer, except that while <see cref="Dropping"/> every batch holding an id from <paramref name="dropFromId"/>
+    /// on fails for good.
+    /// </summary>
+    private sealed class DroppingTickWriter(ITickWriter inner, long dropFromId) : ITickWriter
     {
-        private int _dropped;
+        private long _maxSeen;
+
+        public volatile bool Dropping = true;
 
         public TaskCompletionSource Dropped { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>The highest trade id in any batch handed to the writer so far, dropped or not.</summary>
+        public long MaxSeen => Volatile.Read(ref _maxSeen);
 
         public Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, CancellationToken ct) =>
             ShouldDrop(ticks) ? Fail() : inner.WriteBatchAsync(ticks, ct);
@@ -1044,8 +1135,16 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         public Task<int> WriteBatchAsync(IReadOnlyList<Tick> ticks, IDictionary<int, int> insertedPerSymbol, CancellationToken ct) =>
             ShouldDrop(ticks) ? Fail() : inner.WriteBatchAsync(ticks, insertedPerSymbol, ct);
 
-        private bool ShouldDrop(IReadOnlyList<Tick> ticks) =>
-            ticks.Any(t => t.AggTradeId >= dropFromId) && Interlocked.CompareExchange(ref _dropped, 1, 0) == 0;
+        private bool ShouldDrop(IReadOnlyList<Tick> ticks)
+        {
+            var max = ticks.Max(t => t.AggTradeId);
+            long seen;
+            while ((seen = Volatile.Read(ref _maxSeen)) < max && Interlocked.CompareExchange(ref _maxSeen, max, seen) != seen)
+            {
+            }
+
+            return Dropping && ticks.Any(t => t.AggTradeId >= dropFromId);
+        }
 
         private Task<int> Fail()
         {

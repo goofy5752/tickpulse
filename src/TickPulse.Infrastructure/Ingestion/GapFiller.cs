@@ -15,9 +15,10 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// </summary>
 /// <remarks>
 /// It pages forward until a page reaches the first id the new connection delivered, the exchange has nothing more
-/// (an empty or short page: from then on the already subscribed stream carries every trade), or
-/// <see cref="MaxPages"/> pages were read. Only trades below the stream's first id are emitted. The result says
-/// whether the gap was closed.
+/// (an empty or short page that reaches the stream: from then on the already subscribed stream carries every trade),
+/// or <see cref="MaxPages"/> pages were read. Only trades below the stream's first id are emitted. The result says
+/// whether the gap was closed. REST can lag behind the stream: a short page that ends below the stream's boundary is
+/// not the end of the data, so the gap stays open and the next pass continues from the last emitted id.
 /// <para>The <c>tickpulse.gapfill.trades</c> counter counts the trades emitted into the channel. That includes any
 /// overlap with trades already stored (a fill that starts below a stored stretch, a replayed range), which the primary
 /// key then skips, so it can exceed the number of trades that were actually missing. The tick writer reports inserted
@@ -100,15 +101,14 @@ public sealed partial class GapFiller(
             var pageStart = emitted;
             try
             {
+                // The boundary as it was before the request decides whether a short page is the end of the data. While
+                // the start lies inside the live stream, the boundary moves with it, and a snapshot taken after the
+                // request would always be ahead of what REST answered on a busy symbol: the fill could never finish.
+                var before = firstStreamId();
                 var trades = await GetPageAsync(name, next, ct).ConfigureAwait(false);
                 if (trades is null)
                 {
                     return new GapFillResult(emitted, lastEmitted, Complete: false);
-                }
-
-                if (trades.Count == 0)
-                {
-                    return Done(name, emitted, lastEmitted, page);
                 }
 
                 var boundary = firstStreamId();
@@ -125,12 +125,24 @@ public sealed partial class GapFiller(
                     lastEmitted = id;
                 }
 
-                if (trades.Count < PageSize)
+                if (trades.Count > 0)
                 {
-                    return Done(name, emitted, lastEmitted, page);
+                    next = trades[^1].Id + 1;
                 }
 
-                next = trades[^1].Id + 1;
+                if (trades.Count < PageSize)
+                {
+                    // Nothing more on REST. That is the end of the data only when REST has caught up with the stream;
+                    // otherwise it lags behind, and the ids up to the boundary are still missing.
+                    var reached = before ?? boundary;
+                    if (reached is null || next >= reached)
+                    {
+                        return Done(name, emitted, lastEmitted, page);
+                    }
+
+                    LogRestBehind(name.Value, next, reached.Value);
+                    return new GapFillResult(emitted, lastEmitted, Complete: false);
+                }
             }
             finally
             {
@@ -231,6 +243,9 @@ public sealed partial class GapFiller(
     [LoggerMessage(Level = LogLevel.Warning, Message = "Gap-fill for {Symbol} stopped at the {Pages}-page cap after {Count} trade(s)")]
     private partial void LogCapReached(string symbol, int pages, int count);
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "Gap-fill for {Symbol} stopped at id {Next}: REST is behind the stream (which is at {Boundary}); the gap stays open")]
+    private partial void LogRestBehind(string symbol, long next, long boundary);
+
     [LoggerMessage(Level = LogLevel.Warning, Message = "Gap-fill for {Symbol} from {From} failed transiently; retrying")]
     private partial void LogRetrying(Exception exception, string symbol, string from);
 
@@ -246,6 +261,7 @@ public sealed partial class GapFiller(
 /// <param name="LastEmittedId">The highest of them, if any.</param>
 /// <param name="Complete">
 /// The fill reached the stream's first id or the end of the data, so the gap is closed. <see langword="false"/> after
-/// the page cap or a REST failure: the gap stays open from <paramref name="LastEmittedId"/>.
+/// the page cap, a REST failure, or a short page that ended below the stream's boundary (REST lagging behind the
+/// stream): the gap stays open from <paramref name="LastEmittedId"/>.
 /// </param>
 public sealed record GapFillResult(int Emitted, long? LastEmittedId, bool Complete);

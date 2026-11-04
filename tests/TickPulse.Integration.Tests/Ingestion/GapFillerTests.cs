@@ -64,6 +64,39 @@ public sealed class GapFillerTests
     }
 
     [Fact]
+    public async Task Fill_ShortPage_BelowTheStream_IsNotTheEndOfTheData()
+    {
+        // The stream delivered up to 1000 (its boundary is 1001), but REST lags and ends at 950.
+        var source = new FakeAggTrades(500, 950);
+
+        var emitted = await Filler(source).FillAsync(BtcId, "BTCUSDT", 499, () => 1001, _output.Writer, Ct);
+
+        emitted.ShouldBe(new GapFillResult(451, 950, Complete: false)); // 951..1000 are still missing: the gap stays open
+        source.Requests.ShouldBe([500L]);
+    }
+
+    [Fact]
+    public async Task Fill_EmptyPage_BelowTheStream_IsNotTheEndOfTheData()
+    {
+        var source = new FakeAggTrades(1, 0);
+
+        (await Filler(source).FillAsync(BtcId, "BTCUSDT", 41, () => 50, _output.Writer, Ct)).ShouldBe(new GapFillResult(0, null, Complete: false));
+    }
+
+    [Fact]
+    public async Task Fill_ShortPage_ReachingTheStream_IsComplete_EvenIfTheStreamMovedOnDuringTheRequest()
+    {
+        var source = new FakeAggTrades(500, 1000);
+        long? boundary = 1001;
+        source.OnRequest = _ => boundary = 1200; // the live stream delivered 1001..1199 while REST answered
+
+        var emitted = await Filler(source).FillAsync(BtcId, "BTCUSDT", 499, () => boundary, _output.Writer, Ct);
+
+        emitted.ShouldBe(new GapFillResult(501, 1000, Complete: true)); // 1001.. came from the stream
+        source.Requests.ShouldBe([500L]);
+    }
+
+    [Fact]
     public async Task Fill_NothingMissed_EmitsNothing()
     {
         var source = new FakeAggTrades(1, 0);
