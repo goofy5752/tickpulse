@@ -17,8 +17,8 @@ being fixed. Style nits and refactors are not listed.
   and `F19`, which F18's crashes had hidden). They count with the E2E findings: 19 in all, `F1`–`F19`.
 - **Security scan:** the automated security review of the CD pipeline.
 
-**Updating an entry.** Entries whose fix is still in review have `PR: TBD`. When the PR merges,
-replace `TBD` with its number and adjust the fix and test lines if the final version differs.
+**Updating an entry.** When a fix merges, put its PR number on the entry and adjust the fix and test lines
+if the final version differs.
 
 ## Summary
 
@@ -52,11 +52,11 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 | [RV-26](#rv-26) | `http2` on the vhosts would switch HTTP/2 on for every site on the host's port 443 | Review (T25) | Important | #11 |
 | [RV-27](#rv-27) | A rollback restored the image but not the deployed files | Review (T25) | Important | #11 |
 | [F1](#f1) | A load burst knocked out telemetry and fired the WebSocket alert falsely | E2E run | Important | #14 |
-| [F2](#f2) | Trades lost on every API restart, redeploy or leadership handover | E2E run | Important | TBD |
+| [F2](#f2) | Trades lost on every API restart, redeploy or leadership handover | E2E run | Important | #20 |
 | [F3](#f3) | `change24hPercent` wildly wrong while a backfill runs | E2E run | Important | #15 |
 | [F4](#f4) | Long-period analytics aggregated minutes at query time (p95 83 ms) | E2E run | Important | #12 |
 | [F5](#f5) | Uncaught `AbortError`s in the dashboard console | E2E run | Important | #13 |
-| [F6](#f6) | The first streamed minute of a symbol kept a partial candle | E2E run | Minor | TBD |
+| [F6](#f6) | The first streamed minute of a symbol kept a partial candle | E2E run | Minor | #20 |
 | [F7](#f7) | No compression and no cache headers on static assets | E2E run | Minor | #16 |
 | [F8](#f8) | `Retry-After` always the full window; a Warning per rejection | E2E run | Minor | #16 |
 | [F9](#f9) | Framework 405/415 bypassed the TickPulse problem types; `HEAD` gave 404 | E2E run | Minor | #16 |
@@ -68,8 +68,8 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 | [F15](#f15) | Admin add: no `Location`, and a blank symbol was a 422 | E2E run | Minor | #15 |
 | [F16](#f16) | Dead or misleading dashboard links | E2E run | Minor | #13 |
 | [F17](#f17) | Symbol lists logged as quoted JSON arrays | E2E run | Minor | #16 |
-| [F18](#f18) | The API segfaulted (exit 139) under load | Load test | Critical | TBD |
-| [F19](#f19) | The local connection pool exceeded `max_connections`: 20–35 % 500s under load | Load test | Important | TBD |
+| [F18](#f18) | The API segfaulted (exit 139) under load | Load test | Critical | #18 |
+| [F19](#f19) | The local connection pool exceeded `max_connections`: 20–35 % 500s under load | Load test | Important | #18 |
 
 ---
 
@@ -385,35 +385,39 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F2
 
-**Trades lost on every API restart, redeploy or leadership handover** · E2E run · Important · PR TBD
+**Trades lost on every API restart, redeploy or leadership handover** · E2E run · Important · PR #20
 
 - **Symptom:** after `docker restart` of the api, `agg_trade_id` gaps (13 BTC and 31 ETH trades in one
   restart) and restart-minute candles that differed from Binance.
 - **Root cause:** gap-fill watermarks lived in memory only, so a new process or a new leader had nothing
   to fill from.
-- **Fix (in review as of 2026-11-04):** watermarks are seeded from the database at every leadership
-  session, with holes that a seed never raises
-  ([ADR 0022](../adr/0022-gap-fill-watermarks-seeded-from-the-database.md)).
-- **What the reviews of the fix found** (a first review and three re-reviews so far):
-  - First review: a stale in-memory entry beat the seed after a handover and back, and a fill on a
-    connection that broke mid-fill could close the gap.
-  - Re-review 1, **Critical:** the seed raised a watermark past an open gap. Fixed by the hole rule.
-  - Re-review 2, **Critical:** trades stored by a discarded rotation link were invisible to the seed,
-    so it could skip ids. Also **Important:** a hole on a busy symbol never closed. Both fixed with a
-    per-symbol "stored above" record that every connection end feeds, and fills re-armed on every
-    reconcile. Live re-check on the local stack: 0 gaps, 0 missing ids and 0 duplicates over three
-    restarts.
-  - Re-review 3, **Critical:** a completed fill could clear the "stored above" record past the live
-    maximum while the live link was stalled. Also **Important**, and older than the fix: a rotation that
-    replaced a stalled old link could lose that link's gap.
-  - The fourth round was escalated to a fresh implementer on a more capable model, and is in progress.
-- **Test (so far):** `IngestionWorkerTests.Restart_GapFillsTradesMissedWhileDown_ExactlyOnce`,
+- **Fix:** watermarks are seeded from the database at every leadership session
+  ([ADR 0022](../adr/0022-gap-fill-watermarks-seeded-from-the-database.md)). The final model is small:
+  - Per symbol: `LastId` (the end of the contiguous prefix), a pending flag, a version, and `Above`, the
+    highest id any ended connection delivered or any dropped batch reported missing.
+  - A start moves up only across ids that were delivered or stored by another instance. `Merge` raises
+    a closed entry only over a contiguous span, `Verify` opens a gap when the live stream starts above
+    `LastId + 1`, and `Seed` raises only when `Above <= LastId`.
+  - A short REST page completes a fill only when it reaches the stream boundary.
+- **What the reviews of the fix found** (a first review and five fix rounds): a stale in-memory entry
+  beat the seed, and a fill on a broken connection could close a gap; the seed jumped past an open
+  gap; trades stored by a discarded rotation link were invisible to the seed; a hole on a busy symbol
+  never closed; a completed fill erased the record of a discarded link's trades; a rotation over a
+  stalled connection merged without a gap; a lagging REST page closed a gap inside the live stream.
+  Round 4 replaced the accumulated flags with the model above. A live re-check on the local stack found
+  0 gaps, 0 missing ids and 0 duplicates over restarts.
+- **Known limitation:** a hole below the stored maximum that only another, or a crashed, process knew
+  about is invisible to the seed. Tracked as [issue #19](https://github.com/goofy5752/tickpulse/issues/19).
+- **Test:** `IngestionWorkerTests.Restart_GapFillsTradesMissedWhileDown_ExactlyOnce`,
   `HandoverAndBack_FillsFromTheOtherLeadersLastStoredTrade`,
   `SeededFill_ConnectionBreaksDuringIt_TradesAfterTheDeadConnectionAreRecovered`,
   `GapLeftOpen_ThenANewSessionInTheSameProcess_RecoversEveryTrade`,
   `DiscardedRotationLink_StoredTradesAboveAGap_NextSessionStillFillsTheGap`,
-  `DroppedBatchOnALiveConnection_HoleClosesWithinTheSession`, the `GapFillWatermarksTests` rules
-  (`Seed_*`, `NoteStored_*`, `Filled_*`, `Merge_Gap_*`), `MarketDataQueriesTests.LatestTradeIds*`.
+  `DroppedBatchOnALiveConnection_HoleClosesWithinTheSession`,
+  `Rotation_OverAStalledConnection_FillsTheTradesItMissed`,
+  `DroppedBatch_RestBehindTheStream_FillDoesNotCloseTheGap_UntilRestCatchesUp`, the
+  `GapFillWatermarksTests` rules (`Seed_*`, `NoteStored_*`, `Filled_*`, `Merge_*`, `Verify_*`),
+  `GapFillerTests.Fill_ShortPage_*` and `Fill_EmptyPage_*`, `MarketDataQueriesTests.LatestTradeIds*`.
 
 ### F3
 
@@ -460,7 +464,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F6
 
-**The first streamed minute of a symbol kept a partial candle** · E2E run · Minor · PR TBD
+**The first streamed minute of a symbol kept a partial candle** · E2E run · Minor · PR #20
 
 - **Symptom:** the start minute had the right close but wrong O/H/L/V (BTC volume 5.37 against
   Binance's 13.46).
@@ -469,7 +473,8 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 - **Fix:** a lead-in: the first time a symbol streams in a session, REST finds the first trade of the
   current minute and the gap-fill completes it.
 - **Test:** `IngestionWorkerTests.FirstStreamedMinute_IsCompletedFromRest`,
-  `ReactivatedSymbol_FirstStreamedMinuteIsCompletedAgain`, `GapFillerTests.FirstTradeIdFrom_*`.
+  `ReactivatedSymbol_FirstStreamedMinuteIsCompletedAgain`, `LeadInFailed_IsRetriedOnTheNextConnection`,
+  `GapFillerTests.FirstTradeIdFrom_*`.
 
 ### F7
 
@@ -599,7 +604,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F18
 
-**The API segfaulted (exit 139) under load** · Load test · Critical · PR TBD
+**The API segfaulted (exit 139) under load** · Load test · Critical · PR #18
 
 Found while load-testing the telemetry fix ([F1](#f1)). Fixed in the GSS-crash PR, which also carries
 [F19](#f19).
@@ -618,7 +623,7 @@ Found while load-testing the telemetry fix ([F1](#f1)). Fixed in the GSS-crash P
     leads to the next.
   - TickPulse never uses Kerberos. `krb5-libs` had been installed only to silence the probe's
     library-load error, which is what made the probe actually run.
-- **Fix (in review as of 2026-11-04):**
+- **Fix:**
   - `NpgsqlConnectionPolicy` forces `GssEncryptionMode=Disable` on every connection the app builds:
     both data sources (and through them EF Core and the migrator), the leader lock, and the design-time
     factory.
@@ -627,15 +632,16 @@ Found while load-testing the telemetry fix ([F1](#f1)). Fixed in the GSS-crash P
   - `krb5-libs` leaves the runtime image.
 - **Test:** `GssEncryptionStartupTests` (the real host starts, leads and serves with `Prefer` and with
   `Require` in the connection string, and every connection ends up at `Disable`),
-  `NpgsqlConnectionPolicyTests`, `DependencyInjectionTests`.
+  `NpgsqlConnectionPolicyTests.Apply_*`, `DependencyInjectionTests` (`BuildDataSources_ForceGssEncryptionOff_ForDirectCallersToo`,
+  `PostgresLeaderLock_WithTheOptIn_KeepsAnExplicitGssEncryptionMode`, `DesignTimeFactory_HasGssEncryptionDisabled`).
   - Under load: 8 + 8 crashes on the old image, 0 in each of 5 rounds on the fixed one.
   - A control run (old image, capped pool) still crashed twice.
 
 ### F19
 
-**The local connection pool exceeded `max_connections`: 20–35 % 500s under load** · Load test · Important · PR TBD
+**The local connection pool exceeded `max_connections`: 20–35 % 500s under load** · Load test · Important · PR #18
 
-Found once [F18](#f18) stopped the crashes, which had hidden it. Being fixed in the same PR as F18.
+Found once [F18](#f18) stopped the crashes, which had hidden it. Fixed in the same PR as F18 (#18).
 
 - **Symptom:**
   - Under heavy local load, PostgreSQL rejected connections with `FATAL: sorry, too many clients
@@ -647,6 +653,11 @@ Found once [F18](#f18) stopped the crashes, which had hidden it. Being fixed in 
   `Maximum Pool Size`. The API can therefore hold 100 shared connections plus 4 for the tick writer and
   1 for the leader lock, against PostgreSQL's default `max_connections = 100`. Production sets
   `Maximum Pool Size=20` and is not affected.
-- **Fix (in review as of 2026-11-04):** cap the local pool as production does. With
-  `Maximum Pool Size=30` the same load gave 0 non-2xx at about 8,000–9,500 req/s.
-- **Test:** to be filled in when the fix merges.
+- **Fix:** cap the shared pool as production does, by default, through `Database:MaxPoolSize` (20) and an explicit
+  `Maximum Pool Size=20` in both compose files, and check the whole connection budget at startup. With a pool of
+  30 the same load gave 0 non-2xx at about 8,000–9,500 req/s.
+- **Test:** `ComposeConnectionSettingsTests` (both compose files set the default pool size; the connection
+  budget fits the production database; every service has a 30-second stop grace period),
+  `NpgsqlConnectionPolicyTests.ConnectionBudget_*` and `Apply_NoPoolSizeInTheConnectionString_UsesTheConfiguredSize`,
+  `DependencyInjectionTests.Startup_WithMigrationsOff_StillChecksTheConnectionBudget`,
+  `HostShutdownTests` (the worst-case stop fits the host timeout and the stop grace period).
