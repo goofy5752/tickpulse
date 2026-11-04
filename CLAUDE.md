@@ -71,7 +71,9 @@ npm --prefix web run dev | build | lint | typecheck
   `https://tickpulse.dev/problems/{slug}` with slugs `unknown-symbol`, `no-data`,
   `invalid-symbol`, `symbol-limit`, `admin-disabled`, `validation`, `not-acceptable`,
   `rate-limited`, `internal`, `not-found` (unmatched routes), `unauthorized` (401: missing or wrong
-  `X-Api-Key`), `upstream-unavailable` (503: Binance cannot confirm a symbol being added right now).
+  `X-Api-Key`), `upstream-unavailable` (503: Binance cannot confirm a symbol being added right now),
+  `method-not-allowed` (405, with `Allow`), `unsupported-media-type` (415: a request body that is
+  neither JSON nor XML). `HEAD` works wherever `GET` does.
 - **Config keys** (env uses `__`): `ConnectionStrings:TickPulse`, `Admin:*`, `Binance:*`,
   `Ingestion:*`, `Backfill:*`, `Database:RunMigrationsOnStartup`, `Otel:Endpoint`,
   `Otel:FlushSampleRatio`.

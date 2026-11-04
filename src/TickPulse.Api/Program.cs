@@ -32,9 +32,16 @@ services.AddControllers(o =>
         o.ReturnHttpNotAcceptable = true;
         o.RespectBrowserAcceptHeader = true;
     })
-    // Parameters that cannot be bound (n=abc, limit=abc) get the same validation problem, negotiated, as every other error.
-    .ConfigureApiBehaviorOptions(o => o.InvalidModelStateResponseFactory = context =>
-        new ProblemResult(ProblemFactory.CreateValidation(context.HttpContext, context.ModelState)))
+    .ConfigureApiBehaviorOptions(o =>
+    {
+        // Parameters that cannot be bound (n=abc, limit=abc) get the same validation problem, negotiated, as every other error.
+        o.InvalidModelStateResponseFactory = context =>
+            new ProblemResult(ProblemFactory.CreateValidation(context.HttpContext, context.ModelState));
+
+        // MVC's own client errors (415 for an unsupported body, ...) stay bare status codes, so the status code pages
+        // turn them into TickPulse problems through the writers below, like routing's 404 and 405.
+        o.SuppressMapClientErrors = true;
+    })
     .AddXmlDataContractSerializerFormatters();
 
 services.AddSingleton<AnalyticsService>();
@@ -63,6 +70,7 @@ var app = builder.Build();
 
 app.UseForwardedHeaders();
 app.UseTickPulseTelemetry(); // request log and API metrics: after the forwarded headers, before everything else
+app.UseHeadWithoutBody();
 app.UseSecurityHeaders();
 app.UseVaryByAcceptOnApi();
 app.UseAcceptHeaderNormalization();
@@ -76,7 +84,7 @@ app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 
-app.MapControllers().RequireRateLimiting(ApiRateLimiting.PublicPolicy);
+app.MapControllers().RequireRateLimiting(ApiRateLimiting.PublicPolicy).WithHeadForGet();
 app.MapTickPulseHealthChecks();
 app.MapTickPulseMarketHub(); // before the dashboard fallback
 app.MapOpenApi();
