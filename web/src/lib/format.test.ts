@@ -1,11 +1,27 @@
 import { describe, expect, it } from 'vitest'
-import { formatDuration, formatLag, formatPercent, formatPrice, formatTickmarks, formatUtc, splitSymbol } from './format'
+import {
+  formatDuration,
+  formatLag,
+  formatPercent,
+  formatPrice,
+  formatTickmarks,
+  formatUtc,
+  priceDecimals,
+  splitSymbol,
+} from './format'
 
 describe('format', () => {
   it('formatPrice_ScalesDecimalsWithMagnitude', () => {
     expect(formatPrice(97412.3, 'BTCUSDT')).toBe('$97,412.30')
     expect(formatPrice(0.7214, 'ADAUSDT')).toBe('$0.7214')
     expect(formatPrice(0.00001234, 'SHIBBTC')).toBe('0.00001234')
+  })
+
+  it('formatPrice_BelowOneTenThousandth_KeepsFourSignificantDigits', () => {
+    expect(formatPrice(0.000001234, 'PEPEUSDT')).toBe('$0.000001234')
+    expect(formatPrice(0.00000005678)).toBe('0.00000005678')
+    expect(priceDecimals(0.000001234)).toBe(9)
+    expect(formatPrice(0)).toBe('0.00')
   })
 
   it('formatPercent_UsesTrueMinusAndExplicitPlus', () => {

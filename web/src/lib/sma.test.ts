@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PERIOD_SECONDS, rollingSma, toUnixSeconds } from './sma'
+import { PERIOD_SECONDS, rollingSma, toUnixSeconds, withPoint } from './sma'
 
 const MIN = 60
 
@@ -66,6 +66,26 @@ describe('rollingSma', () => {
     const line = rollingSma(days, 2, PERIOD_SECONDS['1d'])
 
     expect(line.map((point) => point.value)).toEqual([150, 250])
+  })
+})
+
+describe('withPoint', () => {
+  it('withPoint_ExistingTime_ReplacesValue', () => {
+    expect(withPoint([{ time: 1, value: 1 }, { time: 2, value: 2 }], { time: 2, value: 9 })).toEqual([
+      { time: 1, value: 1 },
+      { time: 2, value: 9 },
+    ])
+  })
+
+  it('withPoint_MissingTime_InsertsInOrder', () => {
+    // The anchor bucket had no candle, so the rolling line has no point there yet.
+    expect(withPoint([{ time: 1, value: 1 }, { time: 3, value: 3 }], { time: 2, value: 9 })).toEqual([
+      { time: 1, value: 1 },
+      { time: 2, value: 9 },
+      { time: 3, value: 3 },
+    ])
+    expect(withPoint([], { time: 5, value: 5 })).toEqual([{ time: 5, value: 5 }])
+    expect(withPoint([{ time: 1, value: 1 }], { time: 7, value: 7 }).at(-1)).toEqual({ time: 7, value: 7 })
   })
 })
 

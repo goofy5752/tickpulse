@@ -1,4 +1,4 @@
-import { useId, useState, type KeyboardEvent } from 'react'
+import { memo, useId, useState, type KeyboardEvent } from 'react'
 import { ApiError, apiPaths } from '@/api/client'
 import { isValidSmaN, SMA_MAX_POINTS, useAverage, useSma } from '@/api/queries'
 import { isPeriod, PERIODS, type AveragePriceResponse, type SmaResponse } from '@/api/types'
@@ -14,8 +14,11 @@ interface AnalyticsPanelProps {
   onParamsChange: (next: SmaParams) => void
 }
 
-/** The 24h average and the SMA, side by side with the chart. Every figure is an API answer. */
-export function AnalyticsPanel({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
+/**
+ * The 24h average and the SMA, side by side with the chart. Every figure is an API answer.
+ * Memoised, so hub ticks (several per second) do not re-render it.
+ */
+export const AnalyticsPanel = memo(function AnalyticsPanel({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
   return (
     <section aria-labelledby="analytics-title" className="glass flex flex-col p-5 sm:p-6">
       <h2 id="analytics-title" className="sr-only">
@@ -29,7 +32,7 @@ export function AnalyticsPanel({ symbol, params, onParamsChange }: AnalyticsPane
       </p>
     </section>
   )
-}
+})
 
 const cardTitle = 'text-[0.8125rem] font-medium text-ink-muted'
 const bigFigure = 'num mt-2 text-[1.75rem] leading-none font-semibold tracking-[-0.02em]'
@@ -130,6 +133,26 @@ function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
   const shown = nValid ? (current ?? sma.data) : undefined
   const stale = shown !== undefined && (shown !== current || sma.isPlaceholderData)
 
+  // Screen readers hear a result once per parameter change (and an error once), never the
+  // 30 s background refresh, which may move the value without anyone asking.
+  const paramsKey = `${symbol ?? ''}|${params.n}|${params.p}|${params.s}`
+  let message: { kind: string; text: string } | null = null
+  if (!nValid) message = { kind: 'invalid', text: N_HINT }
+  else if (sma.isError && !current)
+    message = {
+      kind: 'error',
+      text: problemText(sma.error, symbol, 'No closes in this window yet.'),
+    }
+  else if (current && !sma.isPlaceholderData)
+    message = {
+      kind: 'value',
+      text: `SMA over ${current.requestedDataPoints} ${current.period} buckets: ${formatPrice(current.value, current.symbol)}, ${current.actualDataPoints} of ${current.requestedDataPoints} points.`,
+    }
+  const [announced, setAnnounced] = useState(() => ({ key: `${paramsKey}|value`, text: '' }))
+  if (message && announced.key !== `${paramsKey}|${message.kind}`) {
+    setAnnounced({ key: `${paramsKey}|${message.kind}`, text: message.text })
+  }
+
   return (
     <div>
       <h3 className={cardTitle}>Simple moving average</h3>
@@ -208,7 +231,10 @@ function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
         </div>
       </div>
 
-      <div className="mt-5" aria-live="polite" aria-busy={sma.isFetching}>
+      <p className="sr-only" aria-live="polite">
+        {announced.text}
+      </p>
+      <div className="mt-5">
         {!nValid ? (
           <p id={`${ids}-n-error`} className="text-[0.8125rem] text-down">
             {N_HINT}

@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { memo, useEffect, useId, useState } from 'react'
 import type { SystemStatsResponse } from '@/api/types'
 import { StatusPill } from '@/components/StatusPill'
 import type { HubStatus } from '@/hooks/useMarketHub'
@@ -102,7 +102,7 @@ interface NavProps {
  * Brand, links, theme and the live status. From 768 px the links sit inline; below that they
  * move into a menu, and below 640 px the status pill shortens too.
  */
-export function Nav({ hubStatus, stats }: NavProps) {
+export const Nav = memo(function Nav({ hubStatus, stats }: NavProps) {
   const [open, setOpen] = useState(false)
   const menuId = useId()
 
@@ -172,4 +172,4 @@ export function Nav({ hubStatus, stats }: NavProps) {
       </nav>
     </header>
   )
-}
+})

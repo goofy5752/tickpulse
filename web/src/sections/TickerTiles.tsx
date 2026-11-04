@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { useCandles } from '@/api/queries'
 import type { LivePrice, SymbolResponse } from '@/api/types'
 import { Skeleton } from '@/components/Skeleton'
 import { Sparkline } from '@/components/Sparkline'
-import { formatPercent, formatPrice, splitSymbol } from '@/lib/format'
+import { usePrefersReducedMotion } from '@/hooks/usePrefersReducedMotion'
+import { formatDuration, formatPercent, formatPrice, splitSymbol } from '@/lib/format'
 import { SECTION_IDS } from '@/lib/links'
 import { toUnixSeconds } from '@/lib/sma'
 import { cn } from '@/lib/utils'
@@ -16,11 +17,15 @@ interface TickerTilesProps {
   error: Error | null
   prices: Record<string, LivePrice>
   selected: string | undefined
+  /** Keep it stable (e.g. a state setter): the tiles are memoised on it. */
   onSelect: (symbol: string) => void
 }
 
-/** One tile per monitored symbol, scrolling sideways when they outgrow the row. */
-export function TickerTiles({ symbols, isLoading, error, prices, selected, onSelect }: TickerTilesProps) {
+/**
+ * One tile per monitored symbol, scrolling sideways when they outgrow the row. Tiles are memoised,
+ * so a hub tick re-renders only the tile whose price moved.
+ */
+export const TickerTiles = memo(function TickerTiles({ symbols, isLoading, error, prices, selected, onSelect }: TickerTilesProps) {
   return (
     <section id={SECTION_IDS.markets} aria-labelledby="markets-title">
       <h2 id="markets-title" className="sr-only">
@@ -33,9 +38,7 @@ export function TickerTiles({ symbols, isLoading, error, prices, selected, onSel
               symbol={symbol}
               live={prices[symbol.symbol]}
               selected={symbol.symbol === selected}
-              onSelect={() => {
-                onSelect(symbol.symbol)
-              }}
+              onSelect={onSelect}
             />
           </li>
         ))}
@@ -79,22 +82,23 @@ export function TickerTiles({ symbols, isLoading, error, prices, selected, onSel
       </ul>
     </section>
   )
-}
+})
 
 interface TileProps {
   symbol: SymbolResponse
   live: LivePrice | undefined
   selected: boolean
-  onSelect: () => void
+  onSelect: (symbol: string) => void
 }
 
 type Flash = { direction: 'up' | 'down'; id: number } | null
 
-function Tile({ symbol, live, selected, onSelect }: TileProps) {
+const Tile = memo(function Tile({ symbol, live, selected, onSelect }: TileProps) {
   const { base, quote } = splitSymbol(symbol.symbol)
   const price = live?.price ?? symbol.latestPrice
   const change = symbol.change24hPercent
   const spark = useCandles(symbol.symbol, '1m', SPARK_POINTS)
+  const reducedMotion = usePrefersReducedMotion()
 
   // Flash on every price change (state derived during render, React's pattern for "on change").
   const [previous, setPrevious] = useState(price)
@@ -106,27 +110,36 @@ function Tile({ symbol, live, selected, onSelect }: TileProps) {
     }
   }
 
-  const values = useMemo(() => {
+  const { values, spanSeconds } = useMemo(() => {
     const candles = spark.data ?? []
     const closes = candles.map((c) => c.close)
+    const first = candles[0]
     const last = candles.at(-1)
+    if (!first || !last) return { values: closes, spanSeconds: 0 }
     // The newest trade belongs to the open minute; let it move the end of the line.
-    if (last && live && Date.parse(live.tradeTime) / 1000 >= toUnixSeconds(last.bucketStart)) {
-      closes[closes.length - 1] = live.price
-    }
-    return closes
+    const tradeTime = live ? Date.parse(live.tradeTime) / 1000 : Number.NaN
+    const lastTime = toUnixSeconds(last.bucketStart)
+    if (live && tradeTime >= lastTime) closes[closes.length - 1] = live.price
+    const endTime = tradeTime >= lastTime ? tradeTime : lastTime + 60
+    return { values: closes, spanSeconds: endTime - toUnixSeconds(first.bucketStart) }
   }, [spark.data, live])
 
   const first = values[0]
   const end = values.at(-1)
-  const hourChange = first !== undefined && end !== undefined && first !== 0 ? ((end - first) / first) * 100 : undefined
+  const spanChange =
+    values.length >= 2 && first !== undefined && end !== undefined && first !== 0 ? ((end - first) / first) * 100 : undefined
+  // Say what the line really covers: sparse minutes make it longer than 60 buckets suggest.
   const sparkLabel =
-    hourChange === undefined ? 'Not enough trades in the last hour for a trend' : `Last hour, ${formatPercent(hourChange)}`
+    spanChange === undefined
+      ? 'Not enough recent trades for a trend'
+      : `Past ${formatDuration(spanSeconds)}, ${formatPercent(spanChange)}`
 
   return (
     <button
       type="button"
-      onClick={onSelect}
+      onClick={() => {
+        onSelect(symbol.symbol)
+      }}
       aria-pressed={selected}
       className={cn(
         'glass group flex w-full flex-col p-4 text-left transition-[background-color,border-color] duration-200 hover:bg-glass-strong',
@@ -159,7 +172,7 @@ function Tile({ symbol, live, selected, onSelect }: TileProps) {
         {price === null ? (
           <span className="text-ink-faint">Waiting</span>
         ) : (
-          <span key={flash?.id} className={cn('inline-block', flash && `price-flash-${flash.direction}`)}>
+          <span key={flash?.id} className={cn('inline-block', flash && !reducedMotion && `price-flash-${flash.direction}`)}>
             {formatPrice(price, symbol.symbol)}
           </span>
         )}
@@ -168,4 +181,4 @@ function Tile({ symbol, live, selected, onSelect }: TileProps) {
       <Sparkline values={values} label={sparkLabel} className="mt-3.5 h-9 w-full" />
     </button>
   )
-}
+})

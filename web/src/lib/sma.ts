@@ -57,3 +57,12 @@ export function rollingSma(
   }
   return line
 }
+
+/** Sets the line's value at `point.time`, inserting the point in time order if it is missing. */
+export function withPoint(line: readonly TimeValue[], point: TimeValue): TimeValue[] {
+  const result = line.filter((p) => p.time !== point.time)
+  const index = result.findIndex((p) => p.time > point.time)
+  if (index === -1) result.push(point)
+  else result.splice(index, 0, point)
+  return result
+}

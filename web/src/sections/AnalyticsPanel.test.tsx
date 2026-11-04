@@ -97,7 +97,8 @@ describe('AnalyticsPanel', () => {
     await user.type(input, '0')
 
     expect(input.getAttribute('aria-invalid')).toBe('true')
-    expect(screen.getByText(/whole number from 1 to 1000/i)).toBeTruthy()
+    const hint = document.getElementById(input.getAttribute('aria-describedby') ?? '')
+    expect(hint?.textContent).toMatch(/whole number from 1 to 1000/i)
     // Give any (wrongly) enabled query time to fire before checking.
     await new Promise((resolve) => setTimeout(resolve, 50))
     const requestedN = smaRequests().map((url) => url.searchParams.get('n'))

@@ -1,3 +1,11 @@
+/*
+ * Display formatting for the dashboard.
+ *
+ * Every figure uses en-US conventions on purpose (comma thousands separators, dot decimals, UTC
+ * times): the API speaks invariant-culture numbers and ISO-8601 UTC, the dashboard copy is English,
+ * and traders read pair prices this way. Following the browser locale would make the same price
+ * look different from the API response shown beside it.
+ */
 import type { IsoDateTime, Period } from '@/api/types'
 
 const MINUS = '−'
@@ -14,13 +22,19 @@ function numberFormat(minimumFractionDigits: number, maximumFractionDigits = min
   return format
 }
 
-/** Decimals that keep a price readable at its magnitude: 97,412.30, 3.1415, 0.7214, 0.00001234. */
+/** Significant digits kept for prices below 0.0001, so 0.000001234 does not round to 0.00000123. */
+const TINY_PRICE_SIGNIFICANT_DIGITS = 4
+
+/**
+ * Decimals that keep a price readable at its magnitude: 97,412.30, 3.1415, 0.7214, 0.000123 and,
+ * below 0.0001, four significant digits (0.000001234).
+ */
 export function priceDecimals(value: number): number {
   const abs = Math.abs(value)
-  if (abs >= 10) return 2
+  if (abs >= 10 || abs === 0 || !Number.isFinite(abs)) return 2
   if (abs >= 0.01) return 4
   if (abs >= 0.0001) return 6
-  return 8
+  return Math.min(20, TINY_PRICE_SIGNIFICANT_DIGITS - 1 - Math.floor(Math.log10(abs)))
 }
 
 const USD_QUOTES = ['USDT', 'USDC', 'FDUSD', 'TUSD', 'USD'] as const

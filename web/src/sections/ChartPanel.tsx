@@ -1,4 +1,4 @@
-import { lazy, Suspense, useId, useState, type ReactNode } from 'react'
+import { lazy, memo, Suspense, useId, useState, type ReactNode } from 'react'
 import { ApiError } from '@/api/client'
 import { isValidSmaN, SMA_MAX_POINTS, useCandles, useSma } from '@/api/queries'
 import { PERIODS, type CandleResponse, type LivePrice, type Period } from '@/api/types'
@@ -36,22 +36,36 @@ interface Settled {
   candles: CandleResponse[]
 }
 
-export function ChartPanel({ symbol, params, onParamsChange, live, fallbackPrice }: ChartPanelProps) {
+/** Memoised: hub ticks for other symbols do not reach it; only its own live price does. */
+export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsChange, live, fallbackPrice }: ChartPanelProps) {
   const limit = candleLimit(params.p, params.n)
   const candles = useCandles(symbol, params.p, limit)
   const sma = useSma(symbol, params.n, params.p, startToIso(params.s))
 
-  // Keep drawing the last complete answer while the next period loads, and never mix one
-  // period's candles with another period's bucket width.
+  // Keep drawing the last complete answer (dimmed) while the next symbol or period loads, so the
+  // chart stays mounted, and never mix one period's candles with another period's bucket width.
   const [settled, setSettled] = useState<Settled | null>(null)
   if (symbol && candles.data && !candles.isPlaceholderData && settled?.candles !== candles.data) {
     setSettled({ symbol, period: params.p, candles: candles.data })
   }
-  const view = settled?.symbol === symbol ? settled : null
-  const stale = view !== null && (view.period !== params.p || candles.isPlaceholderData)
+  const view = settled
+  const stale = view !== null && (view.symbol !== symbol || view.period !== params.p || candles.isPlaceholderData)
+  /** The candles for the current symbol and period failed and there is nothing current to show. */
+  const failed = candles.isError && candles.data === undefined
+  const errorDetail =
+    candles.error instanceof ApiError ? candles.error.message : 'The API did not answer. Check the connection and try again.'
+  const retry = () => {
+    void candles.refetch()
+  }
 
+  // Only an answer for exactly what is drawn: no previous-parameter placeholder at full strength.
   const smaForChart =
-    view && sma.data?.symbol === view.symbol && sma.data.period === view.period && sma.data.requestedDataPoints === params.n
+    view &&
+    !stale &&
+    !sma.isPlaceholderData &&
+    sma.data?.symbol === view.symbol &&
+    sma.data.period === view.period &&
+    sma.data.requestedDataPoints === params.n
       ? sma.data
       : undefined
 
@@ -101,26 +115,53 @@ export function ChartPanel({ symbol, params, onParamsChange, live, fallbackPrice
               className={cn('flex-1 transition-opacity duration-300', stale && 'opacity-45')}
             />
           </Suspense>
-        ) : view ? (
+        ) : failed ? (
+          <EmptyState title={`Could not load the ${params.p} candles.`} action={<RetryButton onClick={retry} />}>
+            {errorDetail}
+          </EmptyState>
+        ) : view && !stale ? (
           <EmptyState title={`No ${view.period} candles for ${view.symbol} yet.`}>
             Trades collected from now on show up here within a minute.
-          </EmptyState>
-        ) : candles.isError ? (
-          <EmptyState title="The chart could not load.">
-            {candles.error instanceof ApiError ? candles.error.message : 'The API did not answer. The next refresh will try again.'}
           </EmptyState>
         ) : (
           <ChartSkeleton />
         )}
-        {stale && (
-          <p role="status" className="absolute top-8 left-1/2 -translate-x-1/2 rounded-full border border-glass-border bg-glass-strong px-3 py-1 text-[0.75rem] text-ink-muted backdrop-blur-md">
-            Loading {params.p} candles
-          </p>
+        {failed && view && view.candles.length > 0 ? (
+          <div
+            role="alert"
+            className="absolute top-8 left-1/2 flex w-[min(24rem,calc(100%-2rem))] -translate-x-1/2 flex-col items-center gap-2 rounded-(--radius-control) border border-down/40 bg-glass-strong p-4 text-center backdrop-blur-md"
+          >
+            <p className="font-medium text-ink">{`Could not load the ${params.p} candles for ${symbol ?? 'this symbol'}.`}</p>
+            <p className="text-[0.8125rem] text-ink-muted">{errorDetail}</p>
+            <RetryButton onClick={retry} />
+          </div>
+        ) : (
+          stale &&
+          !failed && (
+            <p
+              role="status"
+              className="absolute top-8 left-1/2 -translate-x-1/2 rounded-full border border-glass-border bg-glass-strong px-3 py-1 text-[0.75rem] whitespace-nowrap text-ink-muted backdrop-blur-md"
+            >
+              {`Loading ${symbol ?? ''} ${params.p} candles`}
+            </p>
+          )
         )}
       </div>
 
       <Legend period={view?.period ?? params.p} n={smaForChart?.requestedDataPoints} note={windowNote(view, smaForChart)} />
     </section>
+  )
+})
+
+function RetryButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="mt-1 rounded-full border border-glass-border bg-glass px-3.5 py-1.5 text-[0.8125rem] font-medium text-ink transition-colors duration-150 hover:bg-glass-strong"
+    >
+      Try again
+    </button>
   )
 }
 
@@ -201,11 +242,12 @@ function ChartSkeleton() {
   )
 }
 
-function EmptyState({ title, children }: { title: string; children: ReactNode }) {
+function EmptyState({ title, children, action }: { title: string; children: ReactNode; action?: ReactNode }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center rounded-(--radius-control) border border-dashed border-glass-border p-6 text-center">
       <p className="font-medium text-ink">{title}</p>
       <p className="mt-1 max-w-[46ch] text-ink-muted">{children}</p>
+      {action}
     </div>
   )
 }

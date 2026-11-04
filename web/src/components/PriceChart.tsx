@@ -22,8 +22,9 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CandleResponse, IsoDateTime, LivePrice, Period, SmaResponse } from '@/api/types'
 import { fillGaps, windowIndexRange, type WindowRange } from '@/lib/chartData'
+import { mergeTrade, reconcileBar, type OhlcBar } from '@/lib/liveBar'
 import { formatPercent, formatPlainPrice, formatPrice, formatTickmarks, formatUtc, priceDecimals } from '@/lib/format'
-import { PERIOD_SECONDS, rollingSma, toUnixSeconds } from '@/lib/sma'
+import { PERIOD_SECONDS, rollingSma, toUnixSeconds, withPoint } from '@/lib/sma'
 import { cn } from '@/lib/utils'
 
 export interface PriceChartProps {
@@ -197,16 +198,17 @@ function toBar(candle: CandleResponse): Bar {
   }
 }
 
-/** The last candle with the latest trade folded in, or a new bucket if the trade opened one. */
-function mergeLive(last: Bar | undefined, live: LivePrice | undefined, periodSeconds: number): Bar | undefined {
-  if (!last || !live) return last
-  const t = Math.floor(Date.parse(live.tradeTime) / 1000)
-  if (!Number.isFinite(t) || t < last.time) return last
-  if (t < last.time + periodSeconds) {
-    return { ...last, high: Math.max(last.high, live.price), low: Math.min(last.low, live.price), close: live.price }
-  }
-  const time = (last.time + Math.floor((t - last.time) / periodSeconds) * periodSeconds) as UTCTimestamp
-  return { time, open: last.close, high: live.price, low: live.price, close: live.price }
+function toChartBar(bar: OhlcBar): Bar {
+  return { ...bar, time: bar.time as UTCTimestamp }
+}
+
+/** The newest bar as the live trades have shaped it since the last fetch. */
+interface LiveState {
+  /** Symbol and period the bar belongs to; a change starts over from the fetched candle. */
+  key: string
+  server: Bar | undefined
+  trade: LivePrice | undefined
+  bar: OhlcBar | undefined
 }
 
 interface Hover {
@@ -231,19 +233,42 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
 
   const rows = useMemo(() => fillGaps(candles, periodSeconds), [candles, periodSeconds])
   // The bucket still open at the API's reference time has no final close yet, and the API leaves
-  // it out of every window. So does the line: its last point then equals the API's value.
+  // it out of every window, so the line does too. The point for the window's last bucket
+  // (windowEnd − p) is the API's own value, set even when that bucket had no candle, so the line
+  // and the figure in the analytics panel always agree there.
   const referenceTime = sma ? toUnixSeconds(sma.referenceTime) : undefined
+  const anchorTime = sma ? toUnixSeconds(sma.windowEnd) - periodSeconds : undefined
+  const smaValue = sma?.value
   const smaLine = useMemo(() => {
     const closed =
       referenceTime === undefined
         ? candles
         : candles.filter((c) => toUnixSeconds(c.bucketStart) + periodSeconds <= referenceTime)
-    return rollingSma(closed, n, periodSeconds)
-  }, [candles, n, periodSeconds, referenceTime])
+    const line = rollingSma(closed, n, periodSeconds)
+    const first = candles[0]
+    if (anchorTime === undefined || smaValue === undefined || !first || anchorTime < toUnixSeconds(first.bucketStart)) {
+      return line
+    }
+    return withPoint(line, { time: anchorTime, value: smaValue })
+  }, [candles, n, periodSeconds, referenceTime, anchorTime, smaValue])
   const lastBar = useMemo(() => {
     const last = candles.at(-1)
     return last ? toBar(last) : undefined
   }, [candles])
+
+  // Live trades accumulate into the newest bar (state derived during render): each trade widens
+  // its range, a refetch reconciles with the server's candle, a new bucket starts from its trade.
+  const liveKey = `${symbol}|${period}`
+  const [liveState, setLiveState] = useState<LiveState>(() => ({ key: liveKey, server: lastBar, trade: undefined, bar: lastBar }))
+  if (liveState.key !== liveKey || liveState.server !== lastBar || liveState.trade !== live) {
+    let bar: OhlcBar | undefined =
+      liveState.key !== liveKey ? lastBar : liveState.server !== lastBar ? reconcileBar(liveState.bar, lastBar) : liveState.bar
+    if (live && live !== liveState.trade) bar = mergeTrade(bar, live, periodSeconds)
+    setLiveState({ key: liveKey, server: lastBar, trade: live, bar })
+  }
+  const latest = liveState.bar
+  /** Mirrors the accumulated bar for effects that repaint the series without a new trade. */
+  const latestRef = useRef<{ key: string; bar: OhlcBar | undefined } | null>(null)
 
   const windowFrom = highlight?.from ?? sma?.windowStart
   const windowTo = highlight?.to ?? sma?.windowEnd
@@ -408,17 +433,24 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
 
     shade.update(range, sma ? `SMA window, n = ${sma.requestedDataPoints}` : '', palette)
 
+    // setData dropped the live-accumulated newest bar; put it back if it belongs to this series.
+    const accumulated = latestRef.current
+    if (accumulated?.key === liveKey && accumulated.bar && lastBar && accumulated.bar.time >= lastBar.time) {
+      safeUpdate(candleSeries, accumulated.bar)
+    }
+
     if (fittedKeyRef.current !== fitKey && rows.length > 0) {
       chart.timeScale().fitContent()
       fittedKeyRef.current = fitKey
     }
-  }, [rows, smaLine, sma, range, period, lastBar, fitKey, themeVersion])
+  }, [rows, smaLine, sma, range, period, lastBar, fitKey, themeVersion, liveKey])
 
-  // Live trades move the last candle between refetches.
-  const latest = useMemo(() => mergeLive(lastBar, live, periodSeconds), [lastBar, live, periodSeconds])
+  // Live trades move the newest candle between refetches.
   useEffect(() => {
-    if (latest && latest !== lastBar) candleSeriesRef.current?.update(latest)
-  }, [latest, lastBar])
+    latestRef.current = { key: liveKey, bar: latest }
+    const series = candleSeriesRef.current
+    if (series && latest && latest !== lastBar) safeUpdate(series, latest)
+  }, [latest, lastBar, liveKey])
 
   const shown = hover?.bar ?? latest
   const shownSma = hover ? hover.sma : smaLine.at(-1)?.value
@@ -464,6 +496,15 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
       </figcaption>
     </figure>
   )
+}
+
+/** `update` throws for a bar older than the series' newest one; a stale trade must not crash the page. */
+function safeUpdate(series: ISeriesApi<'Candlestick'>, bar: OhlcBar) {
+  try {
+    series.update(toChartBar(bar))
+  } catch {
+    // The next refetch redraws the series from the API anyway.
+  }
 }
 
 function Ohlc({ label, value }: { label: string; value: number }) {
