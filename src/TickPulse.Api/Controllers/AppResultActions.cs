@@ -13,14 +13,8 @@ internal static class AppResultActions
     /// </summary>
     public static IActionResult ToActionResult<T, TContract>(this ControllerBase controller, AppResult<T> result, Func<T, TContract> map)
         where TContract : class =>
-        controller.ToActionResult(result, map, _ => StatusCodes.Status200OK);
-
-    /// <summary>Like the 200 overload, with the success status chosen from the value (e.g. 201 or 200).</summary>
-    public static IActionResult ToActionResult<T, TContract>(
-        this ControllerBase controller, AppResult<T> result, Func<T, TContract> map, Func<T, int> status)
-        where TContract : class =>
         result is { IsSuccess: true, Value: { } value }
-            ? controller.StatusCode(status(value), map(value))
+            ? controller.Ok(map(value))
             : controller.ToProblem(result);
 
     /// <summary>A 204 without a body, or the problem of the failure.</summary>

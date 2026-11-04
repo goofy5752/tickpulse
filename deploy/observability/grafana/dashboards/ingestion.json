@@ -2040,7 +2040,7 @@
           "id": 23,
           "type": "bargauge",
           "title": "Candles backfilled",
-          "description": "Klines imported per symbol in the selected time range.",
+          "description": "Klines imported per symbol in the selected time range. Each process exports its own cumulative series, whose first sample already holds what it counted before its first export, so increase() would miss that jump: a series that started in the range counts in full, one that started before it counts from its value at the start of the range. That start value is looked up at most 5 min back (the Prometheus lookback): if telemetry had a gap longer than 5 min at the start of the range, an older series has no start value and counts in full, so the bar over-reports by what that process stored before the range.",
           "targets": [
             {
               "refId": "A",
@@ -2049,7 +2049,7 @@
                 "uid": "prom"
               },
               "editorMode": "code",
-              "expr": "sort_desc(sum by (symbol) (increase(tickpulse_backfill_candles_total{service_name=\"tickpulse-api\", symbol=~\"$symbol\"}[$__range])))",
+              "expr": "sort_desc(sum by (symbol) ((max_over_time(tickpulse_backfill_candles_total{service_name=\"tickpulse-api\", symbol=~\"$symbol\"}[$__range]) - tickpulse_backfill_candles_total{service_name=\"tickpulse-api\", symbol=~\"$symbol\"} offset $__range) or max_over_time(tickpulse_backfill_candles_total{service_name=\"tickpulse-api\", symbol=~\"$symbol\"}[$__range])))",
               "legendFormat": "{{symbol}}",
               "range": false,
               "instant": true

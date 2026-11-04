@@ -2,7 +2,9 @@ namespace TickPulse.Application.Abstractions;
 
 /// <summary>
 /// A symbol TickPulse monitors (or used to monitor, when inactive). <c>DeactivatedAtUtc</c> is when it was last
-/// deactivated, or <see langword="null"/> if it never was; reactivating keeps it.
+/// deactivated, or <see langword="null"/> if it never was; reactivating keeps it, because the backfill needs it to find
+/// the stretch the symbol was inactive. It is internal state: the admin contract shows it only while the symbol is
+/// inactive.
 /// </summary>
 public sealed record MonitoredSymbol(
     int Id,
