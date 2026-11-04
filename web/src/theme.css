@@ -1,0 +1,317 @@
+/*
+ * Aurora Glass: the TickPulse visual system.
+ *
+ * Dark is the default. A night-sky base with two soft auroras (violet top-left, teal top-right)
+ * and translucent glass panels over it. Market colour is semantic and never decorative:
+ * teal = up, rose = down, violet = the SMA. Light mode keeps the same roles on a cool
+ * lavender-white base, with deeper hues so text stays readable.
+ *
+ * Tokens live in @theme so Tailwind generates utilities for them (bg-bg, text-up, border-glass-border,
+ * backdrop-blur-glass, font-mono, ...). The light theme only reassigns the variables.
+ */
+
+@import 'tailwindcss';
+
+@import '@fontsource/inter/latin-400.css';
+@import '@fontsource/inter/latin-500.css';
+@import '@fontsource/inter/latin-600.css';
+@import '@fontsource/inter/latin-700.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
+
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+@custom-variant light (&:where([data-theme='light'], [data-theme='light'] *));
+
+/* static: emit every token, used or not, so script (e.g. chart colours) can read them at runtime. */
+@theme static {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  /* Base and ink */
+  --color-bg: #07070d;
+  --color-ink: #ecedf7;
+  --color-ink-muted: rgb(236 237 247 / 0.64);
+  /* Faint is the quietest text tone and still clears 4.5:1, even over the violet glow. */
+  --color-ink-faint: rgb(236 237 247 / 0.58);
+
+  /* Market semantics */
+  --color-up: #5eead4;
+  --color-down: #fb7185;
+  --color-sma: #c084fc;
+  --color-up-soft: rgb(94 234 212 / 0.16);
+  --color-down-soft: rgb(251 113 133 / 0.16);
+  --color-sma-soft: rgb(192 132 252 / 0.14);
+
+  /* Raw response bodies in the API playground. Deliberately outside the market hues, so a
+     highlighted number never reads as "up", "down" or "SMA". */
+  --color-code-name: #8fd3ff;
+  --color-code-string: #e8d5a6;
+
+  /* Glass */
+  --color-glass: rgb(255 255 255 / 0.055);
+  --color-glass-strong: rgb(255 255 255 / 0.09);
+  --color-glass-border: rgb(255 255 255 / 0.11);
+  --color-glass-highlight: rgb(255 255 255 / 0.07);
+  --blur-glass: 18px;
+  --radius-glass: 1rem;
+  --radius-control: 0.625rem;
+
+  /* Aurora glows */
+  --color-glow-violet: #3b1d6e;
+  --color-glow-teal: #0e4a5c;
+  --color-glow-plum: #2a0f45;
+
+  --shadow-glass:
+    inset 0 1px 0 0 var(--color-glass-highlight), 0 24px 48px -24px rgb(0 0 0 / 0.55);
+
+  --ease-glide: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  :root,
+  [data-theme='dark'] {
+    color-scheme: dark;
+  }
+
+  [data-theme='light'] {
+    color-scheme: light;
+
+    --color-bg: #f3f2fa;
+    --color-ink: #17152b;
+    --color-ink-muted: rgb(23 21 43 / 0.66);
+    --color-ink-faint: rgb(23 21 43 / 0.62);
+
+    /* Deeper hues so figures clear WCAG AA (≥ 4.5:1) on the pale base and on their soft pills. */
+    --color-up: #0d6b63;
+    --color-down: #be123c;
+    --color-sma: #7e22ce;
+    --color-up-soft: rgb(13 107 99 / 0.1);
+    --color-down-soft: rgb(190 18 60 / 0.1);
+    --color-sma-soft: rgb(126 34 206 / 0.09);
+
+    --color-code-name: #0b5f8f;
+    --color-code-string: #7a5510;
+
+    --color-glass: rgb(255 255 255 / 0.62);
+    --color-glass-strong: rgb(255 255 255 / 0.82);
+    --color-glass-border: rgb(23 21 43 / 0.09);
+    --color-glass-highlight: rgb(255 255 255 / 0.9);
+
+    --color-glow-violet: #ddd0ff;
+    --color-glow-teal: #c6edf1;
+    --color-glow-plum: #ecdcff;
+
+    --shadow-glass:
+      inset 0 1px 0 0 var(--color-glass-highlight), 0 18px 40px -24px rgb(40 30 90 / 0.22);
+  }
+
+  html {
+    background-color: var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: 100%;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    min-height: 100dvh;
+    font-size: 0.875rem;
+    line-height: 1.55;
+    /* Inter's disambiguation set: 1/l/I and 0/O read unambiguously in ticker symbols. */
+    font-feature-settings: 'ss02', 'cv11';
+  }
+
+  /* The aurora: fixed behind everything so panels slide over it instead of scrolling it away. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(70% 45% at 8% 0%, var(--color-glow-violet) 0%, transparent 62%),
+      radial-gradient(60% 40% at 100% 6%, var(--color-glow-teal) 0%, transparent 60%),
+      radial-gradient(55% 35% at 50% 105%, var(--color-glow-plum) 0%, transparent 70%),
+      var(--color-bg);
+  }
+
+  /* Figures line up in columns and do not jitter as live prices tick. */
+  data,
+  time,
+  output,
+  td,
+  th {
+    font-variant-numeric: tabular-nums;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+    font-feature-settings: normal;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-sma);
+    outline-offset: 2px;
+    border-radius: 0.375rem;
+  }
+
+  ::selection {
+    background: var(--color-sma-soft);
+    color: var(--color-ink);
+  }
+}
+
+/* A translucent panel over the aurora. */
+@utility glass {
+  background-color: var(--color-glass);
+  border: 1px solid var(--color-glass-border);
+  border-radius: var(--radius-glass);
+  box-shadow: var(--shadow-glass);
+  /* Standard property only: Lightning CSS adds the -webkit- prefix for Safari itself. */
+  backdrop-filter: blur(var(--blur-glass)) saturate(140%);
+}
+
+/* Any element that shows a number. */
+@utility num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum', 'ss02';
+  letter-spacing: -0.01em;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    /* Anchored sections land below the sticky nav. */
+    scroll-padding-top: 5.5rem;
+  }
+}
+
+/* The selected ticker tile: the SMA violet marks what the chart shows. */
+@utility tile-selected {
+  background-color: var(--color-glass-strong);
+  border-color: color-mix(in oklab, var(--color-sma) 55%, transparent);
+  box-shadow:
+    inset 0 1px 0 0 var(--color-glass-highlight),
+    0 0 0 1px color-mix(in oklab, var(--color-sma) 22%, transparent),
+    0 18px 40px -22px color-mix(in oklab, var(--color-sma) 55%, transparent);
+}
+
+/* A horizontally scrolling row with a slim scrollbar that only shows on hover. */
+@utility tile-rail {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  &:hover,
+  &:focus-within {
+    scrollbar-color: var(--color-glass-border) transparent;
+  }
+}
+
+/* Native select with a chevron that reads in both themes. */
+@utility select-chevron {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%238d8aa6' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 0.75rem;
+}
+
+/* Loading placeholder. */
+@utility skeleton {
+  background: linear-gradient(
+      100deg,
+      transparent 20%,
+      color-mix(in oklab, var(--color-ink) 7%, transparent) 50%,
+      transparent 80%
+    )
+    var(--color-glass-strong);
+  background-size: 220% 100%;
+  animation: tp-shimmer 1.6s var(--ease-glide) infinite;
+}
+
+@keyframes tp-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+/* A price that just moved: a brief tint in the direction of the move. */
+@utility price-flash-up {
+  animation: tp-flash-up 900ms var(--ease-glide);
+}
+@utility price-flash-down {
+  animation: tp-flash-down 900ms var(--ease-glide);
+}
+
+@keyframes tp-flash-up {
+  0%,
+  25% {
+    color: var(--color-up);
+    text-shadow: 0 0 22px color-mix(in oklab, var(--color-up) 45%, transparent);
+  }
+}
+@keyframes tp-flash-down {
+  0%,
+  25% {
+    color: var(--color-down);
+    text-shadow: 0 0 22px color-mix(in oklab, var(--color-down) 45%, transparent);
+  }
+}
+
+/* The live dot breathes; the waiting dot blinks slowly. */
+@utility status-dot-live {
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: inherit;
+    animation: tp-ping 2.4s var(--ease-glide) infinite;
+  }
+}
+@utility status-dot-wait {
+  animation: tp-blink 1.4s ease-in-out infinite;
+}
+
+@keyframes tp-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  70%,
+  100% {
+    transform: scale(2.8);
+    opacity: 0;
+  }
+}
+@keyframes tp-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* No flashing, pulsing or shimmering at all, not even for a frame. */
+  .price-flash-up,
+  .price-flash-down,
+  .status-dot-wait,
+  .status-dot-live::after,
+  .skeleton {
+    animation: none !important;
+  }
+}
