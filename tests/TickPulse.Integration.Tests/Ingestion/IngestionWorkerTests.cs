@@ -201,6 +201,57 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Restart_GapFillsTradesMissedWhileDown_ExactlyOnce()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var t0 = Now.AddMinutes(-5);
+        await using (var before = await StartAsync(db, _server))
+        {
+            await WaitForSeededSubscriptionAsync(before);
+            for (var i = 1; i <= 5; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+                await _server.PushTradeAsync("ETHUSDT", 1000 + i, 3000m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 5);
+            await WaitForTradeCountAsync(db, "ETHUSDT", 5);
+        }
+
+        // The process is gone (a restart or redeploy). Trades keep happening on the exchange; only REST has them.
+        await _server.WaitUntilAsync(s => s.ActiveConnections == 0, WaitTimeout, ct);
+        for (var i = 6; i <= 10; i++)
+        {
+            _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+        }
+
+        for (var i = 1006; i <= 1008; i++)
+        {
+            _server.AddTrade("ETHUSDT", i, 3000m + i, t0.AddMilliseconds(i));
+        }
+
+        // A new process: nothing in memory, so the gaps can only come from the database.
+        await using var after = await StartAsync(db, _server);
+        await WaitForSeededSubscriptionAsync(after);
+        for (var i = 11; i <= 15; i++)
+        {
+            await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+        }
+
+        await _server.PushTradeAsync("ETHUSDT", 1009, 4009m, t0.AddMilliseconds(1009));
+
+        await WaitForTradeCountAsync(db, "BTCUSDT", 15);
+        await WaitForTradeCountAsync(db, "ETHUSDT", 9);
+        (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 15).Select(i => (long)i));
+        (await TradeIdsAsync(db, "ETHUSDT")).ShouldBe(Enumerable.Range(1001, 9).Select(i => (long)i));
+        (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(15);
+        (await CandleTickCountAsync(db, "ETHUSDT")).ShouldBe(9);
+        _server.ReceivedRequests.ShouldContain("/api/v3/aggTrades?symbol=BTCUSDT&fromId=6&limit=1000");
+        _server.ReceivedRequests.ShouldContain("/api/v3/aggTrades?symbol=ETHUSDT&fromId=1006&limit=1000");
+        _server.ReceivedRequests.ShouldNotContain(r => r.Contains("symbol=ADAUSDT&fromId", StringComparison.Ordinal)); // nothing stored, nothing to seed
+    }
+
+    [Fact]
     public async Task Rotation_OverlapsWithoutLossOrDuplicates()
     {
         await using var host = await StartAsync(db, _server, new Dictionary<string, string?> { ["Ingestion:RotationInterval"] = "00:00:02" });
@@ -380,6 +431,7 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
             provider.GetRequiredService<GapFiller>(),
             provider.GetRequiredService<SymbolIdCache>(),
             provider.GetRequiredService<GapFillWatermarks>(),
+            provider.GetRequiredService<IMarketDataQueries>(),
             provider.GetRequiredService<ISymbolChangeSignal>(),
             state,
             provider.GetRequiredService<IOptions<IngestionOptions>>(),

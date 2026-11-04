@@ -89,6 +89,17 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     internal const string BackfillRangeSql =
         "SELECT min(bucket_start), max(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 2 AND bucket_start < $2";
 
+    // $1 the lower trade-time bound (exclusive). Per active symbol, one backward probe of the primary key
+    // (symbol_id, agg_trade_id, trade_time) in each chunk that the bound leaves, so only the recent chunks are read.
+    internal const string LatestTradeIdsSql = """
+        SELECT s.name, t.id
+          FROM symbols AS s
+         CROSS JOIN LATERAL (
+               SELECT max(agg_trade_id) AS id FROM price_ticks
+                WHERE symbol_id = s.id AND trade_time > $1) AS t
+         WHERE s.is_active AND t.id IS NOT NULL
+        """;
+
     /// <inheritdoc />
     /// <remarks>
     /// Exact over <c>[fromUtc, toUtc]</c> (both inclusive): whole minutes are read from the stream candles and the
@@ -285,6 +296,26 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
         return await reader.ReadAsync(ct) && !reader.IsDBNull(0)
             ? new MinuteRange(reader.GetDateTime(0), reader.GetDateTime(1))
             : null;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Keep <paramref name="sinceUtc"/> recent: the bound decides how many chunks are probed, and a bound inside the
+    /// compressed chunks makes the probe decompress them.
+    /// </remarks>
+    public async Task<IReadOnlyDictionary<string, long>> GetLatestTradeIdsAsync(DateTime sinceUtc, CancellationToken ct)
+    {
+        RequireUtc(sinceUtc, nameof(sinceUtc));
+        await using var command = dataSource.CreateCommand(LatestTradeIdsSql);
+        command.Parameters.Add(TimestampTz(sinceUtc));
+        var ids = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            ids[reader.GetString(0)] = reader.GetInt64(1);
+        }
+
+        return ids;
     }
 
     private static void RequireUtc(DateTime value, string paramName)

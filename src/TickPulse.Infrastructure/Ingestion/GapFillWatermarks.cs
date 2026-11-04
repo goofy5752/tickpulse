@@ -21,6 +21,8 @@ public interface IGapFillWatermark
 /// <item>Only a gap-fill that completed, and saw no change to the entry while it ran, closes the gap
 /// (<see cref="Filled"/>); the version detects such changes.</item>
 /// <item>Only active symbols are tracked; <see cref="Forget"/> drops a removed one.</item>
+/// <item><see cref="Seed"/> opens a gap after the last stored trade id of every symbol the process does not know yet,
+/// so trades that traded while no instance was leader (restart, redeploy, handover) are recovered too.</item>
 /// </list>
 /// <para>Lives for the whole process, so gaps survive leadership sessions. Thread-safe.</para>
 /// </remarks>
@@ -65,6 +67,34 @@ public sealed class GapFillWatermarks(SymbolIdCache symbols) : IGapFillWatermark
                     entry.Version = ++_version;
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Opens a gap after the last trade id the database holds for each symbol, at the start of a leadership session:
+    /// the stream was not received while no instance led (a restart, a redeploy, a handover), so gap-fill has to
+    /// recover the trades after that id. A symbol that already has an entry keeps it: what this process knows (a
+    /// dropped batch, an open gap) is never ahead of what is stored, and raising it could skip trades.
+    /// </summary>
+    /// <param name="lastStoredIds">Last stored trade id per symbol; the caller passes only active symbols.</param>
+    public void Seed(IEnumerable<KeyValuePair<string, long>> lastStoredIds)
+    {
+        ArgumentNullException.ThrowIfNull(lastStoredIds);
+        lock (_gate)
+        {
+            foreach (var (symbol, lastId) in lastStoredIds)
+            {
+                _entries.TryAdd(symbol, new Entry { LastId = lastId, Pending = true, Version = ++_version });
+            }
+        }
+    }
+
+    /// <summary>Whether the symbol has an entry, open gap or not.</summary>
+    public bool Contains(string symbol)
+    {
+        lock (_gate)
+        {
+            return _entries.ContainsKey(symbol);
         }
     }
 

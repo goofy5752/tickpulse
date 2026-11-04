@@ -121,6 +121,49 @@ public sealed class GapFillWatermarksTests
         Start("BTCUSDT", pendingOnly: false).ShouldBeNull();
     }
 
+    [Fact]
+    public void Seed_OpensAGapAfterTheStoredId_ForSymbolsNotKnownYet()
+    {
+        _marks.Contains("BTCUSDT").ShouldBeFalse();
+
+        _marks.Seed([new("BTCUSDT", 120), new("ETHUSDT", 7)]);
+
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(120);
+        Start("ETHUSDT", pendingOnly: true).ShouldBe(7);
+        _marks.Contains("BTCUSDT").ShouldBeTrue();
+
+        // A fresh process seeds before its first reconcile: the symbol cache is still empty, but the database
+        // listed the symbols as active.
+        var fresh = new GapFillWatermarks(new SymbolIdCache());
+        fresh.Seed([new("BTCUSDT", 1)]);
+        fresh.TryGetStart("BTCUSDT", pendingOnly: true, out var lastId, out _).ShouldBeTrue();
+        lastId.ShouldBe(1);
+    }
+
+    [Fact]
+    public void Seed_KeepsWhatTheProcessKnows()
+    {
+        _marks.Merge([new("BTCUSDT", 100)], gap: true);
+        _marks.Lower("ETHUSDT", 40); // a dropped batch: the database may already hold later trades
+
+        _marks.Seed([new("BTCUSDT", 150), new("ETHUSDT", 90)]);
+
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(100);
+        Start("ETHUSDT", pendingOnly: true).ShouldBe(39);
+    }
+
+    [Fact]
+    public void Seed_GapClosesOnlyWhenFilled()
+    {
+        _marks.Seed([new("BTCUSDT", 120)]);
+        _marks.Merge([new("BTCUSDT", 500)], gap: false); // a connection ended before the fill: never skip the gap
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(120);
+
+        _marks.TryGetStart("BTCUSDT", pendingOnly: true, out _, out var version).ShouldBeTrue();
+        _marks.Filled("BTCUSDT", version);
+        Start("BTCUSDT", pendingOnly: true).ShouldBeNull();
+    }
+
     private long? Start(string symbol, bool pendingOnly) =>
         _marks.TryGetStart(symbol, pendingOnly, out var lastId, out _) ? lastId : null;
 

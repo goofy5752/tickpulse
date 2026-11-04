@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Time.Testing;
 using Npgsql;
 using TickPulse.Application.Abstractions;
@@ -588,6 +589,66 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         (await queries.BackfillRangeBeforeAsync(Btc, Start, Ct)).ShouldBeNull();
         (await queries.BackfillRangeBeforeAsync(Ada, Start.AddHours(1), Ct)).ShouldBeNull();
         await Should.ThrowAsync<ArgumentException>(() => queries.BackfillRangeBeforeAsync(Btc, DateTime.SpecifyKind(Start, DateTimeKind.Unspecified), Ct));
+    }
+
+    [Fact]
+    public async Task LatestTradeIds_PerActiveSymbol_OnlyTradesAfterTheBound()
+    {
+        var queries = Queries();
+        (await queries.GetLatestTradeIdsAsync(Start, Ct)).ShouldBeEmpty();
+
+        // Ids that do not grow with time inside a minute: the highest id counts, not the latest trade time.
+        await Writer().WriteBatchAsync(
+        [
+            NewTick(Btc, 7, 1m, 1m, Start.AddHours(-2)),        // before the bound
+            NewTick(Btc, 10, 1m, 1m, Start.AddMinutes(1)),
+            NewTick(Btc, 12, 1m, 1m, Start.AddMinutes(2)),
+            NewTick(Btc, 11, 1m, 1m, Start.AddMinutes(3)),
+            NewTick(Eth, 500, 1m, 1m, Start.AddMinutes(-90)),   // only before the bound
+            NewTick(Ada, 40, 1m, 1m, Start.AddMinutes(5)),
+        ], Ct);
+        await ExecuteAsync("UPDATE symbols SET is_active = false WHERE id = 2"); // ADAUSDT
+
+        var ids = await queries.GetLatestTradeIdsAsync(Start.AddHours(-1), Ct);
+
+        ids.ShouldBe(new Dictionary<string, long> { ["BTCUSDT"] = 12 });
+        ids.ContainsKey("btcusdt").ShouldBeTrue(); // names match case-insensitively
+        (await queries.GetLatestTradeIdsAsync(Start.AddHours(-3), Ct))
+            .OrderBy(p => p.Key, StringComparer.Ordinal).ShouldBe([new("BTCUSDT", 12L), new("ETHUSDT", 500L)]);
+        (await queries.GetLatestTradeIdsAsync(Start.AddMinutes(3), Ct)).ShouldBeEmpty(); // the bound is exclusive
+        await Should.ThrowAsync<ArgumentException>(() => queries.GetLatestTradeIdsAsync(DateTime.SpecifyKind(Start, DateTimeKind.Unspecified), Ct));
+    }
+
+    [Fact]
+    public async Task LatestTradeIdsQuery_ProbesThePrimaryKey_OfRecentChunksOnly()
+    {
+        // Ticks in three daily chunks; the bound leaves only the newest one.
+        await Writer().WriteBatchAsync(
+        [
+            NewTick(Btc, 1, 1m, 1m, Start.AddDays(-3)),
+            NewTick(Btc, 2, 1m, 1m, Start.AddDays(-2)),
+            NewTick(Btc, 3, 1m, 1m, Start.AddHours(1)),
+        ], Ct);
+
+        var plan = await ExplainAsync(MarketDataQueries.LatestTradeIdsSql, Ts(Start));
+
+        // A backward probe of each remaining chunk's primary key, and the chunks entirely before the bound are not
+        // read at all (other tests may have left later, empty chunks behind; those are probed too).
+        plan.ShouldMatch(@"Index (Only )?Scan Backward using \S*pk_price_ticks\S* on _hyper_\d+_\d+_chunk");
+        plan.ShouldNotContain("Seq Scan on _hyper");
+        var older = new List<string>();
+        await using (var command = _dataSource.CreateCommand("SELECT show_chunks('price_ticks', older_than => $1)::text"))
+        {
+            command.Parameters.Add(Ts(Start.AddDays(-1)));
+            await using var reader = await command.ExecuteReaderAsync(Ct);
+            while (await reader.ReadAsync(Ct))
+            {
+                older.Add(reader.GetString(0).Split('.')[^1]);
+            }
+        }
+
+        older.Count.ShouldBeGreaterThanOrEqualTo(2);
+        older.ShouldAllBe(chunk => !Regex.IsMatch(plan, $@"\b{chunk}\b"));
     }
 
     private static decimal RandomDecimal(Random rng, long maxUnitsExclusive) => rng.NextInt64(1, maxUnitsExclusive) / 100_000_000m;

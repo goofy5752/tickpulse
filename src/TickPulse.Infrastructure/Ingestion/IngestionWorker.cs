@@ -22,6 +22,9 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// <para>The worker is the only owner of its <see cref="PostgresLeaderLock"/> (it is not in the container). Other
 /// components that must run only on the leader, such as the backfill worker, read
 /// <see cref="IngestionState.IsLeader"/> and never touch the lock.</para>
+/// <para>Starting a session seeds <see cref="GapFillWatermarks"/> from the database (each active symbol's last stored
+/// trade id within <see cref="SeedWindow"/>) before anything is subscribed, so the first connection gap-fills the trades
+/// that happened while no instance led: a restart, a redeploy, a crash or a handover loses nothing.</para>
 /// <para>Ending a session (shutdown or lost leadership) clears <see cref="IngestionState.IsLeader"/>, stops accepting
 /// trades (no more commands, the pumps and gap-fills stop), completes the channel and writes what it still holds within
 /// <see cref="FlushDeadline"/>, closes the connections and only then releases the lock. Ticks that could not be written
@@ -38,6 +41,7 @@ internal sealed partial class IngestionWorker(
     GapFiller gapFiller,
     SymbolIdCache symbols,
     GapFillWatermarks watermarks,
+    IMarketDataQueries queries,
     ISymbolChangeSignal signal,
     IngestionState state,
     IOptions<IngestionOptions> options,
@@ -54,6 +58,14 @@ internal sealed partial class IngestionWorker(
 
     /// <summary>Upper bound of the wait before the leadership loop starts over after an unexpected error.</summary>
     public static readonly TimeSpan MaxRestartDelay = TimeSpan.FromSeconds(30);
+
+    /// <summary>How far back the start of a session looks for each symbol's last stored trade.</summary>
+    /// <remarks>
+    /// Well inside <see cref="TickWriter.ReplayWindow"/>, so every trade the gap-fill recovers is still insertable, and
+    /// inside the uncompressed chunks (compression starts at two days), so the lookup is a primary-key probe of the
+    /// newest one or two daily chunks per symbol. A symbol that stored nothing for longer starts like a new one.
+    /// </remarks>
+    public static readonly TimeSpan SeedWindow = TimeSpan.FromDays(1);
 
     private readonly ILogger _logger = loggerFactory.CreateLogger<IngestionWorker>();
 
@@ -163,6 +175,10 @@ internal sealed partial class IngestionWorker(
         var watchdog = WatchLeadershipAsync(session);
         try
         {
+            // 0. Before anything streams: no instance received the stream while none led (a restart, redeploy or
+            //    handover), so open a gap after each symbol's last stored trade. A failure ends the session; it is
+            //    retried rather than streaming on with the gap unnoticed.
+            await SeedWatermarksAsync(session.Token).ConfigureAwait(false);
             await supervisor.RunAsync(session.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (!session.IsCancellationRequested)
@@ -205,6 +221,13 @@ internal sealed partial class IngestionWorker(
             await leaderLock.ReleaseAsync().ConfigureAwait(false);
             LogSessionEnded();
         }
+    }
+
+    private async Task SeedWatermarksAsync(CancellationToken ct)
+    {
+        var lastIds = await queries.GetLatestTradeIdsAsync(clock.GetUtcNow().UtcDateTime - SeedWindow, ct).ConfigureAwait(false);
+        watermarks.Seed(lastIds);
+        LogSeeded(lastIds.Count);
     }
 
     private async Task FlushAsync(Task writer, CancellationTokenSource abandon)
@@ -266,6 +289,9 @@ internal sealed partial class IngestionWorker(
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Became the ingestion leader")]
     private partial void LogLeadershipAcquired();
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Gap-fill resumes after the last stored trade of {Count} symbol(s)")]
+    private partial void LogSeeded(int count);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Another instance holds the leader lock; standing by")]
     private partial void LogLeaderLockBusy();

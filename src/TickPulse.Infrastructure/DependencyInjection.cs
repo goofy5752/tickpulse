@@ -108,6 +108,7 @@ public static class DependencyInjection
             sp.GetRequiredService<GapFiller>(),
             sp.GetRequiredService<SymbolIdCache>(),
             sp.GetRequiredService<GapFillWatermarks>(),
+            sp.GetRequiredService<IMarketDataQueries>(),
             sp.GetRequiredService<ISymbolChangeSignal>(),
             sp.GetRequiredService<IngestionState>(),
             sp.GetRequiredService<IOptions<IngestionOptions>>(),
