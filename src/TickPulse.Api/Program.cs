@@ -49,6 +49,9 @@ services.AddControllers(o =>
     })
     .AddXmlDataContractSerializerFormatters();
 
+// A 406 is logged once, by the request log; not also as a framework Warning per request.
+services.AddQuietNotAcceptable();
+
 services.AddSingleton<AnalyticsService>();
 services.AddTickPulseAdmin();
 
@@ -82,6 +85,7 @@ app.UseVaryByAcceptOnApi();
 app.UseAcceptHeaderNormalization();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
+app.UseDashboardRouteTag();
 app.UseDashboardAssetCaching();
 app.UseRouting();
 
@@ -107,7 +111,7 @@ app.MapScalarApiReference(SecurityHeaders.DocsPath.Value!, o => o
     .DisableTelemetry()
     .DisableAgent());
 app.MapDashboardAssets();
-app.MapFallbackToFile(DashboardRouteConstraint.FallbackPattern, "index.html");
+app.MapDashboardFallback();
 
 await app.RunAsync();
 

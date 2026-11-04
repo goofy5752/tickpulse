@@ -57,7 +57,9 @@ internal sealed class OtlpExport : IDisposable
 
         Metrics = Sdk.CreateMeterProviderBuilder()
             .SetResourceBuilder(resource)
-            .AddMeter(TickPulseMetrics.MeterName, "Microsoft.AspNetCore.RateLimiting")
+            // Http.Connections: signalr.server.active_connections, which the In-flight panel subtracts (the hub's
+            // long-lived requests would count as in flight otherwise).
+            .AddMeter(TickPulseMetrics.MeterName, "Microsoft.AspNetCore.RateLimiting", "Microsoft.AspNetCore.Http.Connections")
             .AddAspNetCoreInstrumentation()
             .AddHttpClientInstrumentation()
             .AddRuntimeInstrumentation()

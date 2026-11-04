@@ -16,11 +16,13 @@ internal sealed class DashboardRouteConstraint : IRouteConstraint
     public bool Match(HttpContext? httpContext, IRouter? route, string routeKey, RouteValueDictionary values, RouteDirection routeDirection)
     {
         ArgumentNullException.ThrowIfNull(values);
-        if (!values.TryGetValue(routeKey, out var value) || value is not string path || path.Length == 0)
-        {
-            return true;
-        }
+        return !values.TryGetValue(routeKey, out var value) || value is not string path || path.Length == 0 || !IsReserved(path);
+    }
 
+    /// <summary>Whether the path's first segment belongs to the API, the hub, health, the docs or the OpenAPI document.</summary>
+    public static bool IsReserved(string path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
         var first = path.AsSpan().TrimStart('/');
         var slash = first.IndexOf('/');
         if (slash >= 0)
@@ -32,10 +34,10 @@ internal sealed class DashboardRouteConstraint : IRouteConstraint
         {
             if (first.Equals(reserved, StringComparison.OrdinalIgnoreCase))
             {
-                return false;
+                return true;
             }
         }
 
-        return true;
+        return false;
     }
 }

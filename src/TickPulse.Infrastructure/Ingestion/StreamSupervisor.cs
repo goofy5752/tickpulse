@@ -33,6 +33,12 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// first streamed trade. Without it that minute's candle would only hold the trades after the subscription, and the
 /// backfill (which stops before the first streamed minute) never completes it. A lead-in whose lookup failed stays due
 /// and is tried again on the next connection.</para>
+/// <para><b>Tail-out.</b> The mirror of the lead-in: a symbol that is removed (its UNSUBSCRIBE acknowledged) stopped
+/// streaming mid-minute. A few seconds after that minute ends, one bounded REST pass fetches its trades from the last
+/// id this link delivered up to the minute's end, so that candle is not partial either. It runs in the background and
+/// never delays the unsubscribe; a failure only leaves the minute partial, as before. It stays inside the removal
+/// minute: it never stores a trade past the minute the stream stopped in, so a later reactivation's backfill of the
+/// inactive stretch still starts after it.</para>
 /// <para><b>Shutdown</b> is split so the worker can order it: cancel the token passed to <see cref="RunAsync"/> (no
 /// more commands, pumps and gap-fills stop writing), <see cref="StopAsync"/> (wait for them), then the worker
 /// completes and flushes the channel, then <see cref="DisposeAsync"/> closes the connections.</para>
@@ -71,6 +77,12 @@ internal sealed partial class StreamSupervisor(
     /// exchange's trade times cannot start it after the first streamed trade's minute.
     /// </summary>
     public static readonly TimeSpan LeadInClockSkew = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The tail-out of a removed symbol runs this long after the end of its last streamed minute, so that the minute is
+    /// over on the exchange too (a local clock slightly behind it) and REST has caught up with it.
+    /// </summary>
+    public static readonly TimeSpan TailOutDelay = TimeSpan.FromSeconds(5);
 
     // Log a trade for a symbol without an id once, then once per this many.
     private const int UnknownSymbolLogEvery = 10_000;
@@ -256,6 +268,7 @@ internal sealed partial class StreamSupervisor(
             if (signalled || UtcNow >= nextReconcile)
             {
                 var outcome = await reconciler.ReconcileAsync(current, ct).ConfigureAwait(false);
+                StartTailOuts(current, outcome.Unsubscribed, ct);
                 Forget(current, outcome.Unsubscribed);
                 watermarks.Verify(current.Spans);
                 RearmOpenGaps(current);
@@ -392,7 +405,7 @@ internal sealed partial class StreamSupervisor(
                     }
 
                     run++;
-                    link.Record(trade.Symbol, trade.AggTradeId);
+                    link.Record(trade.Symbol, trade.AggTradeId, trade.TradeTimeUtc);
                 }
 
                 CountReceived(runSymbol, ref run);
@@ -612,6 +625,55 @@ internal sealed partial class StreamSupervisor(
         }
     }
 
+    // A removed symbol stopped streaming mid-minute: once that minute is over, fetch the rest of it over REST, so its
+    // candle (and the close the 1m SMA uses) is the exchange's. Control loop only, right after the UNSUBSCRIBE ack and
+    // before Forget drops the link's ids; the fill runs in the background and never holds up the control loop.
+    private void StartTailOuts(StreamLink link, IReadOnlyList<string> unsubscribed, CancellationToken ct)
+    {
+        var ackedAt = UtcNow;
+        foreach (var symbol in unsubscribed)
+        {
+            // Nothing streamed on this link: no minute was left half done by it.
+            if (link.LastId(symbol) is not { } lastId || !symbols.TryGetId(symbol, out var symbolId))
+            {
+                continue;
+            }
+
+            // The end of the minute the stream stopped in: the ack's, or the last trade's when that is later (a local
+            // clock behind the exchange's).
+            var until = Period.OneMinute.AlignDown(ackedAt) + Period.OneMinute.Length;
+            if (link.LastTradeTimeUtc(symbol) is { } last && Period.OneMinute.AlignDown(last) + Period.OneMinute.Length > until)
+            {
+                until = Period.OneMinute.AlignDown(last) + Period.OneMinute.Length;
+            }
+
+            Track(TailOutAsync(symbolId, symbol, lastId, until, ct));
+        }
+    }
+
+    private async Task TailOutAsync(int symbolId, string symbol, long lastId, DateTime untilUtc, CancellationToken ct)
+    {
+        try
+        {
+            var wait = untilUtc + TailOutDelay - UtcNow;
+            if (wait > TimeSpan.Zero)
+            {
+                await Task.Delay(wait, clock, ct).ConfigureAwait(false);
+            }
+
+            var result = await gapFiller.TailOutAsync(symbolId, symbol, lastId, untilUtc, output, ct).ConfigureAwait(false);
+            LogTailedOut(symbol, result.Emitted, untilUtc, result.Complete);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The session is ending; the tail-out is best-effort.
+        }
+        catch (Exception ex)
+        {
+            LogTailOutFailed(ex, symbol);
+        }
+    }
+
     private void Forget(StreamLink link, IReadOnlyList<string> unsubscribed)
     {
         // A symbol that is re-added later starts fresh instead of gap-filling from where it was dropped.
@@ -660,6 +722,12 @@ internal sealed partial class StreamSupervisor(
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Gap-fill for {Symbol} failed; the gap stays open")]
     private partial void LogGapFillFailed(Exception exception, string symbol);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Tail-out of removed {Symbol}: {Count} trade(s) of its last minute (to {UntilUtc:o}) recovered (complete: {Complete})")]
+    private partial void LogTailedOut(string symbol, int count, DateTime untilUtc, bool complete);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Tail-out of removed {Symbol} failed; its last minute stays partial")]
+    private partial void LogTailOutFailed(Exception exception, string symbol);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Dropped trade(s) for {Symbol}, which has no known id ({Count} so far on this connection)")]
     private partial void LogUnknownSymbol(string symbol, long count);

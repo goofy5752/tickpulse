@@ -31,6 +31,9 @@ what happens to the ticks and candles already stored, and what a later re-add me
 - The 20-symbol limit ([0009](0009-admin-api-key-fails-closed.md)) counts **active** symbols only.
 - The repository keeps `deactivated_at` after a reactivation, because the backfill uses it to find the
   inactive stretch. The admin API shows `deactivatedAt` as `null` while a symbol is active, so clients
-  never see a stale value (defect F14 in the [defects log](../ai/defects-log.md)).
+  never see a stale value (defect F14 in the [defects log](../ai/defects-log.md)). It also records
+  `reactivated_at`: the stretch ends at the first minute streamed since the reactivation, not at the first
+  stream row after `deactivated_at`, which the old stream can still have written when its UNSUBSCRIBE took
+  effect late.
 - `GET /api/symbols` lists inactive symbols too, with `isActive: false`, so clients can still find
   their history.

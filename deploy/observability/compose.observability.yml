@@ -34,6 +34,8 @@ services:
         limits:
           memory: 128M
     restart: unless-stopped
+    # Time to flush and close on SIGTERM; without it Compose kills the container after 1 s.
+    stop_grace_period: 30s
     logging: *logging
     networks: [tickpulse]
 
@@ -65,6 +67,8 @@ services:
         limits:
           memory: 256M
     restart: unless-stopped
+    # Time to flush and close on SIGTERM; without it Compose kills the container after 1 s.
+    stop_grace_period: 30s
     logging: *logging
     networks: [tickpulse]
 
@@ -84,6 +88,8 @@ services:
         limits:
           memory: 256M
     restart: unless-stopped
+    # Time to flush and close on SIGTERM; without it Compose kills the container after 1 s.
+    stop_grace_period: 30s
     logging: *logging
     networks: [tickpulse]
 
@@ -107,6 +113,8 @@ services:
         limits:
           memory: 256M
     restart: unless-stopped
+    # Time to flush and close on SIGTERM; without it Compose kills the container after 1 s.
+    stop_grace_period: 30s
     logging: *logging
     networks: [tickpulse]
 
@@ -176,6 +184,8 @@ services:
         limits:
           memory: 256M
     restart: unless-stopped
+    # Time to flush and close on SIGTERM; without it Compose kills the container after 1 s.
+    stop_grace_period: 30s
     logging: *logging
     networks: [tickpulse]
 
