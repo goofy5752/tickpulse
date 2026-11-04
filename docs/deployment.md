@@ -8,6 +8,9 @@ run on a shared VPS behind Cloudflare. The whole deployment is code in this repo
 - the deploy and smoke-test scripts (`deploy/deploy.sh`, `deploy/smoke.sh`)
 - the CD jobs (`image` and `deploy` in `.github/workflows/ci.yml`)
 
+How TickPulse would run with more than one instance, on managed services, is in
+[Scale-out production design](#scale-out-production-design) at the end.
+
 ## Live topology
 
 ```mermaid
@@ -389,3 +392,183 @@ dc start api
   - Logs are capped by the json-file limits.
   - Prometheus keeps 30 days and at most 4 GB, and Loki and Tempo keep 14 days.
   - `deploy.sh` keeps only two api image tags.
+
+## Scale-out production design
+
+The live deployment is one API container and one database on one host. This section describes how
+TickPulse would run when it has to survive the loss of a host, serve more traffic than one container
+handles, and be operated by more than one person. It targets Azure; the same shape works on any
+platform with managed containers and managed PostgreSQL.
+
+The image, the HTTP contract and the data model stay as they are. TickPulse was built for this from
+the start: any number of instances can serve the API, and a PostgreSQL advisory lock picks the single
+ingestion leader ([ADR 0011](adr/0011-single-process-with-a-leader-lock.md)).
+
+```mermaid
+flowchart LR
+    users(["Browser · CLI · curl"]) --> edge["Cloudflare or Azure Front Door<br/>TLS · WAF · rate limiting · compression"]
+
+    subgraph aca["Azure Container Apps environment (VNet-integrated)"]
+        api["tickpulse-api<br/>2–N replicas, HTTP scale rule<br/>workers off"]
+        ingest["tickpulse-ingest<br/>minReplicas = maxReplicas = 1<br/>ingestion + backfill"]
+        job["tickpulse-migrate<br/>Container Apps job<br/>once per release"]
+        otel["managed OpenTelemetry agent"]
+    end
+
+    edge --> api
+    api -- "SignalR server SDK" --> signalr["Azure SignalR Service"]
+    ingest -- "SignalR server SDK" --> signalr
+    users -. "WebSocket /hubs/market" .-> signalr
+
+    api --> pg[("Managed PostgreSQL<br/>private endpoint")]
+    ingest --> pg
+    job --> pg
+    ingest -- "NAT gateway, static IP" --> binance(["Binance WS + REST"])
+
+    kv["Key Vault"] -. "secret references<br/>(managed identity)" .-> api & ingest & job
+    api & ingest --> otel --> ai["Application Insights /<br/>Azure Monitor"]
+```
+
+### Compute: Azure Container Apps
+
+Two apps from the same image, plus a job:
+
+- **`tickpulse-api`**: the API, the dashboard and the hub's server side. `minReplicas: 2` across
+  availability zones, an HTTP scale rule on concurrent requests, and the hosted workers switched off.
+  One API container on the local stack served `24hAvgPrice` at about 6,400 req/s with a p95 of
+  12.7 ms and peaked at 324 MiB of memory under load, so 0.5 vCPU and 1 GiB per replica is a
+  reasonable starting point, to be tuned from the metrics.
+- **`tickpulse-ingest`**: the same image with ingestion and backfill on and no public ingress,
+  `minReplicas = maxReplicas = 1`. Ingestion gets its own CPU, so API load cannot raise ingest lag.
+- **`tickpulse-migrate`**: a Container Apps job that runs the migrations before a release. Both apps
+  run with `Database__RunMigrationsOnStartup=false`.
+
+The leader lock stays in force in this layout. `maxReplicas = 1` is not a guarantee: during a revision
+change, or when the platform replaces a replica, two ingest replicas can run for a while. Only the
+lock holder ingests; the other stands by (`/health/ready` reports `Standby`, which counts as ready) and
+takes over within `Ingestion:LeaderRetryInterval` once the lock frees. The gap-fill then recovers the
+trades missed during the handover ([ADR 0022](adr/0022-gap-fill-watermarks-seeded-from-the-database.md)).
+
+The simpler variant, one app in which every replica runs the workers and the lock elects one, works
+today without code changes. It is a sound first step, but ingestion then shares CPU with whichever
+replica happens to hold the lock.
+
+### Live prices across replicas: Azure SignalR Service
+
+With one process, the broadcaster that sends live prices runs where the ingestion state is. With
+several API replicas, a browser is connected to any one of them, and only the ingest leader has the
+prices. Azure SignalR Service (`AddSignalR().AddAzureSignalR(...)`) solves this: every app server's hub
+context sends through the service, and the service delivers to the clients in each group, whichever
+replica negotiated their connection. Clients hold their WebSocket to the service, so the API replicas
+carry no long-lived connections either.
+
+Two adjustments come with it:
+
+- Only the ingestion leader runs the price and stats push loops. Otherwise each API replica would push
+  its own `stats` (as `Standby`, with zero ticks/s) to every client.
+- `/api/system/stats` on an API replica must report the leader's ingestion state, not its own. The
+  leader can publish a small heartbeat row (status, lag, ticks/s, next rotation) every few seconds,
+  which every replica reads.
+
+### Managed PostgreSQL
+
+Checked on 2026-11-04 against the providers' documentation:
+
+| Option | TimescaleDB | What TickPulse needs to change |
+|---|---|---|
+| **Azure Database for PostgreSQL – Flexible Server** | PostgreSQL 17 is generally available. TimescaleDB is the **Apache-2 edition**, version 2.24.0 on PostgreSQL 15–18 ([extension versions](https://learn.microsoft.com/en-us/azure/postgresql/extensions/concepts-extensions-versions), [considerations](https://learn.microsoft.com/en-us/azure/postgresql/extensions/concepts-extensions-considerations)). | Compression, the compression and retention policies, and continuous aggregates are not available. The initial migration's `ALTER TABLE … SET (timescaledb.compress …)`, `add_compression_policy` and `add_retention_policy` fail there and must run only when `current_setting('timescaledb.license') = 'timescale'`. Retention becomes a scheduled `drop_chunks('price_ticks', older_than => INTERVAL '14 days')`, from `pg_cron` (available on Flexible Server) or an app-side job. |
+| **Tiger Cloud** (Timescale's managed service) | Full TimescaleDB, including the TSL features. Runs on AWS and Azure; its Azure regions include `germanywestcentral` and `westeurope` ([supported regions](https://www.tigerdata.com/docs/get-started/supported-regions)). | Nothing in the schema. Connectivity from the Container Apps VNet, and a second vendor to operate. |
+| **Plain PostgreSQL** with native partitioning | None. | `price_ticks` becomes `PARTITION BY RANGE (trade_time)` with daily partitions (`pg_partman` is available on Flexible Server); retention drops old partitions. `time_bucket(width, ts, origin)` becomes `date_bin(width, ts, origin)` (PostgreSQL 14+), with the same Monday origin, in the queries and the rollup triggers. |
+
+The queries depend on no TSL feature ([ADR 0012](adr/0012-own-candle-table-not-a-continuous-aggregate.md)),
+so the analytics answer the same on all three. The cost of losing compression is storage. Measured on
+the local stack, a tick takes about 190 bytes with its indexes and a minute candle about 134 bytes. At
+the 22 ticks/s that the three seeded symbols produced, 14 days of uncompressed ticks are roughly 5 GB;
+candles grow by about 70 MB per symbol per year.
+
+**Extension privileges.** The migration runs `CREATE EXTENSION IF NOT EXISTS timescaledb`, which needs
+the privilege to create the extension, and managed services grant no superuser. On Flexible Server the
+extension must be allow-listed (`azure.extensions`), added to `shared_preload_libraries` (a server
+restart), and created once by the server admin, a member of `azure_pg_admin`. Do that before the first
+migration, and run the application under a separate, non-admin role that owns the TickPulse schema; the
+`IF NOT EXISTS` then makes that statement a no-op. Flexible Server's in-place major-version upgrade
+does not support `timescaledb` for every version, so a major upgrade means a dump and restore or a
+new server.
+
+### Releases: blue-green revisions
+
+Both apps run in **multiple-revision mode** with labels
+([blue-green deployment](https://learn.microsoft.com/en-us/azure/container-apps/blue-green-deployment)):
+
+1. CI builds and pushes `tickpulse-api:<sha>`, as today.
+2. The `tickpulse-migrate` job applies the new migrations. They must be backward compatible with the
+   running release (expand now, contract in a later release), because the old revision keeps serving
+   during the switch. The candle rollups are maintained by triggers partly for this reason: an older
+   image writing minutes keeps them correct ([ADR 0015](adr/0015-candle-rollups-maintained-by-triggers.md)).
+3. A new `tickpulse-api` revision, suffixed with the short sha and labelled `green`, starts with 0 %
+   traffic. `deploy/smoke.sh https://<green label FQDN>` runs the same checks as today.
+4. Traffic moves to `green`, all at once or 10 % → 50 % → 100 % while the 5xx ratio and latency are
+   watched. Rolling back is moving the weight back to `blue`.
+5. `tickpulse-ingest` gets its new revision last. The leader lock makes the overlap safe, and the
+   gap-fill covers the handover.
+
+### Secrets: Key Vault
+
+`Admin__ApiKey`, the database password and the IP-hash salt (`Otel__IpSalt`) live in Key Vault. The
+apps reference them as Container Apps secrets through a user-assigned managed identity, so no secret is
+stored in the app definition or the pipeline. Rotating a secret is a new Key Vault version and a new
+revision. The database login can later move to Microsoft Entra ID tokens (Npgsql supports a periodic
+password provider), which removes the password altogether.
+
+### Observability: Application Insights over OpenTelemetry
+
+The application already exports traces, metrics and logs over OTLP when `Otel:Endpoint` is set, so it
+needs no change. Two ways to receive them:
+
+- Keep the stack from `deploy/observability/` (OTel Collector, Prometheus, Loki, Tempo, Grafana) as
+  container apps with Azure Files volumes, and keep the dashboards and alerts as they are.
+- Point `Otel__Endpoint` at the environment's managed OpenTelemetry agent
+  ([OpenTelemetry agents](https://learn.microsoft.com/en-us/azure/container-apps/opentelemetry-agents)),
+  which forwards traces and logs to Application Insights. The agent is in preview, and its Application
+  Insights destination accepts no metrics, so metrics need a second destination (an OTLP endpoint such
+  as the collector above). The Grafana dashboards and alert rules would then be rebuilt on Azure
+  Monitor.
+
+Request sampling ([ADR 0016](adr/0016-request-sampling-with-429-as-a-sampled-response.md)) applies per
+replica, so the traced request rate is `Otel:SampledRequestsPerSecond` times the replica count.
+
+### Backup and restore
+
+- **Point-in-time restore.** Flexible Server takes automated backups with point-in-time restore
+  (retention configurable up to 35 days) and optional geo-redundant backup storage. A restore creates a
+  new server; the apps switch over by changing the connection string secret.
+- **Logical dumps** (`pg_dump -Fc`, as in the [backup runbook](#database-backup-and-restore) above), kept
+  outside the server, for portability between providers. On Flexible Server,
+  `timescaledb_post_restore()` can fail on the restricted `ALTER DATABASE` permission; Microsoft
+  documents `timescaledb-backup` (`ts-dump`, `ts-restore`) as the workaround.
+- **What matters most.** Raw ticks are kept for 14 days. Candles are kept forever, and stream minutes
+  carry an exact `price_sum` and `tick_count` that a later backfill cannot reproduce (klines have
+  neither), so the candle tables are the data to protect.
+- **Drills.** Restore into a scratch server every quarter and run the smoke test against an app
+  revision pointed at it.
+
+### Network and edge
+
+- The Container Apps environment is VNet-integrated, and PostgreSQL is reachable only through a private
+  endpoint.
+- Outbound traffic goes through a NAT gateway with a static IP. Binance meters REST weight per IP, and
+  the ingest leader is the only heavy caller, so one stable IP keeps the weight accounting predictable.
+- Rate limiting is in memory per replica, so the effective limit grows with the replica count. Keep a
+  per-client limit at the edge (Cloudflare, or a Front Door WAF rule) as the real one.
+- TickPulse takes the client IP from `CF-Connecting-IP`, from trusted proxies only. Behind Cloudflare
+  that stays as it is, with `ForwardedHeaders__KnownNetworks` set to the environment's infrastructure
+  subnet. Behind Front Door alone, the client-IP header would have to become configurable.
+- Compression stays at the edge ([ADR 0017](adr/0017-build-time-precompressed-static-assets.md)).
+
+### Code changes this design needs
+
+1. A setting that skips registering the ingestion and backfill workers, for API-only replicas.
+2. Push loops on the ingestion leader only, and `/api/system/stats` from a leader heartbeat.
+3. `AddAzureSignalR` behind configuration, so the single-host deployment keeps the in-process hub.
+4. TSL-conditional migration steps and a `drop_chunks` retention job, for Apache-only TimescaleDB.
+5. A configurable client-IP header, if Front Door replaces Cloudflare.
