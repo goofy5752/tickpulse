@@ -40,6 +40,10 @@ public sealed class HealthTests(ApiFactory api) : IClassFixture<ApiFactory>
         var checks = body.RootElement.GetProperty("checks").EnumerateArray()
             .ToDictionary(c => c.GetProperty("name").GetString()!, c => c.GetProperty("status").GetString());
         checks.ShouldBe(new Dictionary<string, string?> { ["database"] = "Healthy", ["ingestion"] = "Healthy" }, ignoreOrder: true);
+        foreach (var check in body.RootElement.GetProperty("checks").EnumerateArray())
+        {
+            check.GetProperty("description").GetString().ShouldNotBeNullOrWhiteSpace();
+        }
     }
 
     [Fact]
@@ -55,6 +59,9 @@ public sealed class HealthTests(ApiFactory api) : IClassFixture<ApiFactory>
             response.StatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
             using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync(Ct));
             body.RootElement.GetProperty("status").GetString().ShouldBe("Unhealthy");
+            var ingestion = Check(body, "ingestion");
+            ingestion.GetProperty("status").GetString().ShouldBe("Unhealthy");
+            ingestion.TryGetProperty("description", out _).ShouldBeFalse();
         }
         finally
         {
@@ -75,11 +82,20 @@ public sealed class HealthTests(ApiFactory api) : IClassFixture<ApiFactory>
         using var live = await client.GetAsync(new Uri("/health/live", UriKind.Relative), Ct);
 
         ready.StatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
-        using var body = JsonDocument.Parse(await ready.Content.ReadAsStringAsync(Ct));
-        var database = body.RootElement.GetProperty("checks").EnumerateArray().Single(c => c.GetProperty("name").GetString() == "database");
+        var raw = await ready.Content.ReadAsStringAsync(Ct);
+        using var body = JsonDocument.Parse(raw);
+        var database = Check(body, "database");
         database.GetProperty("status").GetString().ShouldBe("Unhealthy");
+        database.TryGetProperty("description", out _).ShouldBeFalse();
+
+        // Nothing from the exception (Npgsql: "Failed to connect to 127.0.0.1:1") reaches the response.
+        raw.ShouldNotContain("127.0.0.1");
+        raw.ShouldNotContain("connect", Case.Insensitive);
         live.StatusCode.ShouldBe(HttpStatusCode.OK);
     }
+
+    private static JsonElement Check(JsonDocument report, string name) =>
+        report.RootElement.GetProperty("checks").EnumerateArray().Single(c => c.GetProperty("name").GetString() == name);
 
     [Fact]
     public async Task HealthReady_WithWorkers_ConnectsAfterMigrations()

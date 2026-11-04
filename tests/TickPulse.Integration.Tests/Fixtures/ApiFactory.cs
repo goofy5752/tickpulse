@@ -39,6 +39,7 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
     private bool _workers;
     private bool _systemClock;
     private bool _configured;
+    private string? _environment;
 
     /// <summary>The app's clock, starting at the current time (millisecond precision); frozen until a test moves it.</summary>
     public FakeTimeProvider Clock { get; } = new(StartTime());
@@ -63,6 +64,14 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
     {
         EnsureNotConfigured();
         _systemClock = true;
+        return this;
+    }
+
+    /// <summary>Runs the host in another environment than <c>Development</c> (the factory's default).</summary>
+    public ApiFactory WithEnvironment(string environment)
+    {
+        EnsureNotConfigured();
+        _environment = environment;
         return this;
     }
 
@@ -93,6 +102,11 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         _configured = true;
+        if (_environment is not null)
+        {
+            builder.UseEnvironment(_environment);
+        }
+
         builder.UseWebRoot(WebRoot);
         builder.ConfigureAppConfiguration(config => config.AddInMemoryCollection(Settings()));
         builder.ConfigureTestServices(services =>

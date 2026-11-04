@@ -10,6 +10,7 @@ internal static class ProblemDefaults
 {
     public const string BlankType = "about:blank";
     public const string InternalDetail = "An unexpected error occurred.";
+    public const string NotFoundDetail = "No resource matches the request path.";
     public const string NotAcceptableDetail = "None of the media types in the Accept header can be produced; use application/json or application/xml.";
 
     public static void Apply(ProblemDetailsContext context, ProblemDetailsOptions options)
@@ -27,6 +28,9 @@ internal static class ProblemDefaults
         {
             switch (status)
             {
+                case StatusCodes.Status404NotFound:
+                    Set(problem, ProblemSlugs.NotFound, NotFoundDetail, force: false);
+                    break;
                 case StatusCodes.Status406NotAcceptable:
                     Set(problem, ProblemSlugs.NotAcceptable, NotAcceptableDetail, force: false);
                     break;

@@ -1,4 +1,3 @@
-using System.Data.Common;
 using System.Text.Json;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -46,7 +45,12 @@ internal static class HealthEndpoints
             json.WriteStartObject();
             json.WriteString("name", name);
             json.WriteString("status", entry.Status.ToString());
-            json.WriteString("description", entry.Description);
+            // Only a healthy check describes itself; a failing one could carry exception text (host, port, user).
+            if (entry.Status == HealthStatus.Healthy && entry.Description is { } description)
+            {
+                json.WriteString("description", description);
+            }
+
             json.WriteNumber("durationMs", Math.Round(entry.Duration.TotalMilliseconds, 1));
             json.WriteEndObject();
         }
@@ -68,9 +72,9 @@ internal sealed class DatabaseHealthCheck(NpgsqlDataSource dataSource) : IHealth
             await command.ExecuteScalarAsync(cancellationToken);
             return HealthCheckResult.Healthy("The database answers.");
         }
-        catch (DbException ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // The exception goes to the health check log; the public report stays generic.
+            // The exception goes to the health check log only; the report shows no description for a failing check.
             return new HealthCheckResult(context.Registration.FailureStatus, "The database does not answer.", ex);
         }
     }

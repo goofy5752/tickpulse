@@ -25,6 +25,7 @@ public static class ProblemFactory
         [ProblemSlugs.NotAcceptable] = "Not acceptable",
         [ProblemSlugs.RateLimited] = "Too many requests",
         [ProblemSlugs.Internal] = "Internal server error",
+        [ProblemSlugs.NotFound] = "Not found",
     }.ToFrozenDictionary(StringComparer.Ordinal);
 
     /// <summary>A problem for a use-case failure.</summary>
@@ -89,4 +90,5 @@ public static class ProblemSlugs
     public const string NotAcceptable = "not-acceptable";
     public const string RateLimited = "rate-limited";
     public const string Internal = "internal";
+    public const string NotFound = "not-found";
 }

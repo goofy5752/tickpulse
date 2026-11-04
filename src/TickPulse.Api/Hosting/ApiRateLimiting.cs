@@ -23,8 +23,9 @@ public sealed class RateLimitingOptions
 }
 
 /// <summary>
-/// A fixed window per client IP (after <see cref="ClientAddressing"/>) on the API controllers. A rejected request
-/// gets a 429 <c>rate-limited</c> problem with <c>Retry-After</c>, negotiated like every other problem.
+/// A fixed window per client on the API controllers: the IPv4 address or the IPv6 /64 prefix, after
+/// <see cref="ClientAddressing"/>. A rejected request gets a 429 <c>rate-limited</c> problem with <c>Retry-After</c>,
+/// negotiated like every other problem.
 /// </summary>
 internal static partial class ApiRateLimiting
 {
@@ -43,7 +44,7 @@ internal static partial class ApiRateLimiting
             options.AddPolicy(PublicPolicy, context =>
             {
                 var settings = context.RequestServices.GetRequiredService<IOptions<RateLimitingOptions>>().Value;
-                var key = ClientAddressing.ClientAddress(context)?.ToString() ?? ClientIpHasher.Unknown;
+                var key = ClientAddressing.PartitionKey(context.Connection.RemoteIpAddress);
                 return RateLimitPartition.GetFixedWindowLimiter(key, _ => new FixedWindowRateLimiterOptions
                 {
                     PermitLimit = settings.PermitLimit,

@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc.Formatters.Xml;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
 using Microsoft.Net.Http.Headers;
+using TickPulse.Api.Hosting;
 
 namespace TickPulse.Api.Problems;
 
@@ -31,8 +32,10 @@ public sealed class XmlProblemDetailsWriter(IOptions<ProblemDetailsOptions> opti
 
     /// <summary>
     /// Whether <paramref name="accept"/> prefers XML (<c>application/xml</c>, <c>text/xml</c>,
-    /// <c>application/problem+xml</c>) over JSON. Wildcards count as JSON, the default; the higher quality wins, and on
-    /// a tie the type listed first. Entries with <c>q=0</c> are ignored. A missing or unparsable header means JSON.
+    /// <c>application/problem+xml</c>) over JSON. The higher quality wins. At equal quality a concrete XML type beats a
+    /// wildcard (<c>*/*</c>, <c>application/*</c>, <c>text/*</c>), the more specific range (RFC 9110 §12.5.1), and
+    /// against a concrete JSON type the one listed first wins. Entries with <c>q=0</c> are ignored. A missing or
+    /// unparsable header means JSON, the default.
     /// </summary>
     public static bool PrefersXml(StringValues accept)
     {
@@ -43,6 +46,7 @@ public sealed class XmlProblemDetailsWriter(IOptions<ProblemDetailsOptions> opti
 
         var (xmlQuality, xmlIndex) = (0d, int.MaxValue);
         var (jsonQuality, jsonIndex) = (0d, int.MaxValue);
+        var wildcardQuality = 0d;
         for (var i = 0; i < mediaTypes.Count; i++)
         {
             var quality = mediaTypes[i].Quality ?? 1d;
@@ -52,17 +56,29 @@ public sealed class XmlProblemDetailsWriter(IOptions<ProblemDetailsOptions> opti
             }
 
             var mediaType = mediaTypes[i].MediaType;
-            if (IsXml(mediaType) && quality > xmlQuality)
+            if (IsXml(mediaType))
             {
-                (xmlQuality, xmlIndex) = (quality, i);
+                if (quality > xmlQuality)
+                {
+                    (xmlQuality, xmlIndex) = (quality, i);
+                }
             }
-            else if (IsJsonOrWildcard(mediaType) && quality > jsonQuality)
+            else if (IsJson(mediaType))
             {
-                (jsonQuality, jsonIndex) = (quality, i);
+                if (quality > jsonQuality)
+                {
+                    (jsonQuality, jsonIndex) = (quality, i);
+                }
+            }
+            else if (AcceptHeaderNormalization.Specificity(mediaType) < AcceptHeaderNormalization.ConcreteType)
+            {
+                wildcardQuality = Math.Max(wildcardQuality, quality);
             }
         }
 
-        return xmlQuality > jsonQuality || (xmlQuality > 0d && xmlQuality.Equals(jsonQuality) && xmlIndex < jsonIndex);
+        return xmlQuality > 0d
+            && xmlQuality >= wildcardQuality
+            && (xmlQuality > jsonQuality || (xmlQuality.Equals(jsonQuality) && xmlIndex < jsonIndex));
     }
 
     public bool CanWrite(ProblemDetailsContext context)
@@ -103,13 +119,10 @@ public sealed class XmlProblemDetailsWriter(IOptions<ProblemDetailsOptions> opti
         || mediaType.Equals("text/xml", StringComparison.OrdinalIgnoreCase)
         || mediaType.Equals("application/problem+xml", StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsJsonOrWildcard(StringSegment mediaType) =>
+    private static bool IsJson(StringSegment mediaType) =>
         mediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
         || mediaType.Equals("text/json", StringComparison.OrdinalIgnoreCase)
-        || mediaType.Equals("application/problem+json", StringComparison.OrdinalIgnoreCase)
-        || mediaType.Equals("*/*", StringComparison.Ordinal)
-        || mediaType.Equals("application/*", StringComparison.OrdinalIgnoreCase)
-        || mediaType.Equals("text/*", StringComparison.OrdinalIgnoreCase);
+        || mediaType.Equals("application/problem+json", StringComparison.OrdinalIgnoreCase);
 
     private static ValidationProblemDetails ToMvc(HttpValidationProblemDetails source)
     {

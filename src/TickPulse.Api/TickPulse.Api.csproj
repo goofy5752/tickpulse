@@ -10,4 +10,9 @@
     <ProjectReference Include="..\TickPulse.Contracts\TickPulse.Contracts.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Unit tests of the host's helpers (partition keys, migration retry). -->
+    <InternalsVisibleTo Include="TickPulse.Integration.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -52,6 +52,8 @@ var app = builder.Build();
 
 app.UseForwardedHeaders();
 app.UseSecurityHeaders();
+app.UseVaryByAcceptOnApi();
+app.UseAcceptHeaderNormalization();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
 app.UseStaticFiles();
