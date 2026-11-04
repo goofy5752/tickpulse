@@ -1,7 +1,7 @@
 # Deployment
 
 TickPulse is designed to run at <https://tickpulse.dev>, with its Grafana at
-<https://grafana.tickpulse.dev>, both on a shared VPS behind Cloudflare. The deployment pipeline is
+<https://grafana.tickpulse.dev>, both on a Linux VPS (Ubuntu 22.04 LTS) behind Cloudflare. The deployment pipeline is
 ready. The first deploy waits on the owner's one-time steps in
 [First-time server setup](#first-time-server-setup) (domain, DNS, certificate, deploy user and
 secrets). The topology below is the target that pipeline deploys. The whole deployment is code in
@@ -24,7 +24,7 @@ flowchart LR
     gha["GitHub Actions<br/>jobs image, deploy"]
     ghcr[("GHCR<br/>tickpulse-api:&lt;sha&gt;, :latest")]
 
-    subgraph vps["Shared VPS"]
+    subgraph vps["VPS · Ubuntu 22.04 LTS"]
         nginx["host nginx<br/>vhosts tickpulse.dev, grafana.tickpulse.dev<br/>Origin cert · Cloudflare-only allow list"]
         subgraph proj["/srv/tickpulse · compose project tickpulse · network tickpulse"]
             api["api :8080<br/>REST · dashboard · SignalR /hubs/"]
@@ -234,7 +234,7 @@ Every failed check prints one `FAIL` line, and the script exits non-zero.
 
 ## First-time server setup
 
-These are one-time steps for the owner. The host is a shared VPS, so every step touches only TickPulse's
+These are one-time steps for the owner. Every step touches only TickPulse's
 own files, and nginx is only ever reloaded gracefully after `nginx -t` passes.
 
 **Requirements on the host:**
