@@ -138,8 +138,6 @@ evidence that could be re-run.
 
 ### By the numbers
 
-| | |
-|---|---|
 Figures marked *as of 2026-11-04* are the state when the last fix PRs had merged.
 
 | | |
