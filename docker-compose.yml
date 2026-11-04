@@ -45,6 +45,9 @@ services:
     build:
       context: .
       target: api
+      args:
+        # The dashboard's Grafana links: the same root URL the observability profile gives Grafana.
+        VITE_GRAFANA_URL: ${GRAFANA_ROOT_URL:-http://localhost:3000}
     image: tickpulse-api:local
     depends_on:
       db:
