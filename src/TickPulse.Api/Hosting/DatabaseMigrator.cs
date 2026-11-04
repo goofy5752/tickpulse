@@ -83,6 +83,23 @@ public sealed partial class DatabaseMigrator(
     internal static TimeSpan RetryDelay(TimeSpan baseDelay, int failedAttempts) =>
         baseDelay * Math.Pow(2, failedAttempts - 1);
 
+    /// <summary>
+    /// Whether <paramref name="exception"/> is PostgreSQL reporting that a concurrent <c>CREATE TABLE IF NOT EXISTS</c>
+    /// won the race: <c>42P07</c> (duplicate table) or <c>23505</c> (unique violation in the catalog).
+    /// </summary>
+    internal static bool IsConcurrentCreate(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is PostgresException { SqlState: PostgresErrorCodes.DuplicateTable or PostgresErrorCodes.UniqueViolation })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static bool IsTransient(Exception exception)
     {
         for (var current = exception; current is not null; current = current.InnerException)
@@ -106,7 +123,17 @@ public sealed partial class DatabaseMigrator(
         // anyway) makes both checks succeed. A database that does not exist yet is left to MigrateAsync to create.
         if (await database.GetService<IRelationalDatabaseCreator>().ExistsAsync(cancellationToken))
         {
-            await database.GetService<IHistoryRepository>().CreateIfNotExistsAsync(cancellationToken);
+            try
+            {
+                await database.GetService<IHistoryRepository>().CreateIfNotExistsAsync(cancellationToken);
+            }
+            catch (Exception ex) when (IsConcurrentCreate(ex))
+            {
+                // Two instances starting together can race on CREATE TABLE IF NOT EXISTS: PostgreSQL then reports
+                // the loser's create as a duplicate. The table exists either way, which is all that is needed here;
+                // MigrateAsync serialises the migrations themselves with its own lock. EF Core still logs the
+                // loser's failed command at Error once.
+            }
         }
 
         var pending = (await database.GetPendingMigrationsAsync(cancellationToken)).ToList();

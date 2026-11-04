@@ -24,8 +24,9 @@ groups:
               # measures what the API reported, not how late the report arrived: when the telemetry
               # pipeline is slow or stalled under load, both timestamps stop together and the
               # difference stays at 0, so the rule stays quiet. Missing or delayed metrics are the
-              # "Telemetry pipeline down" rule's business, and an API that is down entirely is caught
-              # by the external uptime check on /health/ready.
+              # "Telemetry pipeline down" rule's business; that rule also covers an API that is down
+              # entirely, until the planned external uptime check on /health/ready exists (see
+              # docs/deployment.md, "Uptime check").
               # Cold start: with no Connected sample in the last hour, the newest Connected time is
               # taken as the API's first ws_state sample plus 60 s, so a fresh start gets 2 minutes to
               # connect before the condition is true.
@@ -91,10 +92,13 @@ groups:
         for: 1m
         # No API metric within Prometheus' 5-minute lookback, or Prometheus failing to answer, is
         # exactly what this rule reports.
+        # Critical while it is the only alert for an API that is down entirely: the external uptime
+        # check on /health/ready is planned (docs/deployment.md, "Uptime check") but not in place yet.
+        # Lower it to warning once that check exists.
         noDataState: Alerting
         execErrState: Alerting
         labels:
-          severity: warning
+          severity: critical
           component: telemetry
         annotations:
           summary: 'The newest API metric is {{ with .Values.A }}{{ humanizeDuration .Value }}{{ else }}more than 5 minutes{{ end }} old.'

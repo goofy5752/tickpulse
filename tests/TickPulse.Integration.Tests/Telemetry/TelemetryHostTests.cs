@@ -127,6 +127,41 @@ public sealed class TelemetryHostTests(ApiFactory api) : IClassFixture<ApiFactor
     }
 
     [Fact]
+    public async Task Tracing_ErrorAndSlowRequestBeyondTheBudget_KeepTheirServerSpan()
+    {
+        var sink = new CapturingSink();
+        var traces = new RequestTraceRecorder();
+        await using var host = LoggedHost(sink)
+            .WithSetting("Otel:Endpoint", "http://127.0.0.1:9") // the trace pipeline exists; nothing receives
+            .WithSetting("Otel:SampledRequestsPerSecond", "1")
+            .WithServices(s => s.AddSingleton<IStartupFilter>(traces));
+        await host.InitializeAsync();
+        using var client = host.CreateClient();
+
+        // The first request uses up the budget (frozen clock); the rest are beyond it.
+        (await client.GetAsync("/api/symbols", Ct)).StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await client.GetAsync("/api/symbols", Ct)).StatusCode.ShouldBe(HttpStatusCode.OK);
+        (await client.GetAsync("/api/probe/throw", Ct)).StatusCode.ShouldBe(HttpStatusCode.InternalServerError);
+        (await client.GetAsync("/api/probe/slow", Ct)).StatusCode.ShouldBe(HttpStatusCode.NoContent);
+
+        await WaitForAsync(() => traces.Requests.Count >= 4, "four requests");
+        traces.Requests.Select(r => (r.Path, r.Sampled)).ShouldBe(
+        [
+            ("/api/symbols", true),
+            ("/api/symbols", false),
+            ("/api/probe/throw", true),
+            ("/api/probe/slow", true),
+        ]);
+        await RequestLogAsync(sink, "/api/probe/slow");
+        sink.Events.Where(IsRequestLog).Select(e => (e.Properties["RequestPath"].ToString(), e.Level)).ShouldBe(
+        [
+            ("\"/api/symbols\"", LogEventLevel.Information),
+            ("\"/api/probe/throw\"", LogEventLevel.Error),
+            ("\"/api/probe/slow\"", LogEventLevel.Information),
+        ]);
+    }
+
+    [Fact]
     public async Task NotReady_WhileIngestionConnects_LogsWarnings_NoErrors()
     {
         var sink = new CapturingSink();

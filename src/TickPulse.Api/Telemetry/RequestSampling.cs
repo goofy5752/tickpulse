@@ -12,8 +12,9 @@ namespace TickPulse.Api.Telemetry;
 /// still records only this many.
 /// </summary>
 /// <remarks>
-/// Without a collector the request log alone takes from it; with one, the trace sampler takes from it when the
-/// request starts and the request log follows that decision (see <see cref="RequestLogPolicy"/>).
+/// Without a collector the request log alone takes from it, and only for ordinary requests. With one, the trace
+/// sampler takes from it when each request starts, before its outcome is known, so every request uses up budget
+/// (errors included) and the request log only follows that decision (see <see cref="RequestLogPolicy"/>).
 /// </remarks>
 internal sealed class RequestSampleBudget
 {
@@ -96,7 +97,7 @@ internal sealed class RequestSampleBudget
 /// <item>slower than <see cref="SlowThreshold"/>: Information;</item>
 /// <item>4xx other than 429: Information;</item>
 /// <item>2xx, 3xx and 429 (expected under load and already counted by the metrics): Information when sampled,
-/// Debug otherwise.</item>
+/// Debug otherwise. 429 is a deliberate exception to "4xx is always logged": rejections arrive in floods.</item>
 /// </list>
 /// A request whose line is written at Information or above also keeps its trace (<see cref="KeepTrace"/>), so every
 /// logged request can be opened as a trace.
@@ -110,7 +111,11 @@ internal static class RequestLogPolicy
     /// <param name="statusCode">The final status code.</param>
     /// <param name="elapsedMs">How long the request took.</param>
     /// <param name="exception">The exception that escaped the pipeline, if any.</param>
-    /// <param name="sampled">Whether an ordinary request is sampled; called only for ordinary requests.</param>
+    /// <param name="sampled">
+    /// Whether an ordinary request is sampled; called only for ordinary requests. Without tracing it takes from the
+    /// budget, so problems do not use it up; with tracing it only reads the sampler's decision, which already took
+    /// from the budget when the request started.
+    /// </param>
     public static LogEventLevel Level(PathString path, int statusCode, double elapsedMs, Exception? exception, Func<bool> sampled)
     {
         ArgumentNullException.ThrowIfNull(sampled);

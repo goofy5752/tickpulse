@@ -81,6 +81,23 @@ public sealed class RequestSamplingTests
     }
 
     [Fact]
+    public void Budget_ConcurrentTakes_OnAFrozenClock_KeepExactlyTheRate()
+    {
+        var budget = new RequestSampleBudget(100, new FakeTimeProvider());
+        var kept = 0;
+
+        Parallel.For(0, 20_000, new ParallelOptions { MaxDegreeOfParallelism = 16 }, _ =>
+        {
+            if (budget.TryTake())
+            {
+                Interlocked.Increment(ref kept);
+            }
+        });
+
+        kept.ShouldBe(100);
+    }
+
+    [Fact]
     public void Budget_Negative_Throws() =>
         Should.Throw<ArgumentOutOfRangeException>(() => new RequestSampleBudget(-1, new FakeTimeProvider()));
 
@@ -149,8 +166,11 @@ public sealed class RequestSamplingTests
         Level(path, status, elapsedMs: 5_000, sampled: Sampled).ShouldBe(expected);
     }
 
+    // The policy asks whether a request was sampled only for ordinary requests. Without tracing that question is
+    // budget.TryTake, so problems do not use up the budget; with tracing the sampler already took from it when the
+    // request started, whatever the outcome (see SamplerTests), and the question only reads that decision.
     [Fact]
-    public void Problems_DoNotTakeFromTheBudget()
+    public void Level_AsksWhetherSampled_OnlyForOrdinaryRequests()
     {
         var calls = 0;
         bool Counting() => ++calls > 0;

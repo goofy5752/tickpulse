@@ -48,6 +48,24 @@ public sealed class DatabaseMigratorTests
         calls.ShouldBe(5);
     }
 
+    // Two instances racing on CREATE TABLE IF NOT EXISTS for the history table: the loser's duplicate is harmless.
+    [Theory]
+    [InlineData(PostgresErrorCodes.DuplicateTable, true)]
+    [InlineData(PostgresErrorCodes.UniqueViolation, true)]
+    [InlineData(PostgresErrorCodes.UndefinedTable, false)]
+    [InlineData(PostgresErrorCodes.InsufficientPrivilege, false)]
+    public void ConcurrentCreate_IsRecognisedBySqlState(string sqlState, bool expected)
+    {
+        var error = new PostgresException("create failed", "ERROR", "ERROR", sqlState);
+
+        DatabaseMigrator.IsConcurrentCreate(error).ShouldBe(expected);
+        DatabaseMigrator.IsConcurrentCreate(new InvalidOperationException("wrapped", error)).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void ConcurrentCreate_OtherFailures_AreNotSwallowed() =>
+        DatabaseMigrator.IsConcurrentCreate(Transient()).ShouldBeFalse();
+
     [Fact]
     public async Task Migrate_NonTransientFailure_DoesNotRetry()
     {

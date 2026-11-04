@@ -7,9 +7,9 @@
 # Under overload the collector sheds traces and logs first and keeps metrics, which the alerts depend on:
 #   - traces and logs pass memory_limiter/bulk, which starts refusing at a lower heap size than
 #     memory_limiter/metrics, so metrics still get through while traces and logs are refused;
-#   - every exporter has a bounded sending queue and a short retry window, so a slow or rate-limited
-#     backend (Loki answering 429) makes the collector drop data after a few seconds instead of
-#     holding it in memory for minutes.
+#   - the Tempo and Loki exporters have a sending queue bounded by bytes (4 MiB) and a short retry
+#     window, so a slow or rate-limited backend (Loki answering 429) makes the collector drop data
+#     after a few seconds instead of holding it in memory for minutes.
 
 extensions:
   health_check:
@@ -89,11 +89,16 @@ exporters:
     tls:
       insecure: true
     timeout: 10s
-    # At most 50 batches waiting; beyond that new batches are dropped, never buffered.
+    # Bounded by size, not by batch count: at most 4 MiB of encoded spans wait here (a few full
+    # batches); beyond that new batches are dropped. Decoded in memory that is a few times larger,
+    # so both bulk queues together stay inside the 28 MiB gap between the bulk limiter (soft 56 MiB)
+    # and the metrics limiter (soft 84 MiB): a full bulk queue cannot push the heap into the range
+    # where metrics are refused.
     sending_queue:
       enabled: true
       num_consumers: 2
-      queue_size: 50
+      sizer: bytes
+      queue_size: 4194304
     retry_on_failure:
       enabled: true
       initial_interval: 1s
@@ -125,7 +130,9 @@ exporters:
     sending_queue:
       enabled: true
       num_consumers: 2
-      queue_size: 50
+      # At most 4 MiB of encoded log records waiting, see the Tempo exporter.
+      sizer: bytes
+      queue_size: 4194304
     # Loki answers 429 when its ingestion limit is reached; retrying for minutes would only pile
     # up memory, so give up after 30 s and drop the batch.
     retry_on_failure:
