@@ -1,0 +1,15 @@
+# Alert notifications go by email. SMTP comes from the GF_SMTP_* environment and the recipient
+# from ALERT_EMAIL; neither is committed. Without SMTP the contact point still provisions, and
+# Grafana only logs a delivery error when an alert fires.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: TickPulse email
+    receivers:
+      - uid: tickpulse-email
+        type: email
+        disableResolveMessage: false
+        settings:
+          addresses: ${ALERT_EMAIL}
+          singleEmail: true

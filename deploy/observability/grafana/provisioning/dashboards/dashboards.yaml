@@ -1,0 +1,17 @@
+# Dashboards are files in /var/lib/grafana/dashboards (mounted read-only from ../dashboards).
+# They cannot be changed or deleted from the UI; edit the JSON in the repository instead.
+# The folder is matched by title (no folderUid): the alert rules are provisioned first and
+# create the "TickPulse" folder, and the dashboards join it instead of creating a second one.
+apiVersion: 1
+
+providers:
+  - name: tickpulse
+    orgId: 1
+    folder: TickPulse
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

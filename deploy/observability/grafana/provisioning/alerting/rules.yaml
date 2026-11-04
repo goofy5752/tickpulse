@@ -1,0 +1,185 @@
+# TickPulse alert rules. Each rule is a Prometheus instant query (A) plus a threshold (C).
+# Grafana expands environment variables in provisioning files, so templates use .Labels/.Values
+# instead of the $labels/$values aliases.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Ingestion
+    folder: TickPulse
+    interval: 10s
+    rules:
+      - uid: tp-ws-disconnected
+        title: WebSocket disconnected
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3900, to: 0 }
+            datasourceUid: prom
+            model:
+              refId: A
+              # Seconds since any instance last reported Connected (WsState 2), using the sample's
+              # own timestamp. Remote-written series get no staleness markers, so a plain instant
+              # query would keep returning the last value for 5 minutes after the API dies; this
+              # measures the age of the last Connected sample instead, so it covers both a live
+              # disconnect and the API no longer exporting.
+              # Cold start: if no Connected sample exists in the last hour, the age is counted from
+              # the API's first ws_state sample minus 60 s, so a fresh start gets 2 minutes to
+              # connect before the condition is true. No ws_state sample at all in the last hour
+              # is NoData, which alerts.
+              expr: >-
+                time() - (
+                max(max_over_time((timestamp(tickpulse_ws_state{service_name="tickpulse-api"}) and tickpulse_ws_state{service_name="tickpulse-api"} == 2)[1h:15s]))
+                or
+                (min(min_over_time(timestamp(tickpulse_ws_state{service_name="tickpulse-api"})[1h:15s])) + 60)
+                )
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [60] }
+        # 30 s pending period: rides out a short deploy or failover gap. Detection takes about 90-110 s.
+        for: 30s
+        noDataState: Alerting
+        execErrState: Error
+        labels:
+          severity: critical
+          component: ingestion
+        annotations:
+          summary: The Binance WebSocket has not been connected for more than 90 seconds.
+          description: No TickPulse instance reports a Connected stream, so no trades are being ingested. Check the API logs for connection errors.
+          __dashboardUid__: tp-ingestion
+          __panelId__: "19"
+
+      - uid: tp-ingest-lag-p95
+        title: Ingest lag p95 above 5 s
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prom
+            model:
+              refId: A
+              expr: histogram_quantile(0.95, sum by (le) (rate(tickpulse_ingest_lag_milliseconds_bucket{service_name="tickpulse-api"}[5m])))
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [5000] }
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+          component: ingestion
+        annotations:
+          summary: 'Ingest lag p95 is {{ with .Values.A }}{{ humanize .Value }}{{ end }} ms (threshold 5000 ms).'
+          description: Trades take longer than 5 s from Binance trade time to the database. Look at channel depth and flush duration on the Ingestion dashboard.
+          __dashboardUid__: tp-ingestion
+          __panelId__: "13"
+
+      - uid: tp-zero-ticks
+        title: No ticks for an active symbol
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prom
+            model:
+              refId: A
+              # Ticks in the last minute for every symbol the API reports as active
+              # (tickpulse_ingest_symbol_active == 1). An active symbol that has never received a
+              # tick counts as 0. Removed symbols drop out of the gate immediately; when the API
+              # stops exporting, the gate empties within 45 s and the WebSocket alert takes over.
+              expr: >-
+                (
+                sum by (symbol) (increase(tickpulse_ingest_ticks_received_total{service_name="tickpulse-api"}[1m]))
+                or on (symbol)
+                0 * max by (symbol) (last_over_time(tickpulse_ingest_symbol_active{service_name="tickpulse-api"}[45s]))
+                )
+                and on (symbol)
+                (max by (symbol) (last_over_time(tickpulse_ingest_symbol_active{service_name="tickpulse-api"}[45s])) == 1)
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [0.5] }
+        # 5 m pending: a newly added, illiquid symbol may legitimately go a few minutes without trades.
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+          component: ingestion
+        annotations:
+          summary: '{{ .Labels.symbol }} has received no ticks for 6 minutes.'
+          description: The symbol is subscribed but no aggTrade messages arrived. Check the WebSocket state and the symbol's trading status on Binance.
+          __dashboardUid__: tp-ingestion
+          __panelId__: "9"
+
+  - orgId: 1
+    name: API
+    folder: TickPulse
+    interval: 30s
+    rules:
+      - uid: tp-api-5xx-ratio
+        title: API 5xx ratio above 2 %
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prom
+            model:
+              refId: A
+              # Only with real traffic (> 0.1 req/s): a single 500 among a handful of requests is not an outage.
+              expr: >-
+                (
+                sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api", http_response_status_code=~"5.."}[5m]))
+                / sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api"}[5m]))
+                )
+                and
+                sum(rate(http_server_request_duration_seconds_count{service_name="tickpulse-api"}[5m])) > 0.1
+              instant: true
+              range: false
+              intervalMs: 15000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.02] }
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: '{{ with .Values.A }}{{ humanizePercentage .Value }}{{ end }} of API requests fail with 5xx (threshold 2 %).'
+          description: Server errors over the last 5 minutes. The API dashboard shows the affected routes; failed requests link to their traces.
+          __dashboardUid__: tp-api
+          __panelId__: "10"
