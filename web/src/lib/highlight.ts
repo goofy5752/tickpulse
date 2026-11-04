@@ -23,6 +23,8 @@ export interface CodeLine {
 
 /** Above this size the body is shown as plain text: highlighting would only cost frames. */
 const MAX_HIGHLIGHT_CHARS = 250_000
+/** Deeper nesting than this is shown as plain text. No API answer comes close. */
+const MAX_INDENT = 64
 
 class LineBuilder {
   readonly lines: CodeLine[] = []
@@ -58,11 +60,60 @@ function tokeniseJson(raw: string): string[] | null {
   return tokens
 }
 
-/** JSON re-indented by two spaces, or null if `raw` is not JSON. */
+type JsonState = 'key-or-close' | 'key' | 'colon' | 'value' | 'value-or-close' | 'comma-or-close'
+
+/**
+ * Checks the token sequence against the JSON grammar with an explicit stack of open brackets
+ * (no recursion, so deep nesting cannot overflow the call stack). Mismatched brackets, a missing
+ * colon or comma, a non-string key or trailing tokens all fail.
+ */
+function isWellFormedJson(tokens: readonly string[]): boolean {
+  const stack: { open: '{' | '['; state: JsonState }[] = []
+  // An object, not a let: the helpers below set it, and flow analysis cannot see into closures.
+  const root = { done: false }
+
+  const expectsValue = () => {
+    const top = stack.at(-1)
+    if (!top) return !root.done
+    return top.state === 'value' || top.state === 'value-or-close'
+  }
+  const valueEnded = () => {
+    const top = stack.at(-1)
+    if (top) top.state = 'comma-or-close'
+    else root.done = true
+  }
+
+  for (const token of tokens) {
+    const top = stack.at(-1)
+    if (token === '{' || token === '[') {
+      if (!expectsValue()) return false
+      stack.push({ open: token, state: token === '{' ? 'key-or-close' : 'value-or-close' })
+    } else if (token === '}' || token === ']') {
+      if (top?.open !== (token === '}' ? '{' : '[')) return false
+      if (top.state !== 'comma-or-close' && top.state !== 'key-or-close' && top.state !== 'value-or-close') return false
+      stack.pop()
+      valueEnded()
+    } else if (token === ':') {
+      if (top?.state !== 'colon') return false
+      top.state = 'value'
+    } else if (token === ',') {
+      if (top?.state !== 'comma-or-close') return false
+      top.state = top.open === '{' ? 'key' : 'value'
+    } else if (top?.open === '{' && (top.state === 'key-or-close' || top.state === 'key')) {
+      if (!token.startsWith('"')) return false
+      top.state = 'colon'
+    } else {
+      if (!expectsValue()) return false
+      valueEnded()
+    }
+  }
+  return root.done && stack.length === 0
+}
+
+/** JSON re-indented by two spaces, or null if `raw` is not well-formed JSON. */
 export function prettyJson(raw: string): CodeLine[] | null {
   const tokens = tokeniseJson(raw)
-  const first = tokens?.[0]
-  if (!tokens || first === undefined || !(first === '{' || first === '[' || tokens.length === 1)) return null
+  if (!tokens || !isWellFormedJson(tokens)) return null
 
   const out = new LineBuilder()
   let depth = 0
@@ -208,7 +259,8 @@ export function highlightBody(body: string, contentType: string): CodeLine[] {
   if (body.length <= MAX_HIGHLIGHT_CHARS) {
     const type = contentType.toLowerCase()
     const formatted = type.includes('json') ? prettyJson(body) : type.includes('xml') ? prettyXml(body) : null
-    if (formatted) return formatted
+    // Indentation is rendered as spaces, so absurd nesting would mean megabytes of whitespace.
+    if (formatted?.every((line) => line.indent <= MAX_INDENT)) return formatted
   }
   return plain(body)
 }

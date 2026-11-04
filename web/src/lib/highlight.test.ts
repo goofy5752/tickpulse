@@ -30,6 +30,28 @@ describe('prettyJson', () => {
     expect(prettyJson('<html>')).toBeNull()
     expect(prettyJson('{"a": undefined}')).toBeNull()
   })
+
+  it('returns null for mismatched brackets', () => {
+    expect(prettyJson('{]')).toBeNull()
+    expect(prettyJson('[1}')).toBeNull()
+    expect(prettyJson('[1]]')).toBeNull()
+    expect(prettyJson('{"a":[1}')).toBeNull()
+  })
+
+  it('returns null for tokens out of grammar order', () => {
+    expect(prettyJson('{"a" "b"}')).toBeNull()
+    expect(prettyJson('{"a":1,}')).toBeNull()
+    expect(prettyJson('{1:2}')).toBeNull()
+    expect(prettyJson('[1 2]')).toBeNull()
+    expect(prettyJson('{"a"::1}')).toBeNull()
+    expect(prettyJson('1 2')).toBeNull()
+  })
+
+  it('accepts scalars and deep nesting without recursion', () => {
+    expect(text(prettyJson('"x"'))).toBe('"x"')
+    const deep = '['.repeat(20_000) + ']'.repeat(20_000)
+    expect(prettyJson(deep)).not.toBeNull()
+  })
 })
 
 describe('prettyXml', () => {
@@ -76,6 +98,11 @@ describe('highlightBody', () => {
   it('falls back to the raw text when the body does not parse', () => {
     expect(text(highlightBody('not json', 'application/json'))).toBe('not json')
     expect(text(highlightBody('a\nb', 'text/plain'))).toBe('a\nb')
+  })
+
+  it('shows absurdly deep nesting as plain text', () => {
+    const deep = '['.repeat(100) + ']'.repeat(100)
+    expect(highlightBody(deep, 'application/json')).toEqual([{ indent: 0, tokens: [{ kind: 'plain', text: deep }] }])
   })
 
   it('returns no lines for an empty body', () => {

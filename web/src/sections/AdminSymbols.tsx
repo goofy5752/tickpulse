@@ -10,6 +10,9 @@ import { SECTION_IDS } from '@/lib/links'
 import { control, fieldLabel, primaryButton, quietButton, sectionLead, sectionTitle } from '@/lib/styles'
 import { cn } from '@/lib/utils'
 
+/** Looks like `disabled` but keeps the button focusable. */
+const pendingButton = 'aria-disabled:cursor-not-allowed aria-disabled:opacity-45'
+
 /** sessionStorage entry for the admin key: this tab only, gone when the tab closes. */
 export const ADMIN_KEY_STORAGE_KEY = 'tickpulse.adminApiKey'
 
@@ -120,7 +123,8 @@ export const AdminSymbols = memo(function AdminSymbols() {
   const symbolInput = useRef<HTMLInputElement>(null)
   const keepButton = useRef<HTMLButtonElement>(null)
   const removeButtons = useRef(new Map<string, HTMLButtonElement>())
-  const restoreFocus = useRef<string | null>(null)
+  /** Where focus goes once the confirm step closes; its buttons vanish, so focus must land somewhere real. */
+  const restoreFocus = useRef<{ to: 'row'; symbol: string } | { to: 'symbol-input' } | null>(null)
 
   function fail(error: unknown, symbol: string) {
     setNotice(describeError(error, symbol))
@@ -149,18 +153,25 @@ export const AdminSymbols = memo(function AdminSymbols() {
   const remove = useMutation({
     mutationFn: (symbol: string) => adminRequest('DELETE', apiPaths.adminSymbol(symbol), apiKey),
     onSuccess: (_response, symbol) => {
+      // The row is about to leave the list; continue from the add field.
+      restoreFocus.current = { to: 'symbol-input' }
       setConfirming(null)
       setNotice({ tone: 'success', title: `Stopped monitoring ${symbol}.`, detail: 'Its history stays queryable.' })
       refresh()
     },
     onError: (error, symbol) => {
+      const keyProblem = error instanceof MissingApiKeyError || (error instanceof ApiError && error.status === 401)
+      const gone = error instanceof ApiError && error.status === 404
+      // A key problem focuses the key field (in fail); a vanished row hands over to the add field;
+      // anything else returns to the row so the person can try again.
+      restoreFocus.current = keyProblem ? null : gone ? { to: 'symbol-input' } : { to: 'row', symbol }
       setConfirming(null)
       fail(error, symbol)
-      if (error instanceof ApiError && error.status === 404) refresh()
+      if (gone) refresh()
     },
   })
 
-  // The confirm step takes focus on its safe choice; cancelling hands it back to the row.
+  // The confirm step takes focus on its safe choice; closing it puts focus where restoreFocus says.
   useEffect(() => {
     if (confirming) {
       keepButton.current?.focus()
@@ -168,7 +179,8 @@ export const AdminSymbols = memo(function AdminSymbols() {
     }
     const target = restoreFocus.current
     restoreFocus.current = null
-    if (target) removeButtons.current.get(target)?.focus()
+    if (target?.to === 'row') removeButtons.current.get(target.symbol)?.focus()
+    if (target?.to === 'symbol-input') symbolInput.current?.focus()
   }, [confirming])
 
   function submitAdd(event: SyntheticEvent<HTMLFormElement>) {
@@ -193,7 +205,9 @@ export const AdminSymbols = memo(function AdminSymbols() {
   }
 
   function keep() {
-    restoreFocus.current = confirming
+    // A request already on its way cannot be called back; the answer closes the step.
+    if (remove.isPending || confirming === null) return
+    restoreFocus.current = { to: 'row', symbol: confirming }
     setConfirming(null)
   }
 
@@ -331,24 +345,31 @@ export const AdminSymbols = memo(function AdminSymbols() {
                   <div
                     className="flex flex-wrap items-center gap-x-3 gap-y-2"
                     onKeyDown={(event) => {
-                      if (event.key === 'Escape') keep()
+                      if (event.key === 'Escape' && !remove.isPending) keep()
                     }}
                   >
                     <p className="min-w-0 flex-1 text-[0.8125rem] text-ink">
                       Stop monitoring {row.symbol}? <span className="text-ink-muted">Its history stays queryable.</span>
                     </p>
+                    {/* aria-disabled, not disabled: a disabled button drops focus to <body> mid-request. */}
                     <div className="flex gap-2">
                       <button
                         type="button"
-                        disabled={remove.isPending}
+                        aria-disabled={remove.isPending}
                         onClick={() => {
-                          remove.mutate(row.symbol)
+                          if (!remove.isPending) remove.mutate(row.symbol)
                         }}
-                        className={cn(quietButton, 'h-8 border-down/40 text-down hover:bg-down-soft hover:text-down')}
+                        className={cn(quietButton, pendingButton, 'h-8 border-down/40 text-down hover:bg-down-soft hover:text-down')}
                       >
                         {remove.isPending ? 'Removing…' : 'Yes, remove'}
                       </button>
-                      <button ref={keepButton} type="button" onClick={keep} disabled={remove.isPending} className={cn(quietButton, 'h-8')}>
+                      <button
+                        ref={keepButton}
+                        type="button"
+                        onClick={keep}
+                        aria-disabled={remove.isPending}
+                        className={cn(quietButton, pendingButton, 'h-8')}
+                      >
                         Keep
                       </button>
                     </div>

@@ -80,6 +80,14 @@ function requestPath(endpoint: Endpoint, f: Fields): string {
   }
 }
 
+/**
+ * POSIX single quotes: nothing inside is expanded (no `!` history, `$`, backticks), and a literal
+ * `'` (which encodeURIComponent leaves alone) is closed, escaped and reopened.
+ */
+function shellQuote(text: string): string {
+  return `'${text.replace(/'/g, `'\\''`)}'`
+}
+
 function absolute(path: string): string {
   return new URL(apiUrl(path), window.location.origin).href
 }
@@ -115,7 +123,7 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
   const canSend = !needsSymbol || symbolText.trim().length > 0
   const path = requestPath(endpoint, { symbol: symbolText, n, smaP, s, candlesP, limit })
   const url = absolute(path)
-  const curl = `curl -H "Accept: ${accept}" "${url}"`
+  const curl = `curl -H "Accept: ${accept}" ${shellQuote(url)}`
 
   const request = useMutation({
     mutationFn: async (next: { path: string; accept: Accept }): Promise<Sent> => ({

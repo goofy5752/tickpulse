@@ -94,4 +94,58 @@ describe('ApiPlayground', () => {
     await user.click(screen.getByLabelText('Moving average'))
     expect(curlText()).toMatch(/\/api\/BTCUSDT\/SimpleMovingAverage\?n=20&p=1d/)
   })
+
+  it('Playground_Curl_SingleQuotesUrl_SoShellNeverExpandsIt', async () => {
+    const user = userEvent.setup()
+    renderPlayground()
+
+    const symbol = screen.getByLabelText('Symbol')
+    await user.clear(symbol)
+    await user.type(symbol, 'BTC!USDT')
+    // "!" inside double quotes triggers bash history expansion; single quotes keep it literal.
+    expect(curlText()).toMatch(/^curl -H "Accept: application\/json" 'http:\/\/[^']+\/api\/BTC!USDT\/24hAvgPrice'$/)
+
+    await user.clear(symbol)
+    await user.type(symbol, "O'USDT")
+    expect(curlText()).toMatch(/'http:\/\/[^']+\/api\/O'\\''USDT\/24hAvgPrice'$/)
+  })
+
+  it('Playground_NeverSendsTheAdminKey', async () => {
+    sessionStorage.setItem('tickpulse.adminApiKey', 'k-secret')
+    try {
+      const user = userEvent.setup()
+      renderPlayground()
+
+      await user.click(screen.getByRole('button', { name: /send request/i }))
+      await user.click(screen.getByLabelText('Symbols'))
+      await user.click(screen.getByRole('button', { name: /send request/i }))
+
+      await waitFor(() => {
+        expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(3)
+      })
+      for (const [, init] of fetchMock.mock.calls) {
+        expect(new Headers(init?.headers).has('X-Api-Key')).toBe(false)
+      }
+      expect(curlText()).not.toMatch(/X-Api-Key/i)
+    } finally {
+      sessionStorage.clear()
+    }
+  })
+
+  // Plain text and the XML formatter's highlighted spans are both React text, never markup.
+  it.each(['text/html', 'application/xml'])('Playground_HtmlBody_RendersAsText (%s)', async (contentType) => {
+    const html = '<img src=x onerror=alert(1)>'
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(new Response(html, { status: 502, headers: { 'Content-Type': contentType } })),
+    )
+    renderPlayground()
+
+    const body = await screen.findByRole('region', { name: /response body/i })
+    await waitFor(() => {
+      expect(body.textContent).toContain('<img src=x onerror=alert(1)')
+    })
+    expect(body.querySelector('img')).toBeNull()
+    expect(document.querySelector('img')).toBeNull()
+    expect(screen.getByText('502 Bad Gateway')).toBeTruthy()
+  })
 })
