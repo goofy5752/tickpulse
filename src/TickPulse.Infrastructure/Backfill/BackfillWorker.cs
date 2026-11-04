@@ -34,7 +34,8 @@ namespace TickPulse.Infrastructure.Backfill;
 /// transient errors or a database error mark the symbol <see cref="BackfillStatus.Failed"/> (the reason is logged)
 /// and the queue moves on. A ban marks the current symbol Failed, waits until the ban ends, and then scans again, so
 /// Failed symbols are queued again; the scan at start-up and on every change of leadership also includes them. Any
-/// other exception is a bug and stops the worker.</para>
+/// other exception is a bug: it is logged as Critical and the worker starts over after <see cref="RestartDelay"/>
+/// (it never ends <see cref="ExecuteAsync"/> with an exception, which would stop the host).</para>
 /// </remarks>
 internal sealed partial class BackfillWorker(
     IKlineSource klines,
@@ -60,6 +61,9 @@ internal sealed partial class BackfillWorker(
 
     /// <summary>How long to wait after a ban that carries no end time (the shortest Binance ban).</summary>
     public static readonly TimeSpan DefaultBanWait = TimeSpan.FromMinutes(2);
+
+    /// <summary>How long the worker waits before it starts over after an unexpected error.</summary>
+    public static readonly TimeSpan RestartDelay = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan Minute = Period.OneMinute.Length;
 
@@ -116,42 +120,61 @@ internal sealed partial class BackfillWorker(
         {
             while (true)
             {
-                if (!state.IsLeader)
+                try
                 {
-                    await WaitForLeadershipAsync(symbol: null, stoppingToken).ConfigureAwait(false);
-                    continue;
+                    await StepAsync(stoppingToken).ConfigureAwait(false);
                 }
-
-                if (_scanNeeded && !await TryQueuePendingAsync(stoppingToken).ConfigureAwait(false))
+                catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
                 {
-                    await Task.Delay(LeaderPollInterval, clock, stoppingToken).ConfigureAwait(false);
-                    continue;
+                    // A bug must not stop the host (an unhandled BackgroundService exception does): log it, wait, and
+                    // start over. A symbol that was running stays Running, so the scan queues it again. The timer is
+                    // registered before the log entry (see WaitForLeadershipAsync).
+                    _scanNeeded = true;
+                    var restart = Task.Delay(RestartDelay, clock, stoppingToken);
+                    LogUnexpectedError(ex, RestartDelay.TotalSeconds);
+                    await restart.ConfigureAwait(false);
                 }
-
-                if (_queue.Reader.TryRead(out var symbolId))
-                {
-                    try
-                    {
-                        await ProcessAsync(symbolId, stoppingToken).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        lock (_gate)
-                        {
-                            _pending.Remove(symbolId);
-                        }
-                    }
-
-                    continue;
-                }
-
-                await WaitForWorkAsync(stoppingToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             // Shutting down. A symbol that was running stays Running and is resumed on the next start.
         }
+    }
+
+    // One turn of the loop: wait for leadership, scan, process one symbol, or wait for work.
+    private async Task StepAsync(CancellationToken stoppingToken)
+    {
+        if (!state.IsLeader)
+        {
+            await WaitForLeadershipAsync(symbol: null, stoppingToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (_scanNeeded && !await TryQueuePendingAsync(stoppingToken).ConfigureAwait(false))
+        {
+            await Task.Delay(LeaderPollInterval, clock, stoppingToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (_queue.Reader.TryRead(out var symbolId))
+        {
+            try
+            {
+                await ProcessAsync(symbolId, stoppingToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_gate)
+                {
+                    _pending.Remove(symbolId);
+                }
+            }
+
+            return;
+        }
+
+        await WaitForWorkAsync(stoppingToken).ConfigureAwait(false);
     }
 
     // Waits until this instance is leader, polling every LeaderPollInterval. The timer is registered before the log
@@ -245,7 +268,8 @@ internal sealed partial class BackfillWorker(
 
             if (!SymbolName.TryCreate(symbol.Name, out var name))
             {
-                throw new InvalidOperationException($"'{symbol.Name}' is not a valid symbol name.");
+                await FailAsync(symbolId, symbol.Name, "the stored name is not a valid symbol", null, ct).ConfigureAwait(false);
+                return;
             }
 
             await BackfillAsync(symbolId, name, ct).ConfigureAwait(false);
@@ -386,7 +410,7 @@ internal sealed partial class BackfillWorker(
         }
     }
 
-    private async Task FailAsync(int symbolId, string? symbol, string reason, Exception ex, CancellationToken ct)
+    private async Task FailAsync(int symbolId, string? symbol, string reason, Exception? ex, CancellationToken ct)
     {
         LogFailed(ex, symbol ?? symbolId.ToString(CultureInfo.InvariantCulture), reason);
         try
@@ -439,7 +463,10 @@ internal sealed partial class BackfillWorker(
     private partial void LogRetrying(Exception ex, string symbol, DateTime start, int attempt, double delaySeconds);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Kline backfill of {Symbol} failed: {Reason}")]
-    private partial void LogFailed(Exception ex, string symbol, string reason);
+    private partial void LogFailed(Exception? ex, string symbol, string reason);
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "Kline backfill hit an unexpected error; starting over in {DelaySeconds} s")]
+    private partial void LogUnexpectedError(Exception ex, double delaySeconds);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Kline backfill could not record the failure of symbol {SymbolId}")]
     private partial void LogStatusFailed(Exception ex, int symbolId);

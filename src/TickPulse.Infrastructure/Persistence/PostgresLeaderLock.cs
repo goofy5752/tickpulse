@@ -17,7 +17,7 @@ namespace TickPulse.Infrastructure.Persistence;
 /// user would silently lose it; other leader-only components read <c>IngestionState.IsLeader</c> instead.</para>
 /// <para>Thread-safe: every operation on the connection is serialised.</para>
 /// </remarks>
-public sealed partial class PostgresLeaderLock : IAsyncDisposable
+public sealed partial class PostgresLeaderLock : ILeaderLock
 {
     /// <summary>The advisory lock key, <c>"TICK"</c> in ASCII.</summary>
     public const long LockKey = 0x5449434B;

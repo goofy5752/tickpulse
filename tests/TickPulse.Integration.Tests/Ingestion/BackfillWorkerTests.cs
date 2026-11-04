@@ -10,6 +10,7 @@ using TickPulse.Domain;
 using TickPulse.Infrastructure;
 using TickPulse.Infrastructure.Backfill;
 using TickPulse.Infrastructure.Binance;
+using TickPulse.Infrastructure.Persistence;
 using TickPulse.Integration.Tests.Fixtures;
 using static TickPulse.Integration.Tests.Ingestion.IngestionTestHost;
 
@@ -407,6 +408,31 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         _logs.Count("LogSkippedCompleted").ShouldBe(0);
     }
 
+    [Fact]
+    public async Task UnexpectedError_LogsCritical_RestartsAndRecovers()
+    {
+        SeedTrades("BTCUSDT", From, DepthMinutes);
+        var run = CreateRun(configureServices: services => services.AddSingleton<ICandleWriter>(
+            sp => new ThrowOnceCandleWriter(new CandleWriter(sp.GetRequiredService<NpgsqlDataSource>()))));
+        await MarkCompletedAsync(run, Ada, Eth);
+
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogUnexpectedError") == 1, "the unexpected error logged");
+
+        // Logged as Critical; the worker keeps running and the symbol is left Running, not Failed.
+        _logs.Entries.Where(e => e.EventName == "LogUnexpectedError").ShouldHaveSingleItem().Level.ShouldBe(LogLevel.Critical);
+        run.Worker.ExecuteTask.ShouldNotBeNull().IsCompleted.ShouldBeFalse();
+        (await FindAsync(run, Btc)).BackfillStatus.ShouldBe(BackfillStatus.Running);
+
+        // After the restart delay the scan queues it again and it completes.
+        _clock.Advance(BackfillWorker.RestartDelay);
+        await WaitForStatusAsync(run, Btc, BackfillStatus.Completed);
+        (await CandleStatsAsync(Btc)).Count.ShouldBe(DepthMinutes);
+        run.Worker.ExecuteTask.IsCompleted.ShouldBeFalse();
+        _logs.Count("LogUnexpectedError").ShouldBe(1);
+        _logs.Count("LogFailed").ShouldBe(0);
+    }
+
     [Theory]
     [InlineData(1, 1)]
     [InlineData(2, 2)]
@@ -433,7 +459,7 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         return prices;
     }
 
-    private Run CreateRun(bool enabled = true, bool leader = true)
+    private Run CreateRun(bool enabled = true, bool leader = true, Action<IServiceCollection>? configureServices = null)
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -451,6 +477,7 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         services.AddTickPulseInfrastructure(configuration);
         services.AddTickPulseIngestion(configuration);
         services.ConfigureBinanceRestResilience(o => o.Retry.Delay = TimeSpan.Zero);
+        configureServices?.Invoke(services); // last, so it replaces the default registrations
 
         var run = new Run(services.BuildServiceProvider());
         if (leader)
@@ -512,6 +539,17 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = symbolId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = minute, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
         return (decimal)(await command.ExecuteScalarAsync(Ct))!;
+    }
+
+    /// <summary>Throws an unexpected <see cref="InvalidOperationException"/> on the first insert, then delegates.</summary>
+    private sealed class ThrowOnceCandleWriter(ICandleWriter inner) : ICandleWriter
+    {
+        private int _calls;
+
+        public Task<int> InsertBackfillAsync(int symbolId, IReadOnlyList<Kline> klines, CancellationToken ct) =>
+            Interlocked.Increment(ref _calls) == 1
+                ? throw new InvalidOperationException("Injected unexpected failure.")
+                : inner.InsertBackfillAsync(symbolId, klines, ct);
     }
 
     /// <summary>Count, first and last minute, backfilled count, sum of closes and rows without stream sums/ids.</summary>

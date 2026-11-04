@@ -25,9 +25,12 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// trades (no more commands, the pumps and gap-fills stop), completes the channel and writes what it still holds within
 /// <see cref="FlushDeadline"/>, closes the connections and only then releases the lock. Ticks that could not be written
 /// in time are recorded as a gap for the next session.</para>
+/// <para>An unexpected exception never ends <see cref="ExecuteAsync"/> (which would stop the host): it is logged as
+/// Critical, the instance stands by and releases the lock, and the leadership loop starts over after
+/// <see cref="RestartDelay"/>.</para>
 /// </remarks>
 internal sealed partial class IngestionWorker(
-    PostgresLeaderLock leaderLock,
+    ILeaderLock leaderLock,
     IStreamConnectionFactory connections,
     SymbolReconciler reconciler,
     TickBatchWriter batchWriter,
@@ -47,22 +50,40 @@ internal sealed partial class IngestionWorker(
     /// </remarks>
     public static readonly TimeSpan FlushDeadline = TimeSpan.FromSeconds(10);
 
+    /// <summary>Upper bound of the wait before the leadership loop starts over after an unexpected error.</summary>
+    public static readonly TimeSpan MaxRestartDelay = TimeSpan.FromSeconds(30);
+
     private readonly ILogger _logger = loggerFactory.CreateLogger<IngestionWorker>();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await Task.Yield();
         state.SetStandby();
+        var unexpected = 0;
         try
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                if (await TryAcquireAsync(stoppingToken).ConfigureAwait(false))
+                try
                 {
-                    await LeadAsync(stoppingToken).ConfigureAwait(false);
-                }
+                    if (await TryAcquireAsync(stoppingToken).ConfigureAwait(false))
+                    {
+                        await LeadAsync(stoppingToken).ConfigureAwait(false);
+                    }
 
-                await Task.Delay(options.Value.LeaderRetryInterval, clock, stoppingToken).ConfigureAwait(false);
+                    unexpected = 0;
+                    await Task.Delay(options.Value.LeaderRetryInterval, clock, stoppingToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
+                {
+                    // A bug must not stop the host (an unhandled BackgroundService exception does): stand by, give the
+                    // lock up, and try for leadership again after a growing, bounded delay.
+                    var delay = RestartDelay(options.Value.LeaderRetryInterval, ++unexpected);
+                    LogUnexpectedError(ex, delay.TotalSeconds);
+                    state.SetStandby();
+                    await ReleaseAfterFailureAsync().ConfigureAwait(false);
+                    await Task.Delay(delay, clock, stoppingToken).ConfigureAwait(false);
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -72,6 +93,29 @@ internal sealed partial class IngestionWorker(
         finally
         {
             await leaderLock.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The wait after the <paramref name="failures"/>-th unexpected error in a row: the leader retry interval, doubling,
+    /// at most <see cref="MaxRestartDelay"/> (or the retry interval when that is longer).
+    /// </summary>
+    internal static TimeSpan RestartDelay(TimeSpan retryInterval, int failures)
+    {
+        var cap = retryInterval > MaxRestartDelay ? retryInterval : MaxRestartDelay;
+        var delay = retryInterval * Math.Pow(2, Math.Clamp(failures - 1, 0, 16));
+        return delay < cap ? delay : cap;
+    }
+
+    private async Task ReleaseAfterFailureAsync()
+    {
+        try
+        {
+            await leaderLock.ReleaseAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            LogCleanupFailed(ex);
         }
     }
 
@@ -129,14 +173,31 @@ internal sealed partial class IngestionWorker(
             await session.CancelAsync().ConfigureAwait(false);
             state.SetStandby();
             await watchdog.ConfigureAwait(false);
-            await supervisor.StopAsync().ConfigureAwait(false);
+
+            // Each step is guarded so a failing one cannot skip the rest, above all the release of the lock.
+            try
+            {
+                await supervisor.StopAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LogCleanupFailed(ex);
+            }
 
             // 2. Complete the channel and write what it still holds, within the deadline.
             channel.Writer.TryComplete();
             await FlushAsync(writer, abandon).ConfigureAwait(false);
 
             // 3. Close the connections, then give the lock up.
-            await supervisor.DisposeAsync().ConfigureAwait(false);
+            try
+            {
+                await supervisor.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LogCleanupFailed(ex);
+            }
+
             await leaderLock.ReleaseAsync().ConfigureAwait(false);
             LogSessionEnded();
         }
@@ -222,6 +283,12 @@ internal sealed partial class IngestionWorker(
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Writing the remaining ticks failed")]
     private partial void LogFlushFailed(Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Critical, Message = "Ingestion hit an unexpected error; standing by and retrying in {DelaySeconds:F1} s")]
+    private partial void LogUnexpectedError(Exception exception, double delaySeconds);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Cleaning up the ingestion session failed")]
+    private partial void LogCleanupFailed(Exception exception);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Ingestion stopped; leader lock released")]
     private partial void LogSessionEnded();

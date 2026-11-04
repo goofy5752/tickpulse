@@ -1,9 +1,15 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using TickPulse.Application.Abstractions;
 using TickPulse.Application.Ingestion;
 using TickPulse.Domain;
+using TickPulse.Infrastructure;
+using TickPulse.Infrastructure.Ingestion;
 using TickPulse.Infrastructure.Persistence;
 using TickPulse.Integration.Tests.Fixtures;
 using static TickPulse.Integration.Tests.Ingestion.IngestionTestHost;
@@ -341,6 +347,74 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         _server.ActiveConnections.ShouldBe(1);
     }
 
+    [Fact]
+    public async Task UnexpectedError_LogsCritical_RestartsAndRecovers()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var logs = new LogCapture();
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:TickPulse"] = db.ConnectionString,
+                ["Binance:WsBaseUrl"] = _server.WsBaseUrl.ToString(),
+                ["Binance:RestBaseUrl"] = _server.RestBaseUrl.ToString(),
+                ["Ingestion:BatchMaxDelay"] = "00:00:00.020",
+                ["Ingestion:LeaderRetryInterval"] = "00:00:00.200",
+                ["Ingestion:LeaderCheckInterval"] = "00:00:00.200",
+            })
+            .Build();
+        var services = new ServiceCollection();
+        services.AddLogging(logging => logging.AddProvider(logs).SetMinimumLevel(LogLevel.Debug));
+        services.AddTickPulseInfrastructure(configuration);
+        services.AddTickPulseIngestion(configuration);
+        await using var provider = services.BuildServiceProvider();
+        var state = provider.GetRequiredService<IngestionState>();
+
+        // The worker as AddTickPulseIngestion builds it, but with a lock whose first acquire fails unexpectedly.
+        using var worker = new IngestionWorker(
+            new ThrowOnceLeaderLock(new PostgresLeaderLock(db.ConnectionString)),
+            provider.GetRequiredService<IStreamConnectionFactory>(),
+            provider.GetRequiredService<SymbolReconciler>(),
+            provider.GetRequiredService<TickBatchWriter>(),
+            provider.GetRequiredService<GapFiller>(),
+            provider.GetRequiredService<SymbolIdCache>(),
+            provider.GetRequiredService<GapFillWatermarks>(),
+            provider.GetRequiredService<ISymbolChangeSignal>(),
+            state,
+            provider.GetRequiredService<IOptions<IngestionOptions>>(),
+            TimeProvider.System,
+            provider.GetRequiredService<ILoggerFactory>());
+        await worker.StartAsync(ct);
+        try
+        {
+            await WaitForAsync(() => logs.Count("LogUnexpectedError") == 1, "the unexpected error logged");
+            logs.Entries.Where(e => e.EventName == "LogUnexpectedError").ShouldHaveSingleItem().Level.ShouldBe(LogLevel.Critical);
+            worker.ExecuteTask.ShouldNotBeNull().IsCompleted.ShouldBeFalse();
+
+            // The next attempt takes the lock and ingests as usual.
+            await _server.WaitUntilAsync(s => s.ActiveConnections == 1 && s.SubscribedStreams.SetEquals(Seeded.Select(Stream)), WaitTimeout, ct);
+            await WaitForAsync(() => state.Status == WsState.Connected, "the worker connected");
+            await _server.PushTradeAsync("BTCUSDT", 1, 100m, Now.AddSeconds(-1));
+            await WaitForTradeCountAsync(db, "BTCUSDT", 1);
+
+            worker.ExecuteTask.IsCompleted.ShouldBeFalse();
+            logs.Count("LogUnexpectedError").ShouldBe(1);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Theory]
+    [InlineData(10, 1, 10)]
+    [InlineData(10, 2, 20)]
+    [InlineData(10, 3, 30)]
+    [InlineData(10, 50, 30)]
+    [InlineData(60, 4, 60)]
+    public void RestartDelay_DoublesUpToCap(int retrySeconds, int failures, int expectedSeconds) =>
+        IngestionWorker.RestartDelay(TimeSpan.FromSeconds(retrySeconds), failures).ShouldBe(TimeSpan.FromSeconds(expectedSeconds));
+
     private static SymbolName Symbol(string raw) => SymbolName.TryCreate(raw, out var name) ? name : throw new ArgumentException(raw);
 
     private static IEnumerable<long> LongRange(long from, long to)
@@ -358,6 +432,23 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         return (
             root.GetProperty("method").GetString()!,
             [.. root.GetProperty("params").EnumerateArray().Select(e => e.GetString()!)]);
+    }
+
+    /// <summary>A real lock whose first <see cref="TryAcquireAsync"/> throws an unexpected <see cref="InvalidOperationException"/>.</summary>
+    private sealed class ThrowOnceLeaderLock(PostgresLeaderLock inner) : ILeaderLock
+    {
+        private int _calls;
+
+        public Task<bool> TryAcquireAsync(CancellationToken cancellationToken) =>
+            Interlocked.Increment(ref _calls) == 1
+                ? throw new InvalidOperationException("Injected unexpected failure.")
+                : inner.TryAcquireAsync(cancellationToken);
+
+        public Task<bool> CheckAsync(CancellationToken cancellationToken) => inner.CheckAsync(cancellationToken);
+
+        public Task ReleaseAsync() => inner.ReleaseAsync();
+
+        public ValueTask DisposeAsync() => inner.DisposeAsync();
     }
 
     // The server applies the SUBSCRIBE before the worker reads its ack, so wait for the worker's side as well.
