@@ -242,9 +242,11 @@ public sealed class HealthTests(ApiFactory api) : IClassFixture<ApiFactory>
         response.Headers.GetValues("X-Frame-Options").ShouldBe(["DENY"]);
     }
 
+    // connect-src 'self' also covers the hub's same-origin ws:/wss: connection (CSP Level 3).
     private const string StrictPolicy =
-        "default-src 'self'; connect-src 'self' wss: ws:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
-        "script-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+        "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
+        "script-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; " +
+        "form-action 'self'";
 
     [Theory]
     [InlineData("/")]
@@ -291,7 +293,7 @@ public sealed class HealthTests(ApiFactory api) : IClassFixture<ApiFactory>
         response.Headers.GetValues("Content-Security-Policy").ShouldBe(
         [
             "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
-            "script-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; " +
+            "script-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; " +
             "base-uri 'self'; form-action 'self'",
         ], path);
     }

@@ -7,9 +7,11 @@ namespace TickPulse.Api.Hosting;
 /// </summary>
 /// <remarks>
 /// <para>Every response gets <see cref="ContentSecurityPolicy"/>: everything from this origin only, no inline script,
-/// WebSocket connections for the SignalR hub, and inline styles because React and the chart library set
-/// <c>style</c> attributes. The dashboard's <c>index.html</c> therefore loads even its pre-paint theme script from a
-/// file (<c>/theme-init.js</c>).</para>
+/// no plugins (<c>object-src 'none'</c>), and inline styles because React and the chart library set <c>style</c>
+/// attributes. <c>connect-src 'self'</c> also admits the SignalR hub's WebSocket: CSP Level 3 matches a same-origin
+/// <c>ws:</c>/<c>wss:</c> URL against <c>'self'</c>, so no blanket <c>ws:</c>/<c>wss:</c> source is needed (and a
+/// browser that refused it would still reach the hub through SignalR's HTTP fallback). The dashboard's
+/// <c>index.html</c> loads even its pre-paint theme script from a file (<c>/theme-init.js</c>).</para>
 /// <para>The API reference under <c>/docs</c> gets <see cref="DocsContentSecurityPolicy"/> instead. Scalar boots from
 /// an inline module script that carries its configuration, so that page allows inline scripts; its fonts, telemetry
 /// and AI agent are switched off (see <c>Program</c>), so it still loads nothing from another origin.</para>
@@ -17,12 +19,13 @@ namespace TickPulse.Api.Hosting;
 internal static class SecurityHeaders
 {
     public const string ContentSecurityPolicy =
-        "default-src 'self'; connect-src 'self' wss: ws:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
-        "script-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+        "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
+        "script-src 'self'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; " +
+        "form-action 'self'";
 
     public const string DocsContentSecurityPolicy =
         "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
-        "script-src 'self' 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; " +
+        "script-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; frame-ancestors 'none'; " +
         "base-uri 'self'; form-action 'self'";
 
     /// <summary>

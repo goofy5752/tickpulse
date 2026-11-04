@@ -207,7 +207,9 @@ prefers it; a request that accepts neither gets `406`. Admin routes need `X-Api-
 wherever `GET` does.
 
 Every response carries `nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a
-`Content-Security-Policy` that allows only this origin and no inline script. The one exception is
+`Content-Security-Policy` that allows only this origin, no inline script and no plugins
+(`object-src 'none'`). Connections are `connect-src 'self'`, which also covers the hub's same-origin
+WebSocket (`'self'` matches `ws:`/`wss:` on the same host in CSP Level 3). The one exception is
 `/docs`: Scalar boots from an inline script, so its policy allows inline scripts, still from this
 origin only (Scalar's CDN fonts, telemetry and AI agent are switched off). See
 `src/TickPulse.Api/Hosting/SecurityHeaders.cs`.
