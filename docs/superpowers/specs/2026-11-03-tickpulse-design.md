@@ -265,7 +265,7 @@ Binance WS (combined stream, dynamic SUBSCRIBE)
   3. **TickPulse — Runtime/DB**: GC, threadpool, memory, Npgsql pool, query durations
   4. **Logs explorer**: a filterable Loki panel with trace jump links
 - **Alert rules (provisioned):**
-  - WS disconnected > 60 s
+  - WS disconnected > 60 s (alert after a 30 s pending period)
   - ingest lag p95 > 5 s
   - zero ticks for an active symbol for 2 min
   - API 5xx ratio > 2%

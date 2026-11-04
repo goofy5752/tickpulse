@@ -1,0 +1,19 @@
+# Prometheus: TickPulse metrics arrive by remote write from the OTel Collector
+# (--web.enable-remote-write-receiver). The only scrape target is the collector's own
+# telemetry, which feeds the "Telemetry pipeline" row of the Runtime/DB dashboard.
+# Retention (30 days) is set with command-line flags in compose.observability.yml.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+storage:
+  tsdb:
+    # Remote-written batches can arrive slightly out of order after a collector retry.
+    out_of_order_time_window: 5m
+
+scrape_configs:
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]

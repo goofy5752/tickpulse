@@ -1,0 +1,4 @@
+# No app plugins are provisioned; the file keeps Grafana from logging a missing-directory error.
+apiVersion: 1
+
+apps: []
