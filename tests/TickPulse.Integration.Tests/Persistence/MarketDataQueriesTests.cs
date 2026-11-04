@@ -616,7 +616,11 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         (await command.ExecuteNonQueryAsync(Ct)).ShouldBe(1);
     }
 
-    /// <summary>Several days of backfill minutes for two symbols plus a stretch of stream minutes, then fresh statistics.</summary>
+    /// <summary>
+    /// Several days of backfill minutes for two symbols plus a stretch of stream minutes, then a rewritten table and
+    /// fresh statistics. Earlier tests insert and delete many more minutes; the rewrite drops their dead heap and index
+    /// pages, which would otherwise tip the cost-based choice of scan (partial index or primary key, plain or bitmap).
+    /// </summary>
     private async Task SeedMixedSourcesAsync()
     {
         var backfillStart = Start.AddDays(-5);
@@ -624,7 +628,7 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         await CandleWriter().InsertBackfillAsync(Btc, backfill, Ct);
         await CandleWriter().InsertBackfillAsync(Eth, backfill, Ct);
         await Writer().WriteBatchAsync([.. Enumerable.Range(1, 200).Select(i => NewTick(Btc, i, 10m, 1m, Start.AddSeconds(i * 15)))], Ct);
-        await ExecuteAsync("ANALYZE candles_1m");
+        await ExecuteAsync("VACUUM (FULL, ANALYZE) candles_1m");
     }
 
     /// <summary>
