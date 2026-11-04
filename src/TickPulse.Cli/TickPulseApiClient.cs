@@ -35,6 +35,8 @@ internal sealed class TickPulseApiClient(HttpClient http)
 {
     public const string ApiKeyHeader = "X-Api-Key";
 
+    private static readonly XmlReaderSettings XmlSettings = new() { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null };
+
     /// <summary>The address requests are resolved against.</summary>
     public Uri? BaseAddress => http.BaseAddress;
 
@@ -108,32 +110,74 @@ internal sealed class TickPulseApiClient(HttpClient http)
             : new ApiResponse<T>(Body: null, raw, contentType, status, ApiProblem.Parse(status, mediaType, raw));
     }
 
+    /// <summary>
+    /// Reads a 2xx body, which must be a document in the format that was asked for: JSON for tables and
+    /// <c>--format json</c>, XML for <c>--format xml</c>. Anything else (HTML from a wrong <c>--api-url</c>, a
+    /// truncated body, JSON when XML was asked for) is an <see cref="UnexpectedResponseException"/>, exit code 2.
+    /// Tables also need the expected contract; raw output only needs a well-formed document.
+    /// </summary>
     private static T? ReadBody<T>(string raw, string? mediaType, OutputFormat format)
         where T : class
     {
-        if (string.IsNullOrWhiteSpace(raw) || typeof(T) == typeof(object))
+        // DELETE's 204 is the one success without a document.
+        if (typeof(T) == typeof(object))
         {
             return null;
         }
 
-        if (mediaType?.Contains("xml", StringComparison.OrdinalIgnoreCase) == true)
+        if (format == OutputFormat.Xml)
         {
-            return ReadXml<T>(raw);
+            return IsWellFormedXml(raw) ? ReadXml<T>(raw) : throw Unreadable("an XML", mediaType, raw);
         }
 
         try
         {
-            return JsonSerializer.Deserialize<T>(raw, ApiJson.Options);
+            return JsonSerializer.Deserialize<T>(raw, ApiJson.Options) ?? throw Unreadable("a TickPulse JSON", mediaType, raw);
         }
-        catch (JsonException e) when (format == OutputFormat.Table)
+        catch (JsonException e) when (format == OutputFormat.Table || !IsWellFormedJson(raw))
         {
-            throw new UnexpectedResponseException(
-                $"The server answered {mediaType ?? "an unknown media type"}, not a TickPulse JSON document. Is --api-url right?", e);
+            throw Unreadable(format == OutputFormat.Table ? "a TickPulse JSON" : "a JSON", mediaType, raw, e);
         }
         catch (JsonException)
         {
-            // Raw output does not need the parsed body.
+            // Well-formed JSON of another shape: --format json prints it as it is.
             return null;
+        }
+    }
+
+    private static UnexpectedResponseException Unreadable(string expected, string? mediaType, string raw, Exception? inner = null)
+    {
+        var sent = string.IsNullOrWhiteSpace(raw) ? "an empty body" : mediaType ?? "a body without a media type";
+        return new UnexpectedResponseException($"Expected {expected} document, but the server sent {sent}. Is --api-url right?", inner);
+    }
+
+    private static bool IsWellFormedJson(string raw)
+    {
+        try
+        {
+            using var _ = JsonDocument.Parse(raw);
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsWellFormedXml(string raw)
+    {
+        try
+        {
+            using var reader = XmlReader.Create(new StringReader(raw), XmlSettings);
+            while (reader.Read())
+            {
+            }
+
+            return true;
+        }
+        catch (XmlException)
+        {
+            return false;
         }
     }
 
@@ -143,7 +187,7 @@ internal sealed class TickPulseApiClient(HttpClient http)
     {
         try
         {
-            using var reader = XmlReader.Create(new StringReader(raw), new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit });
+            using var reader = XmlReader.Create(new StringReader(raw), XmlSettings);
             return new DataContractSerializer(typeof(T)).ReadObject(reader) as T;
         }
         catch (Exception e) when (e is SerializationException or XmlException)

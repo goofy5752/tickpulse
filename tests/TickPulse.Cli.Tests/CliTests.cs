@@ -10,6 +10,7 @@ public sealed class CliTests
     private const string Xml = "application/xml; charset=utf-8";
     private const string ProblemJson = "application/problem+json";
     private const string ProblemXml = "application/problem+xml; charset=utf-8";
+    private const string SecretKey = "s3cret-key-9f2c";
 
     private const string AverageJson = """
         {"symbol":"BTCUSDT","averagePrice":67234.51234567,"from":"2026-11-03T10:00:05Z","to":"2026-11-04T09:59:58Z",
@@ -241,6 +242,7 @@ public sealed class CliTests
         body.RootElement.GetProperty("symbol").GetString().ShouldBe("BNBUSDT");
         cli.Out.Output.ShouldContain("BNBUSDT added");
         cli.Out.Output.ShouldNotContain("s3cret-key");
+        cli.Error.Output.ShouldNotContain("s3cret-key");
     }
 
     [Fact]
@@ -277,7 +279,24 @@ public sealed class CliTests
         var problem = $$"""{"type":"https://tickpulse.dev/problems/{{slug}}","title":"T","status":{{(int)status}},"detail":"D"}""";
         using var cli = new CliHarness(StubHttpHandler.Returns(status, ProblemJson, problem));
 
-        (await cli.RunAsync("symbols", "add", "BNBUSDT", "--api-key", "k")).ShouldBe(1);
+        (await cli.RunAsync("symbols", "add", "BNBUSDT", "--api-key", SecretKey)).ShouldBe(1);
+
+        cli.Error.Output.ShouldContain(hint, Case.Insensitive);
+        cli.Error.Output.ShouldNotContain(SecretKey);
+        cli.Out.Output.ShouldNotContain(SecretKey);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized, "rejected")]
+    [InlineData(HttpStatusCode.Forbidden, "disabled")]
+    [InlineData(HttpStatusCode.Conflict, "limit")]
+    [InlineData(HttpStatusCode.UnprocessableEntity, "spot")]
+    [InlineData(HttpStatusCode.ServiceUnavailable, "try again")]
+    public async Task SymbolsAdd_ProblemWithoutBody_HintFromStatus(HttpStatusCode status, string hint)
+    {
+        using var cli = new CliHarness(new StubHttpHandler(_ => StubHttpHandler.Empty(status)));
+
+        (await cli.RunAsync("symbols", "add", "BNBUSDT", "--api-key", SecretKey)).ShouldBe(ExitCodesFor(status));
 
         cli.Error.Output.ShouldContain(hint, Case.Insensitive);
     }
@@ -350,6 +369,9 @@ public sealed class CliTests
     [Theory]
     [InlineData("sma", "BTCUSDT", "-n", "0", "-p", "1d")]
     [InlineData("sma", "BTCUSDT", "-p", "1d")]
+    [InlineData("sma", "BTCUSDT", "-n", "abc", "-p", "1d")]
+    [InlineData("sma", "BTCUSDT", "-n", "1001", "-p", "1d")]
+    [InlineData("watch", "BTCUSDT", "--interval", "2h")]
     [InlineData("sma", "BTCUSDT", "-n", "5", "-p", "1d", "-s", "yesterday")]
     [InlineData("avg", "BTC/../admin")]
     [InlineData("avg", "BTCUSDT", "--format", "yaml")]
@@ -371,15 +393,9 @@ public sealed class CliTests
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
         using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, Json, SymbolsJson));
-        cli.Http.AfterResponse = count =>
-        {
-            if (count == 2)
-            {
-                cts.Cancel();
-            }
-        };
+        cli.StopAfter(2, cts);
 
-        var exit = await cli.RunAsync(cts.Token, "watch", "btcusdt", "--interval", "500ms");
+        var exit = await cli.RunAsync(cts.Token, "watch", "btcusdt", "--interval", "1h");
 
         exit.ShouldBe(0);
         cli.Http.Requests.Count.ShouldBe(2);
@@ -395,16 +411,11 @@ public sealed class CliTests
             request.RequestUri!.AbsolutePath == "/api/symbols"
                 ? StubHttpHandler.Response(HttpStatusCode.OK, Json, SymbolsJson)
                 : StubHttpHandler.Response(HttpStatusCode.OK, Json, SmaJson)));
-        // Stop during the second poll, after the first one (symbols + SMA) has been drawn.
-        cli.Http.AfterResponse = count =>
-        {
-            if (count == 3)
-            {
-                cts.Cancel();
-            }
-        };
+        // Stop during the second poll, after the first one (symbols + SMA) has been drawn. The 1h interval would
+        // hang on a real clock; the fake one is advanced by every response.
+        cli.StopAfter(3, cts);
 
-        (await cli.RunAsync(cts.Token, "watch", "BTCUSDT", "-n", "20", "-p", "1d", "-i", "500ms")).ShouldBe(0);
+        (await cli.RunAsync(cts.Token, "watch", "BTCUSDT", "-n", "20", "-p", "1d", "-i", "1h")).ShouldBe(0);
 
         cli.Http.Requests.Take(3).Select(r => r.Uri.PathAndQuery)
             .ShouldBe(["/api/symbols", "/api/BTCUSDT/SimpleMovingAverage?n=20&p=1d", "/api/symbols"]);
@@ -417,15 +428,9 @@ public sealed class CliTests
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
         using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, Json, SymbolsJson), outputRedirected: true);
-        cli.Http.AfterResponse = count =>
-        {
-            if (count == 3)
-            {
-                cts.Cancel();
-            }
-        };
+        cli.StopAfter(3, cts);
 
-        (await cli.RunAsync(cts.Token, "watch", "BTCUSDT", "-i", "500ms")).ShouldBe(0);
+        (await cli.RunAsync(cts.Token, "watch", "BTCUSDT", "-i", "1h")).ShouldBe(0);
 
         var lines = cli.Out.Lines.Where(l => l.Contains("BTCUSDT", StringComparison.Ordinal)).ToList();
         lines.Count.ShouldBeGreaterThanOrEqualTo(2);
@@ -453,4 +458,133 @@ public sealed class CliTests
         cli.Out.Output.ShouldContain("tickpulse avg BTCUSDT");
         cli.Http.Requests.ShouldBeEmpty();
     }
+
+    [Theory]
+    [InlineData("avg", "BTCUSDT", "--api-key", SecretKey, "bogus")]
+    [InlineData("avg", "BTCUSDT", "bogus", "-k", SecretKey)]
+    [InlineData("frobnicate", "--api-key=" + SecretKey)]
+    [InlineData("sma", "BTCUSDT", "-n", SecretKey, "-p", "1d", "--api-key", SecretKey)]
+    [InlineData("sma", "BTCUSDT", "-n", SecretKey, "-p", "1d", "-k:" + SecretKey)]
+    public async Task UsageError_NeverEchoesApiKey(params string[] args)
+    {
+        using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, Json, AverageJson));
+
+        (await cli.RunAsync(args)).ShouldBe(64);
+
+        cli.Error.Output.ShouldNotBeEmpty();
+        cli.Error.Output.ShouldNotContain(SecretKey);
+        cli.Out.Output.ShouldNotContain(SecretKey);
+    }
+
+    [Fact]
+    public async Task ApiKey_OnAnalyticsCommand_IsAccepted_AndNotSent()
+    {
+        using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, Json, AverageJson));
+
+        (await cli.RunAsync("avg", "BTCUSDT", "--api-key", SecretKey)).ShouldBe(0);
+
+        cli.Http.Last.Header("X-Api-Key").ShouldBeNull();
+        cli.Error.Output.ShouldNotContain(SecretKey);
+    }
+
+    [Fact]
+    public async Task HttpClientTimeout_Exit2()
+    {
+        using var cli = new CliHarness(StubHttpHandler.Throws(new TaskCanceledException("timed out", new TimeoutException())));
+
+        (await cli.RunAsync("avg", "BTCUSDT")).ShouldBe(2);
+
+        cli.Error.Output.ShouldContain("No answer within");
+    }
+
+    [Fact]
+    public async Task ProblemDetail_WithMarkup_RendersLiterally()
+    {
+        const string problem = """
+            {"type":"https://tickpulse.dev/problems/no-data","title":"No [bold]data[/]","status":404,
+             "detail":"Nothing for [red]BTCUSDT[/] yet.","traceId":"[t]"}
+            """;
+        using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.NotFound, ProblemJson, problem));
+
+        (await cli.RunAsync("avg", "BTCUSDT")).ShouldBe(1);
+
+        cli.Error.Output.ShouldContain("Nothing for [red]BTCUSDT[/] yet.");
+        cli.Error.Output.ShouldContain("No [bold]data[/]");
+    }
+
+    [Theory]
+    [InlineData("table", "text/html", "<html><body>Welcome</body></html>")]
+    [InlineData("json", "text/html", "<html><body>Welcome</body></html>")]
+    [InlineData("json", Json, "{\"symbol\":")]
+    [InlineData("xml", "text/html", "<html><body>Welcome")]
+    [InlineData("xml", Json, "{\"symbol\":\"BTCUSDT\"}")]
+    [InlineData("table", Json, "")]
+    public async Task UnreadableSuccessBody_Exit2(string format, string contentType, string body)
+    {
+        using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, contentType, body));
+
+        (await cli.RunAsync("avg", "BTCUSDT", "--format", format)).ShouldBe(2);
+
+        cli.Error.Output.ShouldContain("api.test");
+    }
+
+    [Theory]
+    [InlineData("json", Json)]
+    [InlineData("xml", Xml)]
+    public async Task RawOutput_Redirected_IsByteForByte(string format, string contentType)
+    {
+        var body = format == "json" ? AverageJson.ReplaceLineEndings(string.Empty) : AverageXml;
+        using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, contentType, body), outputRedirected: true);
+
+        (await cli.RunAsync("avg", "BTCUSDT", "-f", format)).ShouldBe(0);
+
+        cli.Out.Output.ShouldBe(body);
+    }
+
+    [Theory]
+    [InlineData("https://user:hunter2@api.test", "credentials")]
+    [InlineData("http://user:hunter2@bad host", "absolute")]
+    [InlineData("https://api.test/?region=eu", "query")]
+    [InlineData("https://api.test/#top", "fragment")]
+    [InlineData("ftp://api.test", "absolute")]
+    public async Task ApiUrl_Rejected_WithoutEchoingCredentials(string url, string reason)
+    {
+        using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, Json, AverageJson));
+
+        (await cli.RunAsync("avg", "BTCUSDT", "--api-url", url)).ShouldBe(64);
+
+        cli.Http.Requests.ShouldBeEmpty();
+        cli.Error.Output.ShouldContain(reason, Case.Insensitive);
+        cli.Error.Output.ShouldNotContain("hunter2");
+    }
+
+    [Fact]
+    public async Task ApiUrl_InvalidInEnvironment_Exit64()
+    {
+        using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, Json, AverageJson));
+        cli.Variables[CliEnvironment.ApiUrlVariable] = "https://user:hunter2@api.test";
+
+        (await cli.RunAsync("avg", "BTCUSDT")).ShouldBe(64);
+
+        cli.Http.Requests.ShouldBeEmpty();
+        cli.Error.Output.ShouldNotContain("hunter2");
+    }
+
+    [Fact]
+    public async Task RootHelp_ListsExitCodes()
+    {
+        using var cli = new CliHarness(StubHttpHandler.Returns(HttpStatusCode.OK, Json, AverageJson));
+
+        (await cli.RunAsync("--help")).ShouldBe(0);
+
+        var help = cli.Help.ToString();
+        help.ShouldContain("Usage:");
+        help.ShouldContain("tickpulse [command] [options]");
+        foreach (var code in new[] { "0 ", "1 ", "2 ", "64 ", "70 ", "130 " })
+        {
+            help.ShouldContain("  " + code);
+        }
+    }
+
+    private static int ExitCodesFor(HttpStatusCode status) => (int)status >= 500 ? 2 : 1;
 }

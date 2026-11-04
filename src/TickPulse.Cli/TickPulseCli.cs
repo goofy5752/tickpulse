@@ -27,10 +27,18 @@ internal static class TickPulseCli
         var root = new Command(
             CliOptions.RootName,
             "TickPulse console client: 24h average prices, simple moving averages, live prices and symbol "
-            + "administration, from the TickPulse HTTP API.")
+            + "administration, from the TickPulse HTTP API.\n\n"
+            + "Exit codes:\n"
+            + "  0    success\n"
+            + "  1    the API rejected the request (4xx: unknown symbol, validation, bad API key, ...)\n"
+            + "  2    the API is unreachable, timed out, failed (5xx) or sent an unreadable body\n"
+            + "  64   invalid command line; nothing was sent\n"
+            + "  70   internal error in tickpulse itself\n"
+            + "  130  interrupted with Ctrl+C (watch exits with 0 instead)")
         {
             options.ApiUrl,
             options.Format,
+            options.ApiKey,
             help,
             new VersionOption(),
             avg,
@@ -77,10 +85,25 @@ internal static class TickPulseCli
     /// <summary>Parses and runs <paramref name="args"/>. Invalid command lines print their errors and return 64.</summary>
     public static async Task<int> RunAsync(string[] args, CliEnvironment environment, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(args);
+        ArgumentNullException.ThrowIfNull(environment);
+
         var parse = Build(environment).Parse(args);
         if (parse.Action is ParseErrorAction)
         {
-            ProblemView.RenderUsage(environment.Error, parse.Errors.Select(e => e.Message).Distinct(StringComparer.Ordinal), CommandPath(parse.CommandResult));
+            var secrets = ApiKeyValues(args);
+            ProblemView.RenderUsage(
+                environment.Error,
+                parse.Errors.Select(e => Redact(e.Message, secrets)).Distinct(StringComparer.Ordinal),
+                CommandPath(parse.CommandResult));
+            return ExitCodes.Usage;
+        }
+
+        // The default may come from TICKPULSE_API_URL, which no parser validator sees: check the value in effect.
+        if (parse.Action is not ExamplesHelpAction
+            && CliOptions.ValidateApiUrl(parse.GetValue<string>("--api-url"), out _) is { } urlError)
+        {
+            ProblemView.RenderUsage(environment.Error, [urlError], CommandPath(parse.CommandResult));
             return ExitCodes.Usage;
         }
 
@@ -92,6 +115,35 @@ internal static class TickPulseCli
         };
         return await parse.InvokeAsync(invocation, ct).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The values given to <c>--api-key</c>/<c>-k</c> (as the next token, or after <c>=</c> or <c>:</c>), so a usage
+    /// error never prints a key, even when the parser quotes a token back ("Cannot parse argument '…'").
+    /// </summary>
+    private static List<string> ApiKeyValues(string[] args)
+    {
+        string[] prefixes = ["--api-key=", "--api-key:", "-k=", "-k:"];
+        var values = new List<string>();
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (args[i] is "--api-key" or "-k")
+            {
+                if (i + 1 < args.Length)
+                {
+                    values.Add(args[i + 1]);
+                }
+
+                continue;
+            }
+
+            values.AddRange(prefixes.Where(p => args[i].StartsWith(p, StringComparison.Ordinal)).Select(p => args[i][p.Length..]));
+        }
+
+        return [.. values.Where(v => v.Length > 0)];
+    }
+
+    private static string Redact(string message, List<string> secrets) =>
+        secrets.Aggregate(message, (text, secret) => text.Replace(secret, "***", StringComparison.Ordinal));
 
     /// <summary><c>tickpulse symbols add</c> for the command that failed to parse.</summary>
     private static string CommandPath(CommandResult result)

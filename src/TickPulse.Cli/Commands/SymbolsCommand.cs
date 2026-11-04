@@ -11,13 +11,12 @@ internal static class SymbolsCommand
 
     public static Command Create(CliEnvironment environment, GlobalOptions options)
     {
-        var apiKey = CliOptions.ApiKey();
+        var apiKey = options.ApiKey;
         var list = List(environment, options, apiKey);
         var command = new Command(
             "symbols",
             "List the monitored symbols (the default), or add and remove them with the admin API key.")
         {
-            apiKey,
             list,
             Add(environment, options, apiKey),
             Remove(environment, options, apiKey),

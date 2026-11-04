@@ -17,6 +17,24 @@ internal static class ProblemView
         "upstream-unavailable" => "Binance could not be reached to verify the symbol. Try again in a moment.",
         "rate-limited" => "Too many requests from this address; wait a minute and try again.",
         "internal" => "The server hit an unexpected error. Quote the trace id if you report it.",
+        _ => HintForStatus(problem.Status),
+    };
+
+    /// <summary>
+    /// For failures without a TickPulse problem type: a proxy or load balancer in front of the API, or a bodiless
+    /// response. Phrased by status alone, matching the TickPulse problem that status usually means.
+    /// </summary>
+    private static string? HintForStatus(int status) => status switch
+    {
+        401 => "The admin API key was rejected or missing. Check --api-key or TICKPULSE_API_KEY.",
+        403 => "Access was refused; the admin API may be disabled on this server.",
+        404 => "Nothing at that address. Check --api-url, and run 'tickpulse symbols list' for the monitored symbols.",
+        409 => "The request conflicts with the server state, e.g. the active symbol limit is reached.",
+        422 => "The symbol was refused; it must be listed on the Binance spot market, e.g. BTCUSDT.",
+        429 => "Too many requests from this address; wait a minute and try again.",
+        502 or 504 => "A proxy in front of the API could not get an answer from it. Try again in a moment.",
+        503 => "The service is unavailable right now. Try again in a moment.",
+        >= 500 => "The server failed to handle the request. Try again in a moment.",
         _ => null,
     };
 

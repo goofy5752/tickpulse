@@ -62,6 +62,18 @@ internal static class WatchCommand
         var state = new WatchState(symbol, interval, sma?.Label);
         try
         {
+            // Polls start every interval (a fixed cadence, whatever a poll takes): the next tick is armed before
+            // each poll starts.
+            var tick = Task.Delay(interval, environment.Time, ct);
+
+            async Task NextAsync()
+            {
+                await tick.ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                tick = Task.Delay(interval, environment.Time, ct);
+                await PollAsync(session, state, symbol, sma, ct).ConfigureAwait(false);
+            }
+
             // The first poll decides whether there is anything to watch: a problem or an unknown symbol ends here.
             var first = await session.Client.ListSymbolsAsync(OutputFormat.Table, ct).ConfigureAwait(false);
             if (first.Problem is { } problem)
@@ -87,8 +99,7 @@ internal static class WatchCommand
                 while (true)
                 {
                     environment.Out.MarkupLine(WatchView.Line(state));
-                    await Task.Delay(interval, environment.Time, ct).ConfigureAwait(false);
-                    await PollAsync(session, state, symbol, sma, ct).ConfigureAwait(false);
+                    await NextAsync().ConfigureAwait(false);
                 }
             }
 
@@ -99,8 +110,7 @@ internal static class WatchCommand
                 {
                     while (true)
                     {
-                        await Task.Delay(interval, environment.Time, ct).ConfigureAwait(false);
-                        await PollAsync(session, state, symbol, sma, ct).ConfigureAwait(false);
+                        await NextAsync().ConfigureAwait(false);
                         live.UpdateTarget(WatchView.Render(state));
                         live.Refresh();
                     }

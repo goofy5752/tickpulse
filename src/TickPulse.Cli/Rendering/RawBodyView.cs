@@ -24,7 +24,9 @@ internal static partial class RawBodyView
         var console = environment.Out;
         if (environment.IsOutputRedirected)
         {
-            console.Profile.Out.Writer.WriteLine(raw);
+            // Exactly the body, without an added newline, so the output can be piped into another tool.
+            console.Profile.Out.Writer.Write(raw);
+            console.Profile.Out.Writer.Flush();
             return;
         }
 

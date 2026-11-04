@@ -11,6 +11,12 @@ internal sealed class GlobalOptions(CliEnvironment environment)
     public Option<string> ApiUrl { get; } = CliOptions.ApiUrl(environment);
 
     public Option<string> Format { get; } = CliOptions.Format();
+
+    /// <summary>
+    /// The admin key. Global (recursive) so <c>--api-key</c> anywhere on the command line is consumed as an option
+    /// value, never left over as an unrecognised token that a usage error would print.
+    /// </summary>
+    public Option<string> ApiKey { get; } = CliOptions.ApiKey();
 }
 
 /// <summary>Arguments and options with their parsing and validation, so bad input is a usage error (64) before any request.</summary>
@@ -20,6 +26,10 @@ internal static partial class CliOptions
 
     /// <summary>The periods the API buckets by, shortest first.</summary>
     public static readonly string[] Periods = ["1m", "5m", "30m", "1d", "1w"];
+
+    // The server limits n to AnalyticsService.MinDataPoints..MaxDataPoints.
+    public const int MinPoints = 1;
+    public const int MaxPoints = 1000;
 
     public static readonly TimeSpan MinInterval = TimeSpan.FromMilliseconds(500);
     public static readonly TimeSpan MaxInterval = TimeSpan.FromHours(1);
@@ -54,10 +64,9 @@ internal static partial class CliOptions
         };
         option.Validators.Add(result =>
         {
-            var value = result.GetValueOrDefault<string>();
-            if (TryParseApiUrl(value) is null)
+            if (ValidateApiUrl(result.GetValueOrDefault<string>(), out _) is { } error)
             {
-                result.AddError($"'{value}' is not an absolute http(s) URL, e.g. {CliEnvironment.DefaultApiUrl}.");
+                result.AddError(error);
             }
         });
         return option;
@@ -75,6 +84,7 @@ internal static partial class CliOptions
     }
 
     /// <summary>A symbol such as <c>BTCUSDT</c>, any case; parsed to upper case. Only letters and digits reach the URL.</summary>
+    /// <remarks>Mirrors the server rule in <c>TickPulse.Domain.SymbolName</c> (<c>^[A-Za-z0-9]{5,20}$</c>); keep them in sync.</remarks>
     public static Argument<string> Symbol(string description = "Trading pair, e.g. BTCUSDT (case-insensitive).") => new("symbol")
     {
         Description = description,
@@ -92,23 +102,26 @@ internal static partial class CliOptions
     };
 
     /// <summary><c>-n|--points</c>: how many buckets to average, 1 to 1000.</summary>
-    public static Option<int> Points(bool required)
+    /// <remarks>Mirrors <c>AnalyticsService.MinDataPoints</c>/<c>MaxDataPoints</c> on the server; keep them in sync.</remarks>
+    public static Option<int> Points(bool required) => new("--points", "-n")
     {
-        var option = new Option<int>("--points", "-n")
+        Description = "Number of complete buckets to average, 1 to 1000.",
+        HelpName = "count",
+        Required = required,
+
+        // A parser rather than a validator: a validator reading the value of a non-number token would throw.
+        CustomParser = result =>
         {
-            Description = "Number of complete buckets to average, 1 to 1000.",
-            HelpName = "count",
-            Required = required,
-        };
-        option.Validators.Add(result =>
-        {
-            if (result.GetValueOrDefault<int>() is < 1 or > 1000)
+            var token = result.Tokens.Count > 0 ? result.Tokens[0].Value : string.Empty;
+            if (!int.TryParse(token, NumberStyles.None, CultureInfo.InvariantCulture, out var points) || points is < MinPoints or > MaxPoints)
             {
-                result.AddError("--points must be between 1 and 1000.");
+                result.AddError($"--points must be a whole number from {MinPoints} to {MaxPoints}.");
+                return 0;
             }
-        });
-        return option;
-    }
+
+            return points;
+        },
+    };
 
     /// <summary><c>-p|--period</c>: the bucket width.</summary>
     public static Option<string> Period(bool required)
@@ -134,7 +147,7 @@ internal static partial class CliOptions
     /// <summary><c>-k|--api-key</c>: the admin key; never shown as a default, so it cannot leak into help output.</summary>
     public static Option<string> ApiKey() => new("--api-key", "-k")
     {
-        Description = $"Admin API key, sent as X-Api-Key (env {CliEnvironment.ApiKeyVariable}).",
+        Description = $"Admin API key for the symbols commands, sent as X-Api-Key (env {CliEnvironment.ApiKeyVariable}).",
         HelpName = "key",
         Recursive = true,
     };
@@ -142,24 +155,51 @@ internal static partial class CliOptions
     /// <summary><c>-i|--interval</c>: how often <c>watch</c> polls; <c>500ms</c>, <c>2s</c>, <c>1m</c> or <c>00:00:05</c>.</summary>
     public static Option<TimeSpan> Interval() => new("--interval", "-i")
     {
-        Description = "How often to poll: e.g. 500ms, 2s, 1m (0.5s to 1h).",
+        Description = "How often to poll: e.g. 500ms, 2s, 1m or 1h (0.5s to 1h).",
         HelpName = "duration",
         DefaultValueFactory = _ => TimeSpan.FromSeconds(2),
         CustomParser = ParseInterval,
     };
 
     /// <summary>An absolute http(s) URL ending with <c>/</c>, so relative API paths resolve under it.</summary>
-    public static Uri? TryParseApiUrl(string? value)
+    public static Uri? TryParseApiUrl(string? value) => ValidateApiUrl(value, out var uri) is null ? uri : null;
+
+    /// <summary>
+    /// Checks a base URL: absolute http(s), no credentials, no query or fragment. Returns the error, or
+    /// <see langword="null"/> with <paramref name="uri"/> set (ending with <c>/</c>). An error never contains the
+    /// URL's user info, even when the URL does not parse.
+    /// </summary>
+    public static string? ValidateApiUrl(string? value, out Uri? uri)
     {
+        uri = null;
+        var shown = RedactUserInfo(value ?? string.Empty);
         if (string.IsNullOrWhiteSpace(value)
-            || !Uri.TryCreate(value.Trim(), UriKind.Absolute, out var uri)
-            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            || !Uri.TryCreate(value.Trim(), UriKind.Absolute, out var parsed)
+            || (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps))
         {
-            return null;
+            return $"--api-url '{shown}' is not an absolute http(s) URL, e.g. {CliEnvironment.DefaultApiUrl}.";
         }
 
-        return uri.AbsoluteUri.EndsWith('/') ? uri : new Uri(uri.AbsoluteUri + "/");
+        if (parsed.UserInfo.Length > 0)
+        {
+            return $"--api-url must not contain credentials ('{shown}'); admin commands take --api-key.";
+        }
+
+        if (parsed.Query.Length > 0 || parsed.Fragment.Length > 0)
+        {
+            var part = parsed.Query.Length > 0 ? "a query" : "a fragment";
+            return $"--api-url must be a base URL without {part}, e.g. {CliEnvironment.DefaultApiUrl}.";
+        }
+
+        uri = parsed.AbsoluteUri.EndsWith('/') ? parsed : new Uri(parsed.AbsoluteUri + "/");
+        return null;
     }
+
+    /// <summary><c>https://user:pw@host</c> → <c>https://***@host</c>; works on text that is not a valid URL.</summary>
+    private static string RedactUserInfo(string value) => UserInfoPattern().Replace(value.Trim(), "${scheme}***@");
+
+    [GeneratedRegex(@"(?<scheme>^[^:/?#\s]+://)[^/?#]*@", RegexOptions.CultureInvariant)]
+    private static partial Regex UserInfoPattern();
 
     private static DateTime? ParseStart(ArgumentResult result)
     {
@@ -190,7 +230,8 @@ internal static partial class CliOptions
             {
                 "MS" => amount,
                 "S" => amount * 1_000m,
-                _ => amount * 60_000m,
+                "M" => amount * 60_000m,
+                _ => amount * 3_600_000m,
             };
             if (milliseconds <= (decimal)MaxInterval.TotalMilliseconds)
             {
@@ -214,6 +255,6 @@ internal static partial class CliOptions
     [GeneratedRegex("^[A-Za-z0-9]{5,20}$", RegexOptions.CultureInvariant)]
     private static partial Regex SymbolPattern();
 
-    [GeneratedRegex(@"^(?<amount>\d{1,7}(?:\.\d{1,3})?)\s*(?<unit>ms|s|m)$", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^(?<amount>\d{1,7}(?:\.\d{1,3})?)\s*(?<unit>ms|s|m|h)$", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex DurationPattern();
 }

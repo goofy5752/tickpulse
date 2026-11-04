@@ -62,7 +62,9 @@ internal sealed class CliEnvironment
 
     private static HttpClient CreateHttpClientCore(Uri baseAddress)
     {
-        var client = new HttpClient { BaseAddress = baseAddress, Timeout = RequestTimeout };
+        // Pooled connections are recycled, so a long watch follows DNS changes of the API host.
+        var handler = new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(5) };
+        var client = new HttpClient(handler, disposeHandler: true) { BaseAddress = baseAddress, Timeout = RequestTimeout };
         client.DefaultRequestHeaders.UserAgent.ParseAdd($"tickpulse-cli/{Version}");
         return client;
     }
