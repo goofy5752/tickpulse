@@ -294,6 +294,22 @@ public sealed class BinanceRestClientTests
         stub.Requests.ShouldHaveSingleItem().PathAndQuery.ShouldBe("/api/v3/aggTrades?symbol=BTCUSDT&fromId=101&limit=500");
     }
 
+    [Fact]
+    public async Task AggTradesFromTime_AsksForTheHourFromTheStart_AndParses()
+    {
+        var stub = new StubHandler();
+        stub.Enqueue(HttpStatusCode.OK, """[{"a":101,"p":"65000.12000000","q":"0.00150000","f":200,"l":201,"T":1762171200123,"m":true,"M":true}]""");
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+
+        var start = new DateTime(2025, 11, 3, 12, 0, 0, DateTimeKind.Utc); // 1762171200000
+        var trades = await rest.GetAggTradesFromTimeAsync(Btc, start, 1, TestContext.Current.CancellationToken);
+
+        trades.ShouldHaveSingleItem().ShouldBe((101L, 65000.12m, 0.0015m, new DateTime(2025, 11, 3, 12, 0, 0, 123, DateTimeKind.Utc)));
+        stub.Requests.ShouldHaveSingleItem().PathAndQuery
+            .ShouldBe("/api/v3/aggTrades?symbol=BTCUSDT&startTime=1762171200000&endTime=1762174799999&limit=1");
+        await Should.ThrowAsync<ArgumentOutOfRangeException>(() => rest.GetAggTradesFromTimeAsync(Btc, start, 0, TestContext.Current.CancellationToken));
+    }
+
     [Theory]
     [InlineData("exchangeInfo", "not json")]
     [InlineData("exchangeInfo", """{"timezone":"UTC"}""")]

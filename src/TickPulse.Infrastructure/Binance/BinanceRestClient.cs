@@ -119,6 +119,9 @@ public sealed partial class BinanceRestClient : IExchangeMetadata, IKlineSource,
     /// <summary>How many times one call retries after a <c>429</c> before it gives up.</summary>
     public const int MaxRateLimitRetries = 3;
 
+    // aggTrades with both startTime and endTime: the range must be shorter than an hour.
+    private const long MaxAggTradesRangeMs = 60 * 60 * 1000;
+
     private const int InvalidSymbolCode = -1121;
     private const HttpStatusCode IpBanned = (HttpStatusCode)418;
     private const NumberStyles DecimalStyle = NumberStyles.AllowDecimalPoint;
@@ -219,6 +222,29 @@ public sealed partial class BinanceRestClient : IExchangeMetadata, IKlineSource,
         RequireLimit(limit);
 
         var uri = string.Create(CultureInfo.InvariantCulture, $"api/v3/aggTrades?symbol={symbol}&fromId={fromId}&limit={limit}");
+        return await GetAggTradesAsync(uri, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// <c>GET /api/v3/aggTrades?startTime&amp;endTime</c>: trades at or after <paramref name="startUtc"/> and less than an
+    /// hour after it (the longest range Binance accepts), ascending, at most <paramref name="limit"/> (1..1000).
+    /// </summary>
+    public async Task<IReadOnlyList<(long Id, decimal Price, decimal Qty, DateTime TimeUtc)>> GetAggTradesFromTimeAsync(
+        SymbolName s, DateTime startUtc, int limit, CancellationToken ct)
+    {
+        var symbol = Require(s);
+        RequireLimit(limit);
+        var startTime = ToUnixMs(startUtc, nameof(startUtc));
+        var endTime = startTime + MaxAggTradesRangeMs - 1;
+
+        var uri = string.Create(
+            CultureInfo.InvariantCulture,
+            $"api/v3/aggTrades?symbol={symbol}&startTime={startTime}&endTime={endTime}&limit={limit}");
+        return await GetAggTradesAsync(uri, ct).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<(long Id, decimal Price, decimal Qty, DateTime TimeUtc)>> GetAggTradesAsync(string uri, CancellationToken ct)
+    {
         using var response = await SendAsync(uri, ct).ConfigureAwait(false);
         using var json = await ReadJsonAsync(response, "aggTrades", ct).ConfigureAwait(false);
         try

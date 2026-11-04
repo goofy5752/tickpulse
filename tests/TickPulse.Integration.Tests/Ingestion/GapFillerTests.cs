@@ -64,6 +64,39 @@ public sealed class GapFillerTests
     }
 
     [Fact]
+    public async Task Fill_ShortPage_BelowTheStream_IsNotTheEndOfTheData()
+    {
+        // The stream delivered up to 1000 (its boundary is 1001), but REST lags and ends at 950.
+        var source = new FakeAggTrades(500, 950);
+
+        var emitted = await Filler(source).FillAsync(BtcId, "BTCUSDT", 499, () => 1001, _output.Writer, Ct);
+
+        emitted.ShouldBe(new GapFillResult(451, 950, Complete: false)); // 951..1000 are still missing: the gap stays open
+        source.Requests.ShouldBe([500L]);
+    }
+
+    [Fact]
+    public async Task Fill_EmptyPage_BelowTheStream_IsNotTheEndOfTheData()
+    {
+        var source = new FakeAggTrades(1, 0);
+
+        (await Filler(source).FillAsync(BtcId, "BTCUSDT", 41, () => 50, _output.Writer, Ct)).ShouldBe(new GapFillResult(0, null, Complete: false));
+    }
+
+    [Fact]
+    public async Task Fill_ShortPage_ReachingTheStream_IsComplete_EvenIfTheStreamMovedOnDuringTheRequest()
+    {
+        var source = new FakeAggTrades(500, 1000);
+        long? boundary = 1001;
+        source.OnRequest = _ => boundary = 1200; // the live stream delivered 1001..1199 while REST answered
+
+        var emitted = await Filler(source).FillAsync(BtcId, "BTCUSDT", 499, () => boundary, _output.Writer, Ct);
+
+        emitted.ShouldBe(new GapFillResult(501, 1000, Complete: true)); // 1001.. came from the stream
+        source.Requests.ShouldBe([500L]);
+    }
+
+    [Fact]
     public async Task Fill_NothingMissed_EmitsNothing()
     {
         var source = new FakeAggTrades(1, 0);
@@ -126,6 +159,39 @@ public sealed class GapFillerTests
         (await Filler(source).FillAsync(BtcId, "BTCUSDT", 0, () => null, _output.Writer, Ct)).ShouldBe(new GapFillResult(0, null, Complete: false));
     }
 
+    [Fact]
+    public async Task FirstTradeIdFrom_ReturnsTheFirstTradeAtOrAfterTheTime()
+    {
+        var source = new FakeAggTrades(1, 3000);
+        var filler = Filler(source);
+
+        (await filler.FirstTradeIdFromAsync("BTCUSDT", T0.AddMilliseconds(1500), Ct)).ShouldBe((true, 1500L));
+        (await filler.FirstTradeIdFromAsync("BTCUSDT", T0.AddTicks(15_005_000), Ct)).ShouldBe((true, 1501L));
+        (await filler.FirstTradeIdFromAsync("BTCUSDT", T0.AddSeconds(4), Ct)).ShouldBe((true, (long?)null)); // nothing traded since: done, nothing to fill
+        source.TimeRequests.ShouldBe([T0.AddMilliseconds(1500), T0.AddTicks(15_005_000), T0.AddSeconds(4)]);
+    }
+
+    [Fact]
+    public async Task FirstTradeIdFrom_TransientFailure_Retries_PermanentFailure_ReportsFailure()
+    {
+        var source = new FakeAggTrades(1, 3);
+        source.Failures.Enqueue(new BinanceApiException("unavailable", HttpStatusCode.ServiceUnavailable, isTransient: true, null));
+        var lookup = Filler(source).FirstTradeIdFromAsync("BTCUSDT", T0, Ct);
+        await IngestionTestHost.WaitForAsync(
+            () =>
+            {
+                _clock.Advance(TimeSpan.FromSeconds(1));
+                return source.TimeRequests.Count == 2;
+            },
+            "the retry");
+        (await lookup.WaitAsync(IngestionTestHost.WaitTimeout, Ct)).ShouldBe((true, 1L));
+
+        source.Failures.Enqueue(new BinanceApiException("bad request", HttpStatusCode.BadRequest, isTransient: false, null));
+        (await Filler(source).FirstTradeIdFromAsync("BTCUSDT", T0, Ct)).ShouldBe((false, (long?)null)); // failed: worth another try
+        source.Failures.Enqueue(new BinanceBannedException(T0.AddHours(2)));
+        (await Filler(source).FirstTradeIdFromAsync("BTCUSDT", T0, Ct)).ShouldBe((false, (long?)null));
+    }
+
     private GapFiller Filler(IAggTradeSource source, int maxPages = GapFiller.DefaultMaxPages) =>
         new(source, _clock, NullLogger<GapFiller>.Instance, Metrics(), maxPages);
 
@@ -147,8 +213,11 @@ public sealed class GapFillerTests
     private sealed class FakeAggTrades(long first, long last) : IAggTradeSource
     {
         private readonly ConcurrentQueue<long> _requests = new();
+        private readonly ConcurrentQueue<DateTime> _timeRequests = new();
 
         public ConcurrentQueue<Exception> Failures { get; } = new();
+
+        public IReadOnlyList<DateTime> TimeRequests => [.. _timeRequests];
 
         public Action<long>? OnRequest { get; set; }
 
@@ -167,6 +236,24 @@ public sealed class GapFillerTests
             }
 
             IReadOnlyList<(long, decimal, decimal, DateTime)> page = [.. LongRange(Math.Max(first, fromId), last)
+                .Take(limit)
+                .Select(id => (id, (decimal)id, 0.5m, T0.AddMilliseconds(id)))];
+            return Task.FromResult(page);
+        }
+
+        // Trade id n trades at T0 + n ms.
+        public Task<IReadOnlyList<(long Id, decimal Price, decimal Qty, DateTime TimeUtc)>> GetAggTradesFromTimeAsync(
+            SymbolName s, DateTime startUtc, int limit, CancellationToken ct)
+        {
+            s.Value.ShouldBe("BTCUSDT");
+            _timeRequests.Enqueue(startUtc);
+            if (Failures.TryDequeue(out var failure))
+            {
+                throw failure;
+            }
+
+            var firstId = Math.Max(first, (long)Math.Ceiling((startUtc - T0).TotalMilliseconds));
+            IReadOnlyList<(long, decimal, decimal, DateTime)> page = [.. LongRange(firstId, last)
                 .Take(limit)
                 .Select(id => (id, (decimal)id, 0.5m, T0.AddMilliseconds(id)))];
             return Task.FromResult(page);

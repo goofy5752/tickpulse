@@ -5,17 +5,16 @@ namespace TickPulse.Infrastructure.Ingestion;
 
 /// <summary>
 /// One WebSocket connection with the bookkeeping the ingestion worker keeps for it: the subscription state as
-/// confirmed by Binance, the task that pumps its trades, and the first and last trade id seen per symbol (the
+/// confirmed by Binance, the task that pumps its trades, and the span of trade ids it delivered per symbol (the
 /// boundaries for gap-fill).
 /// </summary>
 /// <remarks>
 /// <see cref="Subscribed"/>, <see cref="Unknown"/> and <see cref="GapFillHandled"/> belong to the supervisor's control loop, the only code that
-/// sends commands; nothing else may touch them. The trade ids are written by the pump and read concurrently.
+/// sends commands; nothing else may touch them. The spans are written by the pump and read concurrently.
 /// </remarks>
 internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsyncDisposable
 {
-    private readonly ConcurrentDictionary<string, long> _firstIds = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, long> _lastIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, IdSpan> _spans = new(StringComparer.OrdinalIgnoreCase);
 
     public BinanceWebSocketConnection Connection { get; } = connection;
 
@@ -36,25 +35,24 @@ internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsync
     /// <summary>Pumps <see cref="BinanceWebSocketConnection.Trades"/> into the tick channel; ends when the connection does.</summary>
     public Task Pump { get; set; } = Task.CompletedTask;
 
-    /// <summary>Last trade id per symbol that this link delivered into the tick channel.</summary>
-    public IEnumerable<KeyValuePair<string, long>> LastIds => _lastIds;
+    /// <summary>Per symbol, the first and last trade id this link delivered into the tick channel so far.</summary>
+    public IEnumerable<KeyValuePair<string, IdSpan>> Spans => _spans;
 
     /// <summary>Notes a trade that reached the tick channel.</summary>
-    public void Record(string symbol, long tradeId)
-    {
-        _firstIds.TryAdd(symbol, tradeId);
-        _lastIds.AddOrUpdate(symbol, static (_, id) => id, static (_, last, id) => Math.Max(last, id), tradeId);
-    }
+    public void Record(string symbol, long tradeId) =>
+        _spans.AddOrUpdate(symbol, static (_, id) => new IdSpan(id, id), static (_, span, id) => span with { Last = Math.Max(span.Last, id) }, tradeId);
+
+    /// <summary>The last trade id this link delivered for the symbol, if any yet.</summary>
+    public long? LastId(string symbol) => _spans.TryGetValue(symbol, out var span) ? span.Last : null;
 
     /// <summary>The first trade id this link delivered for the symbol, if any yet.</summary>
-    public long? FirstId(string symbol) => _firstIds.TryGetValue(symbol, out var id) ? id : null;
+    public long? FirstId(string symbol) => _spans.TryGetValue(symbol, out var span) ? span.First : null;
 
     /// <summary>Drops the bookkeeping of a symbol that is no longer monitored. Control loop only.</summary>
     public void Forget(string symbol)
     {
         GapFillHandled.Remove(symbol);
-        _firstIds.TryRemove(symbol, out _);
-        _lastIds.TryRemove(symbol, out _);
+        _spans.TryRemove(symbol, out _);
     }
 
     public ValueTask DisposeAsync() => Connection.DisposeAsync();

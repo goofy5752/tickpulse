@@ -81,8 +81,25 @@ Rules of thumb:
    losing leadership: stop ingesting.
 5. **One WebSocket connection**, runtime `SUBSCRIBE`/`UNSUBSCRIBE` at ≤ 5 messages/s, rotation at
    ~23 h make-before-break, reconnect with jittered exponential backoff (cap 30 s), gap-fill via
-   REST `aggTrades?fromId=last+1`. Symbol changes signal ingestion in-process and are also
-   reconciled against the DB every 30 s.
+   REST `aggTrades?fromId=last+1`. Every leadership session seeds the gap-fill watermarks from
+   the DB (max `agg_trade_id` per active symbol, last 24 h) before it subscribes, so the gap
+   after the last stored trade is filled after a restart or handover. `GapFillWatermarks` keeps,
+   per symbol, the end of the contiguous prefix of accounted ids (`LastId`) and one rule: it
+   moves up only across ids that were delivered by this process or stored by another instance.
+   A connection's span raises it only when contiguous with it; a span that starts higher (the
+   connection it replaced stalled) opens a gap instead, checked on every reconcile pass for the
+   live connection too. The seed raises an older in-memory watermark to the stored id only when
+   nothing this process delivered lies above it (the highest id any ended connection delivered,
+   including a discarded rotation link, or that a dropped batch or lead-in reported missing);
+   otherwise the max may be this process's own stream above the gap, and the fill walks up from
+   the watermark. The max cannot see holes *below* it: one that only a crashed or other process
+   knew about (its dropped batch, its capped fill) is not recovered by the seed. A gap still
+   open on the live connection is filled again on every reconcile pass (one run per symbol at
+   a time). A symbol that starts
+   streaming with no watermark gets a lead-in from the start of its first minute
+   (`aggTrades?startTime`), so that candle is not partial; a failed lead-in is retried on the
+   next connection.
+   Symbol changes signal ingestion in-process and are also reconciled against the DB every 30 s.
 6. **Bounded channel** with `FullMode=Wait` (backpressure, never drop). Batches flush at 500 ms or
    5,000 ticks.
 

@@ -425,5 +425,8 @@ public sealed class MetricsTests(ApiFactory api) : IClassFixture<ApiFactory>, ID
 
             return Task.FromResult<IReadOnlyList<(long, decimal, decimal, DateTime)>>(ids);
         }
+
+        public Task<IReadOnlyList<(long Id, decimal Price, decimal Qty, DateTime TimeUtc)>> GetAggTradesFromTimeAsync(
+            SymbolName s, DateTime startUtc, int limit, CancellationToken ct) => throw new NotSupportedException();
     }
 }

@@ -46,4 +46,10 @@ public interface IMarketDataQueries
     /// <see langword="null"/> when there are none.
     /// </summary>
     Task<MinuteRange?> BackfillRangeBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct);
+
+    /// <summary>
+    /// For every active symbol, the highest stored trade id among its ticks traded after <paramref name="sinceUtc"/>,
+    /// keyed by symbol name. Symbols without such a tick are absent.
+    /// </summary>
+    Task<IReadOnlyDictionary<string, long>> GetLatestTradeIdsAsync(DateTime sinceUtc, CancellationToken ct);
 }

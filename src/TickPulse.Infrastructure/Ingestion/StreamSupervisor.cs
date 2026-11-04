@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using TickPulse.Application.Abstractions;
@@ -19,9 +20,19 @@ namespace TickPulse.Infrastructure.Ingestion;
 /// and never sends anything. Gap-fills and retirements run in the background; the supervisor tracks every background
 /// task so <see cref="StopAsync"/> can wait for them.</para>
 /// <para><b>Gap-fill.</b> A connection that ends unexpectedly opens a gap for every known symbol
-/// (<see cref="GapFillWatermarks"/>). Each symbol is gap-filled on the next connection as soon as its SUBSCRIBE is
-/// acknowledged there, which may be a later reconcile pass than the first one, and the gap closes only when the fill
-/// completed.</para>
+/// (<see cref="GapFillWatermarks"/>), and so does the start of a session for every symbol with stored trades (the
+/// worker seeds the watermarks from the database). Each symbol is gap-filled on the next connection as soon as its
+/// SUBSCRIBE is acknowledged there, which may be a later reconcile pass than the first one. A fill bounded by a
+/// connection that broke meanwhile cannot close the gap for good: that connection's end reopens it. A gap that is
+/// still open on the live connection (a fill stopped at the page cap or failed, the writer dropped a batch) is filled
+/// again on every reconcile pass, one run per symbol at a time, until it closes, so it never waits for the next
+/// connection. Every pass also checks the live connection's streams against the watermarks: one that started above
+/// the last accounted id (its predecessor stalled before the rotation replaced it) opens a gap for the ids between.</para>
+/// <para><b>Lead-in.</b> A symbol that starts streaming in this session (first subscription, an added or reactivated
+/// symbol) with no watermark at all is filled from the start of the minute its SUBSCRIBE was acknowledged in, up to its
+/// first streamed trade. Without it that minute's candle would only hold the trades after the subscription, and the
+/// backfill (which stops before the first streamed minute) never completes it. A lead-in whose lookup failed stays due
+/// and is tried again on the next connection.</para>
 /// <para><b>Shutdown</b> is split so the worker can order it: cancel the token passed to <see cref="RunAsync"/> (no
 /// more commands, pumps and gap-fills stop writing), <see cref="StopAsync"/> (wait for them), then the worker
 /// completes and flushes the channel, then <see cref="DisposeAsync"/> closes the connections.</para>
@@ -55,6 +66,12 @@ internal sealed partial class StreamSupervisor(
     /// </summary>
     public static readonly TimeSpan RotationRetryDelay = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// The lead-in starts at the minute of <c>ack time − LeadInClockSkew</c>, so a local clock slightly ahead of the
+    /// exchange's trade times cannot start it after the first streamed trade's minute.
+    /// </summary>
+    public static readonly TimeSpan LeadInClockSkew = TimeSpan.FromSeconds(5);
+
     // Log a trade for a symbol without an id once, then once per this many.
     private const int UnknownSymbolLogEvery = 10_000;
 
@@ -62,6 +79,18 @@ internal sealed partial class StreamSupervisor(
     private readonly HashSet<StreamLink> _links = [];
     private readonly List<Task> _background = [];
     private readonly List<Task> _retiring = [];
+
+    // Symbols that started streaming in this session (control loop only): only their first ack gets a lead-in.
+    private readonly HashSet<string> _started = new(StringComparer.OrdinalIgnoreCase);
+
+    // Lead-ins not done yet, with the minute each starts at: set by the control loop, cleared by a gap-fill once the
+    // lookup succeeded, so a failed one is tried again on the next connection.
+    private readonly ConcurrentDictionary<string, DateTime> _leadInDue = new(StringComparer.OrdinalIgnoreCase);
+
+    // Per symbol, gap-fill runs scheduled or in flight: incremented by the control loop when it hands the symbol to a
+    // run, decremented by that run. An open gap is re-armed on a reconcile pass only while this is zero, so at most one
+    // re-armed fill per symbol runs at a time.
+    private readonly ConcurrentDictionary<string, int> _scheduled = new(StringComparer.OrdinalIgnoreCase);
     private Task _signalWait = Task.CompletedTask;
 
     private DateTime UtcNow => clock.GetUtcNow().UtcDateTime;
@@ -136,7 +165,7 @@ internal sealed partial class StreamSupervisor(
 
         // The pumps are done. Keep the open links' last ids, and since this session ends with the stream still
         // running on the exchange, open a gap for the next session to fill.
-        watermarks.Merge(OpenLinks().SelectMany(l => l.LastIds), gap: true);
+        watermarks.Merge(OpenLinks().SelectMany(l => l.Spans), gap: true);
     }
 
     /// <summary>Closes the connections that are still open.</summary>
@@ -228,6 +257,8 @@ internal sealed partial class StreamSupervisor(
             {
                 var outcome = await reconciler.ReconcileAsync(current, ct).ConfigureAwait(false);
                 Forget(current, outcome.Unsubscribed);
+                watermarks.Verify(current.Spans);
+                RearmOpenGaps(current);
                 StartGapFills(current, pendingOnly: true, ct);
                 nextReconcile = NextReconcile(outcome);
             }
@@ -257,8 +288,9 @@ internal sealed partial class StreamSupervisor(
         {
             LogRotationFailed(missing);
 
-            // Its last ids must not be merged: if the old connection broke before this one subscribed, they would
-            // move the gap-fill start past the trades missed in between. The old connection still covers them.
+            // The old connection stays the one followed, and its end decides about gaps. This one's trades were
+            // delivered and stored all the same, so retiring records them (a later seed must not jump past a gap
+            // below them).
             Retire(next, LinkEnd.Discarded);
             return null;
         }
@@ -394,12 +426,20 @@ internal sealed partial class StreamSupervisor(
     // Considers every subscribed symbol not yet considered on this link (control loop only).
     private void StartGapFills(StreamLink link, bool pendingOnly, CancellationToken ct)
     {
+        // Taken now, right after the acks: the fills below may run long after.
+        var leadInFrom = Period.OneMinute.AlignDown(UtcNow - LeadInClockSkew);
         var toFill = new List<string>();
         foreach (var symbol in link.Subscribed)
         {
             if (link.GapFillHandled.Add(symbol))
             {
                 toFill.Add(symbol);
+
+                // Starts streaming in this session with nothing known about it: its first minute needs a lead-in.
+                if (_started.Add(symbol) && !watermarks.Contains(symbol))
+                {
+                    _leadInDue[symbol] = leadInFrom;
+                }
             }
         }
 
@@ -414,46 +454,129 @@ internal sealed partial class StreamSupervisor(
             retiring = [.. _retiring];
         }
 
+        foreach (var symbol in toFill)
+        {
+            _scheduled.AddOrUpdate(symbol, 1, static (_, n) => n + 1);
+        }
+
         Track(GapFillAsync(link, retiring, [.. toFill], pendingOnly, ct));
     }
 
     private async Task GapFillAsync(StreamLink link, Task[] retiring, string[] toFill, bool pendingOnly, CancellationToken ct)
     {
-        // The retired connections' pumps must have finished, so their last ids (and the gaps they opened) are final.
-        await Task.WhenAll(retiring).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-        foreach (var symbol in toFill)
+        var done = 0;
+        try
         {
-            if (ct.IsCancellationRequested)
+            // The retired connections' pumps must have finished, so their last ids (and the gaps they opened) are final.
+            await Task.WhenAll(retiring).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            for (; done < toFill.Length; done++)
             {
-                return;
-            }
-
-            if (!watermarks.TryGetStart(symbol, pendingOnly, out var lastId, out var version) || !symbols.TryGetId(symbol, out var symbolId))
-            {
-                continue;
-            }
-
-            try
-            {
-                var result = await gapFiller.FillAsync(symbolId, symbol, lastId, () => link.FirstId(symbol), output, ct).ConfigureAwait(false);
-                if (result.Complete)
+                var symbol = toFill[done];
+                var goOn = !ct.IsCancellationRequested && await FillOneAsync(link, symbol, pendingOnly, ct).ConfigureAwait(false);
+                Unschedule(symbol);
+                if (!goOn)
                 {
-                    watermarks.Filled(symbol, version);
+                    done++;
+                    return;
                 }
-                else if (result.LastEmittedId is { } recovered)
-                {
-                    watermarks.Advance(symbol, recovered, version);
-                }
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                return; // the session is ending; the gap stays open
-            }
-            catch (Exception ex)
-            {
-                LogGapFillFailed(ex, symbol);
             }
         }
+        finally
+        {
+            // Symbols this run will not get to (the session is ending) are no longer scheduled either.
+            for (var i = done; i < toFill.Length; i++)
+            {
+                Unschedule(toFill[i]);
+            }
+        }
+    }
+
+    // False when the session is ending.
+    private async Task<bool> FillOneAsync(StreamLink link, string symbol, bool pendingOnly, CancellationToken ct)
+    {
+        if (!symbols.TryGetId(symbol, out var symbolId))
+        {
+            return true;
+        }
+
+        try
+        {
+            await LeadInAsync(symbol, ct).ConfigureAwait(false);
+            if (!watermarks.TryGetStart(symbol, pendingOnly, out var lastId, out var version))
+            {
+                return true;
+            }
+
+            // Normally the gap ends where this link's stream starts. When the start lies inside this link's own stream
+            // (a batch of it was dropped, or the start was seeded above where it began), every id up to what the link
+            // has delivered may be missing, and the stream carries everything after that.
+            long? Boundary() => link.FirstId(symbol) is { } first && first > lastId ? first : link.LastId(symbol) + 1;
+
+            var result = await gapFiller.FillAsync(symbolId, symbol, lastId, Boundary, output, ct).ConfigureAwait(false);
+
+            // If this link broke meanwhile, the fill stopped at a stream that no longer carries on; its retirement
+            // reopens the gap (and the version changed), so closing here is harmless.
+            if (result.Complete)
+            {
+                watermarks.Filled(symbol, version, result.LastEmittedId);
+            }
+            else if (result.LastEmittedId is { } recovered)
+            {
+                watermarks.Advance(symbol, recovered, version);
+            }
+
+            return true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return false; // the session is ending; the gap stays open
+        }
+        catch (Exception ex)
+        {
+            LogGapFillFailed(ex, symbol);
+            return true; // the gap stays open
+        }
+    }
+
+    private void Unschedule(string symbol) => _scheduled.AddOrUpdate(symbol, 0, static (_, n) => Math.Max(0, n - 1));
+
+    // A gap still open on this live link (a fill stopped at the page cap or was given up, a batch was dropped) is
+    // filled again on the next reconcile pass instead of waiting for the next connection, as long as no fill for the
+    // symbol is scheduled or running. Control loop only.
+    private void RearmOpenGaps(StreamLink link)
+    {
+        foreach (var symbol in link.GapFillHandled.ToArray())
+        {
+            if ((!_scheduled.TryGetValue(symbol, out var scheduled) || scheduled == 0) && watermarks.IsPending(symbol))
+            {
+                link.GapFillHandled.Remove(symbol);
+            }
+        }
+    }
+
+    // A due lead-in opens a gap just below the first trade of the symbol's first minute. Lower only ever moves the
+    // start down, so it composes with whatever a racing Merge or a dropped batch set meanwhile. A failed lookup stays
+    // due and is tried again on the next connection.
+    private async Task LeadInAsync(string symbol, CancellationToken ct)
+    {
+        if (!_leadInDue.TryGetValue(symbol, out var from))
+        {
+            return;
+        }
+
+        var (succeeded, firstId) = await gapFiller.FirstTradeIdFromAsync(symbol, from, ct).ConfigureAwait(false);
+        if (!succeeded)
+        {
+            return;
+        }
+
+        if (firstId is { } id)
+        {
+            watermarks.Lower(symbol, id);
+        }
+
+        // Only this one: a re-add since then has its own.
+        _leadInDue.TryRemove(new KeyValuePair<string, DateTime>(symbol, from));
     }
 
     private void Retire(StreamLink link, LinkEnd end)
@@ -473,11 +596,15 @@ internal sealed partial class StreamSupervisor(
         await link.DisposeAsync().ConfigureAwait(false);
         Observe(link);
 
-        // The pump drains what the socket had buffered, then ends.
+        // The pump drains what the socket had buffered, then ends, so the spans are final.
         await link.Pump.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
-        if (end != LinkEnd.Discarded)
+        if (end == LinkEnd.Discarded)
         {
-            watermarks.Merge(link.LastIds, gap: end == LinkEnd.Broken);
+            watermarks.NoteStored(link.Spans);
+        }
+        else
+        {
+            watermarks.Merge(link.Spans, gap: end == LinkEnd.Broken);
         }
         lock (_gate)
         {
@@ -490,6 +617,8 @@ internal sealed partial class StreamSupervisor(
         // A symbol that is re-added later starts fresh instead of gap-filling from where it was dropped.
         foreach (var symbol in unsubscribed)
         {
+            _started.Remove(symbol);
+            _leadInDue.TryRemove(symbol, out _);
             link.Forget(symbol);
             watermarks.Forget(symbol);
             state.ForgetSymbol(symbol);
@@ -539,12 +668,15 @@ internal sealed partial class StreamSupervisor(
 /// <summary>How a connection's life ended, which decides what its last trade ids mean for gap-fill.</summary>
 internal enum LinkEnd
 {
-    /// <summary>It broke (or the session ended with it): its last ids are merged and every symbol has an open gap.</summary>
+    /// <summary>It broke (or the session ended with it): its spans are merged and every symbol has an open gap.</summary>
     Broken,
 
-    /// <summary>A rotation replaced it after the new connection was subscribed: its last ids are merged, no gap.</summary>
+    /// <summary>
+    /// A rotation replaced it after the new connection was subscribed: its spans are merged, and a gap opens only where
+    /// the new connection's stream turns out to start above them.
+    /// </summary>
     Replaced,
 
-    /// <summary>A rotation gave it up before it took over: its last ids are ignored.</summary>
+    /// <summary>A rotation gave it up before it took over: its spans are recorded as stored, and move no gap-fill start.</summary>
     Discarded,
 }

@@ -44,6 +44,7 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     private TaskCompletionSource? _klinesHold;
     private (int Status, int Remaining, int? RetryAfterSeconds)? _klinesFailure;
     private (int Status, int Remaining)? _exchangeInfoFailure;
+    private (int Status, int Remaining, string? QueryContains)? _aggTradesFailure;
     private (int Code, string Msg)? _rejectNext;
     private bool _suppressNextAck;
     private int _rateLimitDisconnects;
@@ -328,6 +329,20 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     }
 
     /// <summary>
+    /// The next <paramref name="count"/> <c>aggTrades</c> requests (only those whose query contains
+    /// <paramref name="queryContains"/>, when set) answer <paramref name="status"/> with a Binance error body, e.g.
+    /// <c>400</c> (a permanent error). Later requests are served normally.
+    /// </summary>
+    public void FailNextAggTrades(int status, int count = 1, string? queryContains = null)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
+        lock (_gate)
+        {
+            _aggTradesFailure = (status, count, queryContains);
+        }
+    }
+
+    /// <summary>
     /// The next <paramref name="count"/> <c>exchangeInfo</c> requests answer <paramref name="status"/> with a Binance error
     /// body, e.g. <c>503</c> (Binance unavailable) or <c>418</c> (IP banned). Later requests are served normally.
     /// </summary>
@@ -426,6 +441,22 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         }
 
         await Task.WhenAll(connections.Select(c => c.Closed)).WaitAsync(DefaultTimeout);
+    }
+
+    /// <summary>
+    /// Aborts only the open connection that was accepted first (e.g. the old one while a rotation's new one is open) and
+    /// waits until it is gone.
+    /// </summary>
+    public async Task DropOldestConnectionAsync()
+    {
+        Connection oldest;
+        lock (_gate)
+        {
+            oldest = _connections.MinBy(c => c.Sequence) ?? throw new InvalidOperationException("No open connection.");
+        }
+
+        oldest.Abort();
+        await oldest.Closed.WaitAsync(DefaultTimeout);
     }
 
     /// <summary>Starts a normal close handshake on every connection and waits until they are gone.</summary>
@@ -614,6 +645,7 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         var connection = new Connection(socket, context);
         lock (_gate)
         {
+            connection.Sequence = _acceptedConnections + 1;
             _connections.Add(connection);
             _acceptedConnections++;
             _peakConnections = Math.Max(_peakConnections, _connections.Count);
@@ -882,14 +914,27 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     private async Task HandleAggTradesAsync(HttpContext context)
     {
         Task? hold;
+        (int Status, int Remaining, string? QueryContains)? failure = null;
         lock (_gate)
         {
             hold = _aggTradesHold?.Task;
+            if (_aggTradesFailure is { } next
+                && (next.QueryContains is null || context.Request.QueryString.Value?.Contains(next.QueryContains, StringComparison.Ordinal) == true))
+            {
+                failure = next;
+                _aggTradesFailure = next.Remaining > 1 ? next with { Remaining = next.Remaining - 1 } : null;
+            }
         }
 
         if (hold is not null)
         {
             await hold.WaitAsync(context.RequestAborted);
+        }
+
+        if (failure is { } fail)
+        {
+            await WriteAsync(context, fail.Status, Error(-1000, "Injected failure."));
+            return;
         }
 
         if (!TryResolveSymbol(context, out var symbol, out var error))
@@ -1036,6 +1081,9 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         private Task _sendTail = Task.CompletedTask;
 
         public Task Closed => _closed.Task;
+
+        // Accept order, 1-based.
+        public int Sequence { get; set; }
 
         public bool IsSubscribed(string stream)
         {

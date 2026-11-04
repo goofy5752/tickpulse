@@ -2114,7 +2114,7 @@
           "id": 24,
           "type": "timeseries",
           "title": "Gap-fill trades recovered",
-          "description": "Trades fetched over REST after a reconnect to close the gap (zero data loss).",
+          "description": "Trades fetched over REST to close a gap (reconnect, session start after a restart or handover, a symbol's first minute). Overlap with trades already stored is counted too (the primary key skips it), so this can exceed the trades that were actually missing.",
           "targets": [
             {
               "refId": "A",
