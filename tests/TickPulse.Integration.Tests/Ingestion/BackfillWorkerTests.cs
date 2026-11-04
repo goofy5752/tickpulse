@@ -257,6 +257,87 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Banned_WaitsOutBan_ThenRequeuesFailedAndContinues()
+    {
+        var first = From.AddMinutes(10);
+        SeedTrades("BTCUSDT", first, 10);
+        SeedTrades("ETHUSDT", first, 10);
+        _server.FailNextKlines(418, retryAfterSeconds: 120);
+        var run = CreateRun();
+        await MarkCompletedAsync(run, Ada);
+
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogBanWait") == 1, "the worker waiting out the ban");
+
+        // BTC failed; ETH is still queued, untouched: no request is sent during the ban.
+        (await FindAsync(run, Btc)).BackfillStatus.ShouldBe(BackfillStatus.Failed);
+        (await FindAsync(run, Eth)).BackfillStatus.ShouldBe(BackfillStatus.NotRequested);
+        _server.KlineRequests.Count.ShouldBe(1);
+
+        _clock.Advance(TimeSpan.FromSeconds(120));
+        await WaitForStatusAsync(run, Btc, BackfillStatus.Completed);
+
+        // ETH next, then BTC re-queued by the scan after the ban.
+        (await FindAsync(run, Eth)).BackfillStatus.ShouldBe(BackfillStatus.Completed);
+        _server.KlineRequests.Select(r => r["symbol"]).ShouldBe(["BTCUSDT", "ETHUSDT", "BTCUSDT"]);
+        (await CandleStatsAsync(Btc)).Count.ShouldBe(10);
+        (await CandleStatsAsync(Eth)).Count.ShouldBe(10);
+        (await FindAsync(run, Btc)).BackfilledFromUtc.ShouldBe(first); // the earliest stored minute
+        _logs.Count("LogFailed").ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task LargerDepth_OnlyRecentMinutesStored_FetchesFromStart()
+    {
+        SeedTrades("BTCUSDT", From, DepthMinutes);
+        var run = CreateRun();
+        await MarkCompletedAsync(run, Ada, Eth);
+
+        // A partial run with a shorter depth stored a later stretch; resuming after it would leave [From, +3000) empty.
+        Kline[] stored = [.. Enumerable.Range(3000, 500).Select(i => new Kline(From.AddMinutes(i), 1m, 1m, 1m, 1m, 0m, 0m))];
+        (await run.Services.GetRequiredService<ICandleWriter>().InsertBackfillAsync(Btc, stored, Ct)).ShouldBe(500);
+        await run.Symbols.SetBackfillStatusAsync(Btc, BackfillStatus.Running, null, Ct);
+
+        await run.StartAsync();
+        await WaitForStatusAsync(run, Btc, BackfillStatus.Completed);
+
+        _server.KlineRequests.Select(r => r["startTime"]).ShouldBe(Enumerable.Range(0, 5).Select(i => UnixMs(From.AddMinutes(i * 1000))));
+        var stats = await CandleStatsAsync(Btc);
+        stats.Count.ShouldBe(DepthMinutes);
+        stats.First.ShouldBe(From);
+        (await CloseAtAsync(Btc, From.AddMinutes(3200))).ShouldBe(1m); // overlap is harmless: stored rows stay
+        (await FindAsync(run, Btc)).BackfilledFromUtc.ShouldBe(From);
+    }
+
+    [Fact]
+    public async Task TransientErrors_LeadershipLost_PausesInsteadOfRetrying()
+    {
+        SeedTrades("BTCUSDT", From, DepthMinutes);
+        _server.FailNextKlines(500, count: 10_000);
+        var run = CreateRun();
+        await MarkCompletedAsync(run, Ada, Eth);
+
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogRetrying") == 1, "the first retry wait");
+        run.State.SetStandby();
+        _clock.Advance(BackfillWorker.RetryDelay(1));
+        await WaitForAsync(() => _logs.Count("LogPaused") == 1, "the worker paused");
+
+        // The failed retry led to the pause, not to another retry wait or a failure.
+        _logs.Count("LogRetrying").ShouldBe(1);
+        _logs.Count("LogFailed").ShouldBe(0);
+        (await FindAsync(run, Btc)).BackfillStatus.ShouldBe(BackfillStatus.Running);
+
+        _server.FailNextKlines(500, count: 1); // the pipeline's own retry absorbs it
+        run.State.SetConnecting();
+        _clock.Advance(BackfillWorker.LeaderPollInterval);
+        await WaitForStatusAsync(run, Btc, BackfillStatus.Completed);
+
+        (await CandleStatsAsync(Btc)).Count.ShouldBe(DepthMinutes);
+        _logs.Count("LogRetrying").ShouldBe(1);
+    }
+
+    [Fact]
     public async Task TransientErrors_AreRetried()
     {
         SeedTrades("BTCUSDT", From, DepthMinutes);

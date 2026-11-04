@@ -69,8 +69,8 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     // Reads the partial index ix_candles_1m_stream.
     internal const string FirstStreamMinuteSql = "SELECT min(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 1";
 
-    internal const string LastBackfillMinuteSql =
-        "SELECT max(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 2 AND bucket_start < $2";
+    internal const string BackfillRangeSql =
+        "SELECT min(bucket_start), max(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 2 AND bucket_start < $2";
 
     /// <inheritdoc />
     /// <remarks>
@@ -212,14 +212,17 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     }
 
     /// <inheritdoc />
-    /// <remarks>A backward scan of the primary key from <paramref name="beforeUtc"/>.</remarks>
-    public async Task<DateTime?> LastBackfillMinuteBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct)
+    /// <remarks>Two primary-key endpoint scans (min forwards, max backwards from <paramref name="beforeUtc"/>).</remarks>
+    public async Task<MinuteRange?> BackfillRangeBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct)
     {
         RequireUtc(beforeUtc, nameof(beforeUtc));
-        await using var command = dataSource.CreateCommand(LastBackfillMinuteSql);
+        await using var command = dataSource.CreateCommand(BackfillRangeSql);
         command.Parameters.Add(Integer(symbolId));
         command.Parameters.Add(TimestampTz(beforeUtc));
-        return await command.ExecuteScalarAsync(ct) is DateTime minute ? minute : null;
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) && !reader.IsDBNull(0)
+            ? new MinuteRange(reader.GetDateTime(0), reader.GetDateTime(1))
+            : null;
     }
 
     private static void RequireUtc(DateTime value, string paramName)

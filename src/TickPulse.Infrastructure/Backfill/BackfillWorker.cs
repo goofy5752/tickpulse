@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Globalization;
 using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
@@ -24,12 +25,16 @@ namespace TickPulse.Infrastructure.Backfill;
 /// <para>A symbol is fetched from <c>AlignDown(now − Depth, 1m)</c> up to, but excluding, its first streamed minute
 /// (or the current minute when nothing was streamed yet), in ascending pages of <see cref="PageSize"/> by
 /// <c>startTime</c>. A run that was interrupted (shutdown, lost leadership, failure) continues after the latest minute
-/// it already stored. Inserts are <c>ON CONFLICT DO NOTHING</c>, so overlap is harmless and streamed minutes are
-/// never overwritten. Klines with zero volume are stored as Binance returns them.</para>
+/// it already stored, provided the stored stretch reaches back to the start; otherwise (e.g. after the depth was
+/// increased) it starts again from the beginning. Inserts are <c>ON CONFLICT DO NOTHING</c>, so overlap is harmless
+/// and streamed minutes are never overwritten. Klines with zero volume are stored as Binance returns them. On
+/// completion <c>backfilled_from</c> records the earliest backfilled minute actually stored.</para>
 /// <para>Failures: a transient Binance error is retried up to <see cref="MaxTransientRetries"/> times with
-/// <see cref="RetryDelay"/>; a ban, a permanent error, persisting transient errors or a database error mark the symbol
-/// <see cref="BackfillStatus.Failed"/> (the reason is logged) and the queue moves on. Failed symbols are tried again
-/// on the next start-up or change of leadership.</para>
+/// <see cref="RetryDelay"/>, unless leadership was lost (then the run pauses). A permanent Binance error, persisting
+/// transient errors or a database error mark the symbol <see cref="BackfillStatus.Failed"/> (the reason is logged)
+/// and the queue moves on. A ban marks the current symbol Failed, waits until the ban ends, and then scans again, so
+/// Failed symbols are queued again; the scan at start-up and on every change of leadership also includes them. Any
+/// other exception is a bug and stops the worker.</para>
 /// </remarks>
 internal sealed partial class BackfillWorker(
     IKlineSource klines,
@@ -52,6 +57,9 @@ internal sealed partial class BackfillWorker(
 
     /// <summary>Upper bound of <see cref="RetryDelay"/>.</summary>
     public static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long to wait after a ban that carries no end time (the shortest Binance ban).</summary>
+    public static readonly TimeSpan DefaultBanWait = TimeSpan.FromMinutes(2);
 
     private static readonly TimeSpan Minute = Period.OneMinute.Length;
 
@@ -200,7 +208,7 @@ internal sealed partial class BackfillWorker(
         {
             active = await symbols.ListActiveAsync(ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        catch (DbException ex)
         {
             LogScanFailed(ex);
             return false;
@@ -242,19 +250,39 @@ internal sealed partial class BackfillWorker(
 
             await BackfillAsync(symbolId, name, ct).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
         catch (BinanceBannedException ex)
         {
+            // While banned every request fails at once (and would extend the ban): wait it out before the next
+            // symbol, then scan again so this one, now Failed, is queued again.
             await FailAsync(symbolId, symbol?.Name, $"Binance has banned this IP until {ex.BannedUntilUtc:O}", ex, ct).ConfigureAwait(false);
+            await WaitOutBanAsync(ex, ct).ConfigureAwait(false);
         }
-        catch (Exception ex)
+        catch (BinanceApiException ex)
         {
-            // Permanent or persisting Binance errors and database errors: the symbol fails, the queue goes on.
+            // A permanent error, or transient errors that persisted past the retries.
             await FailAsync(symbolId, symbol?.Name, ex.Message, ex, ct).ConfigureAwait(false);
         }
+        catch (DbException ex)
+        {
+            await FailAsync(symbolId, symbol?.Name, ex.Message, ex, ct).ConfigureAwait(false);
+        }
+
+        // Anything else is a bug and propagates; so does the cancellation on shutdown.
+    }
+
+    private async Task WaitOutBanAsync(BinanceBannedException ex, CancellationToken ct)
+    {
+        var now = clock.GetUtcNow().UtcDateTime;
+        var wait = ex.BannedUntilUtc == default ? DefaultBanWait : ex.BannedUntilUtc - now;
+        if (wait > TimeSpan.Zero)
+        {
+            // The timer is registered before the log entry (see WaitForLeadershipAsync).
+            var delay = Task.Delay(wait, clock, ct);
+            LogBanWait(now + wait);
+            await delay.ConfigureAwait(false);
+        }
+
+        _scanNeeded = true;
     }
 
     private async Task BackfillAsync(int symbolId, SymbolName name, CancellationToken ct)
@@ -264,7 +292,7 @@ internal sealed partial class BackfillWorker(
         var end = await queries.FirstStreamMinuteAsync(symbolId, ct).ConfigureAwait(false) ?? Period.OneMinute.AlignDown(now);
 
         await symbols.SetBackfillStatusAsync(symbolId, BackfillStatus.Running, null, ct).ConfigureAwait(false);
-        var next = await ResumePointAsync(symbolId, from, end, ct).ConfigureAwait(false);
+        var next = await ResumePointAsync(symbolId, from, end, from, ct).ConfigureAwait(false);
         LogStarted(name.Value, from, end, next);
 
         var progress = new Progress(from, end, next);
@@ -278,11 +306,16 @@ internal sealed partial class BackfillWorker(
                 await WaitForLeadershipAsync(name.Value, ct).ConfigureAwait(false);
 
                 // Another leader may have stored more in the meantime.
-                next = await ResumePointAsync(symbolId, next, end, ct).ConfigureAwait(false);
+                next = await ResumePointAsync(symbolId, from, end, next, ct).ConfigureAwait(false);
                 continue;
             }
 
             var page = await FetchPageAsync(name, next, end, ct).ConfigureAwait(false);
+            if (page is null)
+            {
+                continue; // leadership was lost during the retries: pause above
+            }
+
             pages++;
             if (page.Count == 0)
             {
@@ -307,24 +340,29 @@ internal sealed partial class BackfillWorker(
             }
         }
 
-        await symbols.SetBackfillStatusAsync(symbolId, BackfillStatus.Completed, from, ct).ConfigureAwait(false);
-        LogCompleted(name.Value, from, end, pages, fetched, inserted);
+        // backfilled_from is what is actually stored: later than `from` when the symbol's history is shorter.
+        var stored = await queries.BackfillRangeBeforeAsync(symbolId, end, ct).ConfigureAwait(false);
+        await symbols.SetBackfillStatusAsync(symbolId, BackfillStatus.Completed, stored?.First, ct).ConfigureAwait(false);
+        LogCompleted(name.Value, stored?.First, end, pages, fetched, inserted);
     }
 
-    // The first minute still missing in [from, end): right after the latest backfilled minute, if that is in range.
-    private async Task<DateTime> ResumePointAsync(int symbolId, DateTime from, DateTime end, CancellationToken ct)
+    // Where to continue in [from, end) when [from, next) is already covered: right after the latest backfilled minute,
+    // but only if the stored stretch begins at or before `from`. A stretch that starts later (left by a run with a
+    // shorter depth) would leave a hole before it, so the walk starts at `next` and overlaps it harmlessly.
+    private async Task<DateTime> ResumePointAsync(int symbolId, DateTime from, DateTime end, DateTime next, CancellationToken ct)
     {
-        if (end <= from)
+        if (end <= next)
         {
-            return from;
+            return next;
         }
 
-        var last = await queries.LastBackfillMinuteBeforeAsync(symbolId, end, ct).ConfigureAwait(false);
-        return last is { } minute && minute >= from ? minute + Minute : from;
+        var range = await queries.BackfillRangeBeforeAsync(symbolId, end, ct).ConfigureAwait(false);
+        return range is { } stored && stored.First <= from && stored.Last + Minute > next ? stored.Last + Minute : next;
     }
 
-    // One page of klines with open times in [start, end). Retries transient errors; everything else propagates.
-    private async Task<IReadOnlyList<Kline>> FetchPageAsync(SymbolName name, DateTime start, DateTime end, CancellationToken ct)
+    // One page of klines with open times in [start, end). Retries transient errors while leader; null when leadership
+    // was lost instead of waiting for another retry. Everything else propagates.
+    private async Task<IReadOnlyList<Kline>?> FetchPageAsync(SymbolName name, DateTime start, DateTime end, CancellationToken ct)
     {
         var last = end - TimeSpan.FromMilliseconds(1);
         for (var attempt = 1; ; attempt++)
@@ -333,8 +371,13 @@ internal sealed partial class BackfillWorker(
             {
                 return await klines.GetMinuteKlinesAsync(name, start, last, PageSize, ct).ConfigureAwait(false);
             }
-            catch (BinanceApiException ex) when (ex.IsTransient && attempt <= MaxTransientRetries)
+            catch (BinanceApiException ex) when (ex.IsTransient && (attempt <= MaxTransientRetries || !state.IsLeader))
             {
+                if (!state.IsLeader)
+                {
+                    return null;
+                }
+
                 var delay = RetryDelay(attempt);
                 var wait = Task.Delay(delay, clock, ct);
                 LogRetrying(ex, name.Value, start, attempt, delay.TotalSeconds);
@@ -350,7 +393,7 @@ internal sealed partial class BackfillWorker(
         {
             await symbols.SetBackfillStatusAsync(symbolId, BackfillStatus.Failed, null, ct).ConfigureAwait(false);
         }
-        catch (Exception statusEx) when (!ct.IsCancellationRequested)
+        catch (DbException statusEx)
         {
             LogStatusFailed(statusEx, symbolId);
         }
@@ -381,7 +424,10 @@ internal sealed partial class BackfillWorker(
     private partial void LogProgress(string symbol, int percent, DateTime next);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Kline backfill of {Symbol} completed: {From:O} to {End:O}, {Pages} page(s), {Fetched} kline(s), {Inserted} new")]
-    private partial void LogCompleted(string symbol, DateTime from, DateTime end, int pages, int fetched, int inserted);
+    private partial void LogCompleted(string symbol, DateTime? from, DateTime end, int pages, int fetched, int inserted);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Kline backfill is waiting for the Binance ban to end at {Until:O}")]
+    private partial void LogBanWait(DateTime until);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Kline backfill of {Symbol} paused: this instance is no longer leader")]
     private partial void LogPaused(string symbol);
