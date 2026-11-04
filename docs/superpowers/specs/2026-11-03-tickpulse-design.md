@@ -37,7 +37,6 @@ The documentation follows the order a new engineer would take when getting to kn
 **Anti-goals (failure even if it "works"):**
 - Microservices / message brokers for a two-endpoint problem. Complexity has to earn its place.
 - A flashy frontend masking a weak backend.
-- Fabricated or embellished prompts in the prompt log.
 - Silent behaviour beyond the core requirements. Anything extra (e.g. backfill) must be documented and switchable.
 - Changing anything on the host outside TickPulse's own directory, compose project and nginx vhosts.
 
@@ -50,7 +49,7 @@ The documentation follows the order a new engineer would take when getting to kn
 - JSON and XML via HTTP content negotiation (`Accept` header).
 - Initial symbols: BTCUSDT, ADAUSDT, ETHUSDT (seeded by migration).
 - Documentation in the repo: README, `engineering-notes.md`, an AI prompt record, a log of issues, assumptions and defects, and a deployment guide.
-- The prompt record (`docs/ai/prompts.md`) holds faithful English translations of the original prompts, which were written in Bulgarian. They are lightly edited for clarity and never invented. `engineering-notes.md` states this.
+- The prompt record (`docs/ai/prompts.md`) holds the owner's prompts and excerpts of the agent prompts. Some of the owner's prompts were written in Bulgarian; the record gives them all in English. `engineering-notes.md` states this.
 - Hosting: a single Linux VPS (Ubuntu 22.04 LTS, Docker, host nginx 1.18). Binance REST was verified reachable from it. TickPulse uses its own directory, compose project and network there, with memory limits on every container.
 
 ## 4. Design decisions on open questions (each becomes an ADR in `docs/adr/`)
@@ -314,7 +313,7 @@ Binance WS (combined stream, dynamic SUBSCRIBE)
 - visual direction B and the 7-section layout
 - the repo `goofy5752/tickpulse`, public
 - the domain `tickpulse.dev`
-- English prompt log as faithful, lightly polished translations
+- English prompt log
 
 **AI-proposed, owner-approved in the design session:** everything in §4–§8.
 

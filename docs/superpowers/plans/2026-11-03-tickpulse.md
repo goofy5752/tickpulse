@@ -887,7 +887,7 @@ Host access details are kept outside the repo.
   - the AI workflow: how context was provided (spec → plan → `CLAUDE.md` and skills → task prompts), how tasks were dispatched to agents, and how generated code was validated (TDD red/green, real-DB integration tests, the fake exchange, per-task review, a whole-branch review, manual verification against live Binance)
   - the issues and defects caught, with at least the XML ProblemDetails gap, the duplicate-tick double counting, the `DateTimeOffset` XML shape and the Timescale licensing, plus anything found during implementation from `defects-log.md`
   - trade-offs and what's next
-  - a note that the prompts were originally written in Bulgarian and are recorded as faithful translations
+  - a note that some of the prompts were written in Bulgarian and are all given in English
 - **`docs/deployment.md`:** the live topology plus the **scale-out production design**:
   - Azure Container Apps with API replicas and the ingestion singleton via the advisory lock (or a dedicated worker app with `minReplicas=maxReplicas=1`)
   - Key Vault, App Insights/OTel, blue-green revisions
@@ -906,7 +906,7 @@ Host access details are kept outside the repo.
 **Files:** Create `docs/ai/prompts.md`.
 
 - [ ] **Step 1: Draft it** from the owner's real messages in the Claude Code session transcripts for this project (`~/.claude/projects/D--Programming*/*.jsonl`, the sessions from 2026-11-03 onwards). Group the entries by phase: design, planning, implementation tasks, fixes and reviews. Each entry holds:
-  - the prompt, as a faithful English translation lightly polished for clarity, never invented or embellished
+  - the prompt, in English
   - its intent
   - the outcome and any correction the owner made
 

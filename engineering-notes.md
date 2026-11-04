@@ -106,8 +106,8 @@ flowchart LR
     real Binance and checked everything a user would touch, then load-tested it. Each finding became a
     `fix/…` PR that went through the same implement, review and re-review loop.
 
-The prompts were originally written in Bulgarian. [docs/ai/prompts.md](docs/ai/prompts.md) records
-them as faithful English translations, lightly edited for clarity.
+Some of the owner's prompts were written in Bulgarian. [docs/ai/prompts.md](docs/ai/prompts.md) gives
+them all in English, with excerpts of the agent prompts and why each is shaped the way it is.
 
 ## How AI-generated code was validated
 
