@@ -63,8 +63,9 @@ flowchart LR
   - Rate limits are per visitor (`CF-Connecting-IP`) and answer 429. Grafana's query endpoints get 5
     requests per second with a burst of 40 (a whole dashboard at once). The api paths that its own rate
     limiter does not cover get 10 per second with a burst of 20: `/health/*` (`/health/ready` opens a
-    database connection on every hit), `/docs` and `/openapi/*`. `deploy.sh` and its smoke test call the
-    api on `127.0.0.1:8085`, past nginx, so they are not limited.
+    database connection on every hit), `/docs` and `/openapi/*`. The match is case-insensitive, like the
+    api's routing. `deploy.sh` and its smoke test call the api on `127.0.0.1:8085`, past nginx, so they
+    are not limited.
   - The vhosts listen with plain `listen 443 ssl`, without `http2`. On nginx 1.18, `http2` is a property
     of the shared listening socket and would switch HTTP/2 on for every site on 443. Visitors still get
     HTTP/2 and HTTP/3 from Cloudflare; only the hop from Cloudflare to the origin is HTTP/1.1.
