@@ -326,7 +326,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "sum(dotnet_thread_pool_thread_count{service_name=\"tickpulse-api\"})",
+          "expr": "sum(dotnet_thread_pool_thread_count_total{service_name=\"tickpulse-api\"}) or sum(dotnet_thread_pool_thread_count{service_name=\"tickpulse-api\"})",
           "legendFormat": "",
           "range": true,
           "instant": false
@@ -1237,7 +1237,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "sum(dotnet_thread_pool_thread_count{service_name=\"tickpulse-api\"})",
+          "expr": "sum(dotnet_thread_pool_thread_count_total{service_name=\"tickpulse-api\"}) or sum(dotnet_thread_pool_thread_count{service_name=\"tickpulse-api\"})",
           "legendFormat": "threads",
           "range": true,
           "instant": false
@@ -1249,7 +1249,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "sum(dotnet_thread_pool_queue_length{service_name=\"tickpulse-api\"})",
+          "expr": "sum(dotnet_thread_pool_queue_length_total{service_name=\"tickpulse-api\"}) or sum(dotnet_thread_pool_queue_length{service_name=\"tickpulse-api\"})",
           "legendFormat": "queue length",
           "range": true,
           "instant": false
@@ -1651,7 +1651,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "sum(db_client_connection_pending_requests{service_name=\"tickpulse-api\"}) or sum(db_client_connections_pending_requests{service_name=\"tickpulse-api\"})",
+          "expr": "sum(db_client_connection_npgsql_pending_requests{service_name=\"tickpulse-api\"}) or sum(db_client_connection_pending_requests{service_name=\"tickpulse-api\"}) or sum(db_client_connections_pending_requests{service_name=\"tickpulse-api\"})",
           "legendFormat": "pending",
           "range": true,
           "instant": false
@@ -2035,7 +2035,7 @@
             "uid": "prom"
           },
           "editorMode": "code",
-          "expr": "sum(rate(db_client_connection_npgsql_timeouts_total{service_name=\"tickpulse-api\"}[$__rate_interval]))",
+          "expr": "sum(rate(db_client_connection_npgsql_timeouts_total{service_name=\"tickpulse-api\"}[$__rate_interval])) or vector(0)",
           "legendFormat": "pool timeouts",
           "range": true,
           "instant": false
