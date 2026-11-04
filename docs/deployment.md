@@ -192,11 +192,23 @@ The job fails either way, so a rolled-back deploy is never green.
 
 **Secrets in the log.** `deploy.log` is streamed into the GitHub Actions log, and the `.env` values are
 not GitHub secrets, so Actions does not mask them. `deploy.sh` therefore pipes the api log through
-`mask-env.sh .env`, which replaces every `.env` value of 4 or more characters with `***`. The matching is
-literal, so a value may contain any character. If the masker is missing or cannot read `.env`, the api
-log is left out of `deploy.log` instead of being printed unmasked. `deploy/tests/mask-env.test.sh` runs in
-the `backend` job, next to `shellcheck` of the deploy scripts. Read the unmasked log on the server with
-`dc logs api`.
+`mask-env.sh .env`, which replaces every `.env` value of 4 or more characters with `***`.
+
+- It masks each value as Compose reads it, as written in the file, and in the two JSON spellings the
+  api's log uses: `"` as `\"` and `\` as `\\`, and inside the rendered message, where string properties
+  are quoted too.
+- Matching is literal. Overlapping matches are masked as one span.
+- It reads `.env` the way Compose does for plain `KEY=value` lines only: single or double quotes on one
+  line, the escapes `\"`, `\\` and `\$` in double quotes, `$$` for a literal `$`, and ` # comment` after
+  a value. Anything it cannot read with certainty withholds the api log, with the line number (never the
+  value) as the reason. This includes values over several lines, `$VAR` interpolation, other escapes, or a
+  backslash or quote in an unquoted value. A missing masker or an unreadable `.env` withholds the log too.
+  Writing every value unquoted, from letters, digits and `-_./+=@`, always works.
+- `deploy/tests/mask-env.test.sh` runs in the `backend` job, after a pinned `shellcheck` of the deploy
+  scripts. Its Serilog lines come from `deploy/tests/fixtures/serilog-events.jsonl`, which
+  `DeployLogFixtureTests` keeps identical to what the api's formatter writes.
+
+Read the unmasked log on the server with `dc logs api`.
 
 | Exit code | Meaning |
 |---|---|
