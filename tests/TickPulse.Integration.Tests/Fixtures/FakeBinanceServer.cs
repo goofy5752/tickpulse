@@ -443,6 +443,22 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         await Task.WhenAll(connections.Select(c => c.Closed)).WaitAsync(DefaultTimeout);
     }
 
+    /// <summary>
+    /// Aborts only the open connection that was accepted first (e.g. the old one while a rotation's new one is open) and
+    /// waits until it is gone.
+    /// </summary>
+    public async Task DropOldestConnectionAsync()
+    {
+        Connection oldest;
+        lock (_gate)
+        {
+            oldest = _connections.MinBy(c => c.Sequence) ?? throw new InvalidOperationException("No open connection.");
+        }
+
+        oldest.Abort();
+        await oldest.Closed.WaitAsync(DefaultTimeout);
+    }
+
     /// <summary>Starts a normal close handshake on every connection and waits until they are gone.</summary>
     public async Task CloseAllConnectionsAsync()
     {
@@ -629,6 +645,7 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         var connection = new Connection(socket, context);
         lock (_gate)
         {
+            connection.Sequence = _acceptedConnections + 1;
             _connections.Add(connection);
             _acceptedConnections++;
             _peakConnections = Math.Max(_peakConnections, _connections.Count);
@@ -1064,6 +1081,9 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         private Task _sendTail = Task.CompletedTask;
 
         public Task Closed => _closed.Task;
+
+        // Accept order, 1-based.
+        public int Sequence { get; set; }
 
         public bool IsSubscribed(string stream)
         {

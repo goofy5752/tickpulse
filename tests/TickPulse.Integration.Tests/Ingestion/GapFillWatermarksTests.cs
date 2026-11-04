@@ -186,16 +186,55 @@ public sealed class GapFillWatermarksTests
     }
 
     [Fact]
-    public void MarkStoredAbove_MakesAGivenUpGapAHole_OnlyWhenTheStreamWentPastIt()
+    public void NoteStored_AGivenUpGap_IsNotRaised_OnlyWhenTheStreamWentPastIt()
     {
         _marks.Merge([new("BTCUSDT", 5), new("ETHUSDT", 50)], gap: true);
 
-        _marks.MarkStoredAbove("BTCUSDT", 1000); // the fill failed while the stream had delivered up to 1000
-        _marks.MarkStoredAbove("ETHUSDT", 50);   // nothing streamed past the gap
+        _marks.NoteStored([new("BTCUSDT", 1000)]); // the fill failed while the stream had delivered up to 1000
+        _marks.NoteStored([new("ETHUSDT", 50)]);   // nothing streamed past the gap
 
         _marks.Seed([new("BTCUSDT", 1000), new("ETHUSDT", 80)]);
         Start("BTCUSDT", pendingOnly: true).ShouldBe(5);
         Start("ETHUSDT", pendingOnly: true).ShouldBe(80); // stored by another instance since: raised (I1)
+    }
+
+    [Theory]
+    [InlineData(true)]  // the discarded rotation link retired before the broken old one
+    [InlineData(false)] // or after it
+    public void NoteStored_FromADiscardedLink_KeepsTheSeedBelowItsTrades_InEitherOrder(bool discardedFirst)
+    {
+        // The old link broke at 400; the discarded rotation link had delivered (and stored) up to 600.
+        if (discardedFirst)
+        {
+            _marks.NoteStored([new("BTCUSDT", 600)]); // no entry exists yet
+            _marks.Merge([new("BTCUSDT", 400)], gap: true);
+        }
+        else
+        {
+            _marks.Merge([new("BTCUSDT", 400)], gap: true);
+            _marks.NoteStored([new("BTCUSDT", 600)]);
+        }
+
+        _marks.Seed([new("BTCUSDT", 600)]);
+
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(400); // 401..499 are still filled
+    }
+
+    [Fact]
+    public void Filled_ClearsStoredAbove_ForgetDropsIt()
+    {
+        _marks.Merge([new("BTCUSDT", 5), new("ETHUSDT", 5)], gap: true);
+        _marks.NoteStored([new("BTCUSDT", 600), new("ETHUSDT", 600)]);
+        _marks.TryGetStart("BTCUSDT", pendingOnly: true, out _, out var version).ShouldBeTrue();
+        _marks.Filled("BTCUSDT", version);           // 6..the live stream recovered: nothing open below 600 any more
+        _marks.Merge([new("BTCUSDT", 700)], gap: true); // the session ended cleanly at 700
+
+        _marks.Forget("ETHUSDT");                    // removed, then re-added: starts fresh
+        Activate("BTCUSDT", "ETHUSDT");
+        _marks.Seed([new("BTCUSDT", 900), new("ETHUSDT", 650)]);
+
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(900);
+        Start("ETHUSDT", pendingOnly: true).ShouldBe(650);
     }
 
     [Fact]

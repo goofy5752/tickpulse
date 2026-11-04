@@ -47,8 +47,8 @@ public sealed partial class GapFiller(
     /// <param name="symbol">Symbol name.</param>
     /// <param name="lastKnownId">The last trade id stored before the gap.</param>
     /// <param name="firstStreamId">
-    /// The first trade id the new connection delivered for the symbol, or <see langword="null"/> while none arrived.
-    /// Read again for every page.
+    /// The id from which the live connection's stream carries every trade of the symbol (normally the first id it
+    /// delivered), or <see langword="null"/> while that is not known yet. Read again for every page.
     /// </param>
     /// <param name="output">The tick channel.</param>
     /// <param name="ct">Cancels the fill (leadership lost, shutdown).</param>
@@ -151,6 +151,12 @@ public sealed partial class GapFiller(
     /// hour after it), from REST <c>aggTrades?startTime</c>. A symbol that starts streaming fills from there to its first
     /// streamed trade, so the minute it started in is complete.
     /// </summary>
+    /// <remarks>
+    /// One hour (the longest range Binance accepts with both bounds) is enough: <paramref name="fromUtc"/> is at most a
+    /// minute and a few seconds before the subscription took effect, and every trade after that is streamed. So the
+    /// trades the lead-in exists for all lie within the first minutes of the window, even when the lookup is retried much
+    /// later; when the window holds no trade at all, none of them exists.
+    /// </remarks>
     /// <returns>
     /// <c>Succeeded</c> is <see langword="false"/> when the request failed (worth trying again later);
     /// <c>FirstId</c> is <see langword="null"/> when nothing traded in that hour.
