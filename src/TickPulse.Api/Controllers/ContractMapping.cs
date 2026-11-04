@@ -4,7 +4,7 @@ using TickPulse.Contracts;
 
 namespace TickPulse.Api.Controllers;
 
-/// <summary>Maps the analytics use-case results onto the public contracts.</summary>
+/// <summary>Maps the use-case results onto the contracts.</summary>
 internal static class ContractMapping
 {
     public static AveragePriceResponse ToContract(this AveragePriceResult r) => new()
@@ -41,6 +41,19 @@ internal static class ContractMapping
             Change24hPercent = s.Change24hPercent,
             BackfillStatus = s.BackfillStatus.ToString(),
         }));
+
+    public static AdminSymbolResponse ToAdminContract(this MonitoredSymbol s) => new()
+    {
+        Symbol = s.Name,
+        IsActive = s.IsActive,
+        CreatedAt = s.CreatedAtUtc,
+        DeactivatedAt = s.DeactivatedAtUtc,
+        BackfillStatus = s.BackfillStatus.ToString(),
+        BackfilledFrom = s.BackfilledFromUtc,
+    };
+
+    public static AdminSymbolListResponse ToAdminContract(this IReadOnlyList<MonitoredSymbol> symbols) =>
+        new(symbols.Select(s => s.ToAdminContract()));
 
     public static CandleListResponse ToContract(this IReadOnlyList<CandleRow> candles) =>
         new(candles.Select(c => new CandleResponse

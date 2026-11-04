@@ -43,6 +43,7 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     private TaskCompletionSource? _aggTradesHold;
     private TaskCompletionSource? _klinesHold;
     private (int Status, int Remaining, int? RetryAfterSeconds)? _klinesFailure;
+    private (int Status, int Remaining)? _exchangeInfoFailure;
     private (int Code, string Msg)? _rejectNext;
     private bool _suppressNextAck;
     private int _rateLimitDisconnects;
@@ -323,6 +324,19 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         lock (_gate)
         {
             _klinesFailure = (status, count, retryAfterSeconds);
+        }
+    }
+
+    /// <summary>
+    /// The next <paramref name="count"/> <c>exchangeInfo</c> requests answer <paramref name="status"/> with a Binance error
+    /// body, e.g. <c>503</c> (Binance unavailable) or <c>418</c> (IP banned). Later requests are served normally.
+    /// </summary>
+    public void FailNextExchangeInfo(int status, int count = 1)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
+        lock (_gate)
+        {
+            _exchangeInfoFailure = (status, count);
         }
     }
 
@@ -805,6 +819,22 @@ public sealed class FakeBinanceServer : IAsyncLifetime
 
     private async Task HandleExchangeInfoAsync(HttpContext context)
     {
+        (int Status, int Remaining)? failure = null;
+        lock (_gate)
+        {
+            if (_exchangeInfoFailure is { } next)
+            {
+                failure = next;
+                _exchangeInfoFailure = next.Remaining > 1 ? next with { Remaining = next.Remaining - 1 } : null;
+            }
+        }
+
+        if (failure is { } fail)
+        {
+            await WriteAsync(context, fail.Status, Error(-1000, "Injected failure."));
+            return;
+        }
+
         KeyValuePair<string, string>[] symbols;
         if (context.Request.Query.ContainsKey("symbol"))
         {

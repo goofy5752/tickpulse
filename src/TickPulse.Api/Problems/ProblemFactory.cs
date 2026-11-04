@@ -28,6 +28,7 @@ public static class ProblemFactory
         [ProblemSlugs.Validation] = "Validation failed",
         [ProblemSlugs.NotAcceptable] = "Not acceptable",
         [ProblemSlugs.RateLimited] = "Too many requests",
+        [ProblemSlugs.UpstreamUnavailable] = "Upstream unavailable",
         [ProblemSlugs.Internal] = "Internal server error",
         [ProblemSlugs.NotFound] = "Not found",
     }.ToFrozenDictionary(StringComparer.Ordinal);
@@ -97,6 +98,7 @@ public static class ProblemFactory
         AppError.InvalidSymbol => StatusCodes.Status422UnprocessableEntity,
         AppError.SymbolLimit => StatusCodes.Status409Conflict,
         AppError.Validation => StatusCodes.Status400BadRequest,
+        AppError.UpstreamUnavailable => StatusCodes.Status503ServiceUnavailable,
         _ => throw new ArgumentOutOfRangeException(nameof(error), error, "No status is defined for this error."),
     };
 
@@ -108,6 +110,7 @@ public static class ProblemFactory
         AppError.InvalidSymbol => ProblemSlugs.InvalidSymbol,
         AppError.SymbolLimit => ProblemSlugs.SymbolLimit,
         AppError.Validation => ProblemSlugs.Validation,
+        AppError.UpstreamUnavailable => ProblemSlugs.UpstreamUnavailable,
         _ => throw new ArgumentOutOfRangeException(nameof(error), error, "No problem type is defined for this error."),
     };
 
@@ -140,6 +143,7 @@ public static class ProblemSlugs
     public const string Validation = "validation";
     public const string NotAcceptable = "not-acceptable";
     public const string RateLimited = "rate-limited";
+    public const string UpstreamUnavailable = "upstream-unavailable";
     public const string Internal = "internal";
     public const string NotFound = "not-found";
 }

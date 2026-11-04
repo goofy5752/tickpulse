@@ -77,6 +77,60 @@ public sealed class BinanceRestClientTests
     }
 
     [Theory]
+    [InlineData(HttpStatusCode.OK, TradingInfo, true)]
+    [InlineData(HttpStatusCode.BadRequest, """{"code":-1121,"msg":"Invalid symbol."}""", false)]
+    public async Task ExchangeMetadata_Answer_PassesThrough(HttpStatusCode status, string body, bool expected)
+    {
+        var stub = new StubHandler();
+        stub.Enqueue(status, body);
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+
+        (await new BinanceExchangeMetadata(rest).IsTradingSymbolAsync(Btc, TestContext.Current.CancellationToken)).ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.RequestTimeout)]
+    public async Task ExchangeMetadata_TransientFailure_ThrowsExchangeUnavailable(HttpStatusCode status)
+    {
+        var stub = new StubHandler();
+        stub.Enqueue(status, "<html>upstream error</html>");
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+
+        var ex = await Should.ThrowAsync<ExchangeUnavailableException>(
+            () => new BinanceExchangeMetadata(rest).IsTradingSymbolAsync(Btc, TestContext.Current.CancellationToken));
+
+        ex.InnerException.ShouldBeOfType<BinanceApiException>().IsTransient.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task ExchangeMetadata_Banned_ThrowsExchangeUnavailable()
+    {
+        var stub = new StubHandler();
+        stub.Enqueue((HttpStatusCode)418, "", retryAfterSeconds: 120);
+        using var client = NewClient(stub, new FakeTimeProvider(Noon), out var rest);
+
+        var ex = await Should.ThrowAsync<ExchangeUnavailableException>(
+            () => new BinanceExchangeMetadata(rest).IsTradingSymbolAsync(Btc, TestContext.Current.CancellationToken));
+
+        ex.InnerException.ShouldBeOfType<BinanceBannedException>();
+    }
+
+    [Fact]
+    public async Task ExchangeMetadata_PermanentFailure_Propagates()
+    {
+        var stub = new StubHandler();
+        stub.Enqueue(HttpStatusCode.BadRequest, """{"code":-1100,"msg":"Illegal characters found in a parameter."}""");
+        using var client = NewClient(stub, new FakeTimeProvider(), out var rest);
+
+        var ex = await Should.ThrowAsync<BinanceApiException>(
+            () => new BinanceExchangeMetadata(rest).IsTradingSymbolAsync(Btc, TestContext.Current.CancellationToken));
+
+        ex.IsTransient.ShouldBeFalse();
+    }
+
+    [Theory]
     [InlineData(HttpStatusCode.InternalServerError)]
     [InlineData(HttpStatusCode.ServiceUnavailable)]
     [InlineData(HttpStatusCode.RequestTimeout)]
@@ -583,7 +637,7 @@ public sealed class BinanceRestClientTests
         var klines = provider.GetRequiredService<IKlineSource>();
         var aggTrades = provider.GetRequiredService<IAggTradeSource>();
 
-        metadata.ShouldBeOfType<BinanceRestClient>();
+        metadata.ShouldBeOfType<BinanceExchangeMetadata>();
         (await metadata.IsTradingSymbolAsync(Btc, ct)).ShouldBeTrue();
         (await metadata.IsTradingSymbolAsync(Symbol("ADAUSDT"), ct)).ShouldBeFalse();
         (await metadata.IsTradingSymbolAsync(Symbol("NOPEUSDT"), ct)).ShouldBeFalse();

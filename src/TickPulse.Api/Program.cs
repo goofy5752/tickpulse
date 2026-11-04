@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Scalar.AspNetCore;
+using TickPulse.Api.Auth;
 using TickPulse.Api.Health;
 using TickPulse.Api.Hosting;
 using TickPulse.Api.Problems;
@@ -35,6 +36,7 @@ services.AddControllers(o =>
     .AddXmlDataContractSerializerFormatters();
 
 services.AddSingleton<AnalyticsService>();
+services.AddTickPulseAdmin();
 
 // Every problem (controllers, status code pages, exception handler, rate limiter) goes through these two writers:
 // XML when Accept prefers it, otherwise JSON. They replace the framework's JSON-only writers.
@@ -65,6 +67,10 @@ app.UseStatusCodePages();
 app.UseStaticFiles();
 app.UseRouting();
 app.UseRateLimiter();
+
+// After the rate limiter, so failed key guesses are throttled like any other request.
+app.UseAuthentication();
+app.UseAuthorization();
 
 app.MapControllers().RequireRateLimiting(ApiRateLimiting.PublicPolicy);
 app.MapTickPulseHealthChecks();
