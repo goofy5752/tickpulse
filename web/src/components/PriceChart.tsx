@@ -12,15 +12,14 @@ import {
   type IPrimitivePaneView,
   type ISeriesApi,
   type ISeriesPrimitive,
-  type LineData,
   type Logical,
   type MouseEventParams,
   type SeriesAttachedParameter,
   type UTCTimestamp,
-  type WhitespaceData,
 } from 'lightweight-charts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CandleResponse, IsoDateTime, LivePrice, Period, SmaResponse } from '@/api/types'
+import { setSeriesData, type CandleRow } from '@/lib/chartSeries'
 import { fillGaps, windowIndexRange, type WindowRange } from '@/lib/chartData'
 import { mergeTrade, reconcileBar, type OhlcBar } from '@/lib/liveBar'
 import { formatPercent, formatPlainPrice, formatPrice, formatTickmarks, formatUtc, priceDecimals } from '@/lib/format'
@@ -411,12 +410,13 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
     })
     smaSeries.applyOptions({ color: palette.sma, crosshairMarkerBorderColor: palette.sma, priceFormat })
 
-    candleSeries.setData(
-      rows.map((row): Bar | WhitespaceData<UTCTimestamp> =>
-        row.candle ? toBar(row.candle) : { time: row.time as UTCTimestamp },
-      ),
+    // Never leaves the SMA series empty; see setSeriesData for the charting-library bug it avoids.
+    setSeriesData(
+      candleSeries,
+      smaSeries,
+      rows.map((row): CandleRow => (row.candle ? toBar(row.candle) : { time: row.time as UTCTimestamp })),
+      smaLine,
     )
-    smaSeries.setData(smaLine.map((p): LineData<UTCTimestamp> => ({ time: p.time as UTCTimestamp, value: p.value })))
 
     if (priceLineRef.current) smaSeries.removePriceLine(priceLineRef.current)
     priceLineRef.current = sma
