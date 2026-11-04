@@ -1,5 +1,5 @@
 import { QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createQueryClient } from '@/api/queries'
@@ -88,6 +88,31 @@ describe('TickerTiles', () => {
 
     update(live(96_900))
     expect(priceElement().className).toContain('price-flash-down')
+  })
+
+  it('Tile_Tick_KeepsThePriceElement_AndEasesTheTintBack', () => {
+    vi.useFakeTimers()
+    try {
+      stubReducedMotion(false)
+      const { update } = setup()
+
+      update(live(97_100))
+      const first = priceElement()
+      expect(first.className).toContain('price-flash-up')
+
+      update(live(96_900))
+      // The same element, re-tinted: no remount, so nothing snaps or repaints the tile's backdrop.
+      expect(priceElement()).toBe(first)
+      expect(first.className).toContain('price-flash-down')
+
+      act(() => {
+        vi.advanceTimersByTime(300)
+      })
+      expect(first.className).not.toMatch(/price-flash/)
+      expect(first.className).toContain('price-tint')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('Tile_ReducedMotion_NeverFlashes', () => {

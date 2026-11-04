@@ -189,6 +189,19 @@
   backdrop-filter: blur(var(--blur-glass)) saturate(140%);
 }
 
+/*
+ * Glass without the backdrop blur, for surfaces that repaint on every tick (the price tiles).
+ * Chrome re-renders a blurred backdrop over the repainted area, and the blur pulls in light from
+ * beyond the tile's edge, which showed as a lighter band across its top. The tiles sit on the
+ * near-black page, where the blur changed nothing visible anyway.
+ */
+@utility glass-still {
+  background-color: var(--color-glass);
+  border: 1px solid var(--color-glass-border);
+  border-radius: var(--radius-glass);
+  box-shadow: var(--shadow-glass);
+}
+
 /* Any element that shows a number. */
 @utility num {
   font-variant-numeric: tabular-nums;
@@ -254,26 +267,37 @@
   }
 }
 
-/* A price that just moved: a brief tint in the direction of the move. */
-@utility price-flash-up {
-  animation: tp-flash-up 900ms var(--ease-glide);
-}
-@utility price-flash-down {
-  animation: tp-flash-down 900ms var(--ease-glide);
-}
-
-@keyframes tp-flash-up {
-  0%,
-  25% {
+/* A price that just moved: the digits take the direction's colour at once, then ease back. */
+@utility price-tint {
+  transition: color 900ms var(--ease-glide);
+  &.price-flash-up {
     color: var(--color-up);
-    text-shadow: 0 0 22px color-mix(in oklab, var(--color-up) 45%, transparent);
+    transition-duration: 120ms;
+  }
+  &.price-flash-down {
+    color: var(--color-down);
+    transition-duration: 120ms;
   }
 }
-@keyframes tp-flash-down {
-  0%,
-  25% {
-    color: var(--color-down);
-    text-shadow: 0 0 22px color-mix(in oklab, var(--color-down) 45%, transparent);
+
+/* The tile's glow on a tick: its own layer, animated on opacity only (see TickerTiles). */
+@utility tile-flash {
+  --flash: var(--color-up);
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  will-change: opacity;
+  background: radial-gradient(
+    110% 85% at 22% 48%,
+    color-mix(in oklab, var(--flash) 15%, transparent),
+    transparent 72%
+  );
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--flash) 34%, transparent);
+  &[data-direction='down'] {
+    --flash: var(--color-down);
   }
 }
 
@@ -440,8 +464,12 @@
   }
 
   /* No flashing, pulsing or shimmering at all, not even for a frame. */
-  .price-flash-up,
-  .price-flash-down,
+  .tile-flash {
+    display: none;
+  }
+  .price-tint {
+    transition: none !important;
+  }
   .status-dot-wait,
   .status-dot-live::after,
   .skeleton {

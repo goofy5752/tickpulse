@@ -80,6 +80,7 @@ if the final version differs.
 | [N5](#n5) | Every 406 logged a framework Warning | Regression run | Minor | #27 |
 | [N6](#n6) | Seeded symbols reported `NotRequested` while their backfill was queued | Regression run | Minor | #27 |
 | [N7](#n7) | Tempo was killed 1 s after every `down` | Regression run | Minor | #27 |
+| [N8](#n8) | A tick flashed a lighter band across the price tiles | Owner, local run | Minor | #28 |
 
 ---
 
@@ -825,3 +826,20 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
   `backend_worker.finish_on_shutdown_timeout` set to 10 s. A live `down` then stopped every container with
   SIGTERM only, exit 0, Tempo in 10 s.
 - **Test:** `ObservabilityComposeTests` (the grace periods, and Tempo's shutdown wait well inside them).
+
+### N8
+
+**A tick flashed a lighter band across the price tiles** · Owner, local run · Minor · PR #28
+
+- **Symptom:** on a new trade the tile's price flashed, and for a frame a lighter band showed across the top of
+  the tile; quick ticks made the flash snap rather than glide.
+- **Root cause:** the price element was remounted on every tick (`key`) to restart a keyframe that animated
+  `color` and a 22 px `text-shadow`. The large blurred repaint inside a tile with `backdrop-filter` made Chrome
+  re-render part of the frosted backdrop, which showed as the band; the remount restarted the animation from its
+  start on every tick.
+- **Fix:** the price element stays mounted: the digits take the direction's colour at once and ease back by a
+  CSS colour transition, and the glow is a separate layer behind the content (`tile-flash`) that animates
+  opacity only, restarting from its current opacity so quick ticks swell it again. Reduced motion shows neither. The tiles also
+  drop the backdrop blur (`glass-still`): on the near-black page it changed nothing visible, and it was what
+  re-rendered over each repaint.
+- **Test:** `TickerTiles.test.tsx`, `Tile_Tick_KeepsThePriceElement_AndEasesTheTintBack`.
