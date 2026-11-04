@@ -69,7 +69,7 @@ internal sealed partial class SymbolReconciler(ISymbolRepository symbols, Symbol
             retrySoon |= result == CommandResult.Unknown;
             if (result == CommandResult.Applied)
             {
-                LogSubscribed(toAdd.Length, toAdd);
+                LogSubscribed(toAdd.Length, new SymbolList(toAdd));
             }
         }
 
@@ -81,7 +81,7 @@ internal sealed partial class SymbolReconciler(ISymbolRepository symbols, Symbol
             if (result == CommandResult.Applied)
             {
                 removed = toRemove;
-                LogUnsubscribed(toRemove.Length, toRemove);
+                LogUnsubscribed(toRemove.Length, new SymbolList(toRemove));
             }
         }
 
@@ -140,11 +140,11 @@ internal sealed partial class SymbolReconciler(ISymbolRepository symbols, Symbol
         }
     }
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Subscribed {Count} symbol(s): {Symbols}")]
-    private partial void LogSubscribed(int count, IReadOnlyList<string> symbols);
+    [LoggerMessage(Level = LogLevel.Information, Message = "Subscribed {Count} symbol(s): {Symbols:l}")]
+    private partial void LogSubscribed(int count, SymbolList symbols);
 
-    [LoggerMessage(Level = LogLevel.Information, Message = "Unsubscribed {Count} symbol(s): {Symbols}")]
-    private partial void LogUnsubscribed(int count, IReadOnlyList<string> symbols);
+    [LoggerMessage(Level = LogLevel.Information, Message = "Unsubscribed {Count} symbol(s): {Symbols:l}")]
+    private partial void LogUnsubscribed(int count, SymbolList symbols);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Could not read the active symbols; reconcile retries soon")]
     private partial void LogListFailed(Exception exception);
@@ -157,4 +157,14 @@ internal sealed partial class SymbolReconciler(ISymbolRepository symbols, Symbol
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "{Method} not sent: the connection has closed")]
     private partial void LogConnectionGone(string method);
+}
+
+/// <summary>
+/// Symbols for a log message, rendered as <c>ADAUSDT, BTCUSDT</c> (with <c>{Symbols:l}</c>, without quotes). A list
+/// parameter would reach Serilog as a sequence and appear in the message as a quoted JSON array; this value is not
+/// enumerable, so Serilog stores its text, and it is only joined when the event is actually written.
+/// </summary>
+internal readonly record struct SymbolList(IReadOnlyList<string> Names)
+{
+    public override string ToString() => string.Join(", ", Names);
 }
