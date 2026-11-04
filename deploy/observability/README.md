@@ -261,15 +261,35 @@ Conventions the dashboards rely on:
     (`api/{symbol}/24hAvgPrice`), so one `route` variable filters both metric families;
   - `status` is the numeric code as a string (`"200"`, `"429"`);
   - `content_type` is the negotiated media type without parameters (`application/json`,
-    `application/xml`); the XML share matches `.*xml.*`.
-- **Ingest lag buckets**: pick explicit boundaries around the 5 s alert threshold, e.g.
-  `[50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000]` ms.
-- **Export interval 15 s** (`OTEL_METRIC_EXPORT_INTERVAL=15000`, or the equivalent reader option).
+    `application/xml`, `application/problem+xml`, …), or `none` for an empty body; the XML share
+    matches `.*xml.*`;
+  - only `/api/…` requests are counted (not the dashboard, the hub, health or docs), and `route` is
+    left out when no endpoint matched (a 500 after an unhandled exception keeps the route of the
+    endpoint that threw).
+- **Ingest lag** is recorded once per stored batch: the lag of its newest tick. A batch with nothing
+  new (a gap-fill or rotation replay) records no sample, and neither does a batch whose newest tick
+  was received more than 30 s after its trade time (`TickBatchWriter.RecoveredTickAge`: recovered by
+  gap-fill over REST, not streamed). The buckets are
+  `[50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000]` ms, around the 5 s alert threshold.
+- **`tickpulse.ingest.ticks.received`** counts trades from the WebSocket stream only;
+  `tickpulse.gapfill.trades` counts the REST recovery. **`ticks.persisted`** counts newly stored ticks
+  (replays are not counted). **`backfill.candles`** counts newly stored klines.
+- **Export interval 15 s** (the metric reader's export interval).
   The SDK default is 60 s, which is too coarse for 1-minute rate windows, the 45 s liveness windows
   and the 60 s WebSocket alert.
-- **`tickpulse.ingest.symbol.active`** reports one series per symbol the instance knows about:
-  `1` while the symbol is subscribed and `0` once an admin removes it. Dropping the series also works.
-  The zero-ticks alert only considers symbols at `1`.
+- **`tickpulse.ingest.symbol.active`** reports one series per symbol the instance knows about, and
+  only while the instance is the ingestion leader (a standby instance streams nothing and reports no
+  series): `1` while the symbol is monitored, then `0` once, at the first export after an admin removed
+  it; after that the series is no longer reported, until the symbol is added again. The zero-ticks
+  alert only considers symbols at `1`.
+- **Exporters are off** when `Otel:Endpoint` is unset or empty. An unreachable or unresolvable
+  endpoint only makes the exporters drop data in the background; the API keeps serving and does not
+  log the failures.
+- **Trace sampling** (`Otel:FlushSampleRatio`, default `0.1`): a parent-based sampler keeps every
+  HTTP request (also when the caller sent an unsampled `traceparent`), every `backfill.page` and
+  every `gapfill.run`, and the given share of `ingest.flush` traces (by trace id). Any other span
+  without a parent, such as the leader lock probe every few seconds, is dropped. Child spans follow
+  their parent, so the database spans of an unsampled flush are dropped with it.
 
 ### Standard instruments used
 
@@ -287,8 +307,14 @@ names, and the collector panels accept both suffixed and unsuffixed names.
 ### Traces and logs
 
 - **Spans** come from ActivitySource `TickPulse`: `ingest.flush`, `backfill.page` and `gapfill.run`,
-  plus the AspNetCore, HttpClient and Npgsql instrumentation. The trace tables search with TraceQL,
-  e.g. `{ resource.service.name = "tickpulse-api" && name =~ "ingest.flush|backfill.page|gapfill.run" }`.
+  plus the AspNetCore (without `/health/*`, `client.address` and `url.query`), HttpClient and Npgsql
+  instrumentation. Span attributes: `tickpulse.batch.size` / `.stored` / `.attempts` on
+  `ingest.flush` (Error status when the batch was dropped); `tickpulse.symbol`,
+  `tickpulse.backfill.start` (ISO-8601 UTC, e.g. `2026-11-01T12:00:00.0000000Z`) and
+  `tickpulse.backfill.fetched` / `.inserted` on `backfill.page`; `tickpulse.symbol` and
+  `tickpulse.gapfill.from_id` / `.emitted` / `.complete` on `gapfill.run`. The trace tables search
+  with TraceQL, e.g.
+  `{ resource.service.name = "tickpulse-api" && name =~ "ingest.flush|backfill.page|gapfill.run" }`.
 - **Logs** reach Loki through its native OTLP endpoint.
   - Stream labels: `service_name`, plus Loki's default OTLP resource labels such as
     `deployment_environment`.
@@ -299,6 +325,15 @@ names, and the collector panels accept both suffixed and unsuffixed names.
   - The trace context must be set on the log record (the Serilog OTLP sink does this inside an
     activity); the `trace_id` link and the trace filter depend on it.
   - Raw IP addresses are never logged, only `client_ip_hash`.
+  - Every request logs one line (`Serilog.AspNetCore.RequestLoggingMiddleware`) with `RequestMethod`,
+    `RequestPath` (no query string), `StatusCode`, `Elapsed`, `route` and `client_ip_hash`; health
+    probes at Debug, 5xx at Error.
+  - The console gets the same events as JSON (`RenderedCompactJsonFormatter`) with `service.name`,
+    `service.version`, `deployment.environment`, `trace_id` and `span_id` added.
+  - Levels come from `Serilog:MinimumLevel` in `appsettings.json`: Information by default; Warning for
+    `Npgsql`, `System.Net.Http.HttpClient`, `Polly`, `Microsoft.Extensions.Http.Resilience`,
+    `Microsoft.AspNetCore`, `Microsoft.EntityFrameworkCore` and
+    `TickPulse.Api.Auth.ApiKeyAuthenticationHandler` (its own failed-attempt warning stays visible).
 
 ## Adding a panel
 

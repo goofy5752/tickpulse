@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Diagnostics;
 using System.Globalization;
 using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
@@ -8,6 +9,7 @@ using TickPulse.Application.Abstractions;
 using TickPulse.Application.Ingestion;
 using TickPulse.Domain;
 using TickPulse.Infrastructure.Binance;
+using TickPulse.Infrastructure.Telemetry;
 
 namespace TickPulse.Infrastructure.Backfill;
 
@@ -49,7 +51,8 @@ internal sealed partial class BackfillWorker(
     IngestionState state,
     IOptions<BackfillOptions> options,
     TimeProvider clock,
-    ILogger<BackfillWorker> logger) : BackgroundService, IBackfillQueue
+    ILogger<BackfillWorker> logger,
+    TickPulseMetrics metrics) : BackgroundService, IBackfillQueue
 {
     /// <summary>Klines per REST call (the Binance maximum).</summary>
     public const int PageSize = BinanceRestClient.MaxLimit;
@@ -378,23 +381,22 @@ internal sealed partial class BackfillWorker(
                 continue;
             }
 
-            var page = await FetchPageAsync(name, next, end, ct).ConfigureAwait(false);
-            if (page is null)
+            if (await FetchAndStorePageAsync(symbolId, name, next, end, ct).ConfigureAwait(false) is not { } page)
             {
                 continue; // leadership was lost during the retries: pause above
             }
 
             pages++;
-            if (page.Count == 0)
+            if (page.Klines.Count == 0)
             {
                 break;
             }
 
-            fetched += page.Count;
-            inserted += await candles.InsertBackfillAsync(symbolId, page, ct).ConfigureAwait(false);
+            fetched += page.Klines.Count;
+            inserted += page.Inserted;
 
-            var after = page[^1].OpenTimeUtc + Minute;
-            if (after <= next || page.Count < PageSize)
+            var after = page.Klines[^1].OpenTimeUtc + Minute;
+            if (after <= next || page.Klines.Count < PageSize)
             {
                 // Nothing more in [next, end) (a short page), or no progress (never expected from Binance).
                 break;
@@ -408,6 +410,35 @@ internal sealed partial class BackfillWorker(
         }
 
         return new WalkTotals(pages, fetched, inserted);
+    }
+
+    // One page as one backfill.page span: the REST fetch (with its retries) and the insert. Null as FetchPageAsync.
+    private async Task<(IReadOnlyList<Kline> Klines, int Inserted)?> FetchAndStorePageAsync(
+        int symbolId, SymbolName name, DateTime start, DateTime end, CancellationToken ct)
+    {
+        using var activity = TickPulseMetrics.ActivitySource.StartActivity(TickPulseMetrics.BackfillPageSpan);
+        activity?.SetTag("tickpulse.symbol", name.Value);
+        activity?.SetTag("tickpulse.backfill.start", start.ToString("O", CultureInfo.InvariantCulture));
+        try
+        {
+            var page = await FetchPageAsync(name, start, end, ct).ConfigureAwait(false);
+            if (page is null || page.Count == 0)
+            {
+                activity?.SetTag("tickpulse.backfill.fetched", 0);
+                return page is null ? null : (page, 0);
+            }
+
+            var inserted = await candles.InsertBackfillAsync(symbolId, page, ct).ConfigureAwait(false);
+            metrics.BackfillCandles(name.Value, inserted);
+            activity?.SetTag("tickpulse.backfill.fetched", page.Count);
+            activity?.SetTag("tickpulse.backfill.inserted", inserted);
+            return (page, inserted);
+        }
+        catch (Exception ex) when (activity is not null)
+        {
+            activity.SetStatus(ActivityStatusCode.Error, ex.GetType().Name);
+            throw;
+        }
     }
 
     private readonly record struct WalkTotals(int Pages, int Fetched, int Inserted)

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Sockets;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
@@ -6,6 +7,7 @@ using Npgsql;
 using TickPulse.Application.Abstractions;
 using TickPulse.Application.Ingestion;
 using TickPulse.Domain;
+using TickPulse.Infrastructure.Telemetry;
 
 namespace TickPulse.Infrastructure.Ingestion;
 
@@ -35,13 +37,20 @@ public sealed partial class TickBatchWriter(
     IGapFillWatermark watermark,
     IOptions<IngestionOptions> options,
     TimeProvider clock,
-    ILogger<TickBatchWriter> logger)
+    ILogger<TickBatchWriter> logger,
+    TickPulseMetrics metrics)
 {
     /// <summary>Attempts per batch for deadlocks and serialization failures.</summary>
     public const int MaxConflictAttempts = 4;
 
     /// <summary>Upper bound on the wait between retries of a transient failure.</summary>
     public static readonly TimeSpan MaxTransientDelay = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// A tick received this long after its trade time was recovered (gap-fill), not streamed; a batch whose newest
+    /// tick is one records no ingest lag sample.
+    /// </summary>
+    public static readonly TimeSpan RecoveredTickAge = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan ConflictBaseDelay = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan TransientBaseDelay = TimeSpan.FromMilliseconds(250);
@@ -57,6 +66,7 @@ public sealed partial class TickBatchWriter(
         var maxSize = options.Value.BatchMaxSize;
         var maxDelay = options.Value.BatchMaxDelay;
         var batch = new List<Tick>(Math.Min(maxSize, 4096));
+        var inserted = new Dictionary<int, int>();
 
         try
         {
@@ -80,7 +90,7 @@ public sealed partial class TickBatchWriter(
 
                 if (batch.Count > 0)
                 {
-                    await FlushAsync(batch, ct).ConfigureAwait(false);
+                    await FlushAsync(batch, inserted, ct).ConfigureAwait(false);
                     batch.Clear();
                 }
             }
@@ -130,8 +140,11 @@ public sealed partial class TickBatchWriter(
     }
 
     // Returns once the batch is stored or dropped; throws OperationCanceledException when ct is cancelled.
-    private async Task FlushAsync(List<Tick> batch, CancellationToken ct)
+    private async Task FlushAsync(List<Tick> batch, Dictionary<int, int> inserted, CancellationToken ct)
     {
+        using var activity = TickPulseMetrics.ActivitySource.StartActivity(TickPulseMetrics.FlushSpan);
+        activity?.SetTag("tickpulse.batch.size", batch.Count);
+        var started = clock.GetTimestamp();
         int stored;
         var attempts = 0;
         var conflicts = 0;
@@ -141,7 +154,7 @@ public sealed partial class TickBatchWriter(
             attempts++;
             try
             {
-                stored = await writer.WriteBatchAsync(batch, ct).ConfigureAwait(false);
+                stored = await writer.WriteBatchAsync(batch, inserted, ct).ConfigureAwait(false);
                 break;
             }
             catch (PostgresException ex) when (IsConflict(ex) && conflicts + 1 < MaxConflictAttempts && !ct.IsCancellationRequested)
@@ -159,12 +172,15 @@ public sealed partial class TickBatchWriter(
             catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 LogDropped(ex, batch.Count, attempts);
+                activity?.SetStatus(ActivityStatusCode.Error, "batch dropped");
                 ReportGap(batch);
                 return;
             }
         }
 
-        RecordStored(batch, stored);
+        activity?.SetTag("tickpulse.batch.stored", stored);
+        activity?.SetTag("tickpulse.batch.attempts", attempts);
+        RecordStored(batch, stored, inserted, clock.GetElapsedTime(started));
     }
 
     private static TimeSpan TransientDelay(int attempt)
@@ -173,16 +189,18 @@ public sealed partial class TickBatchWriter(
         return delay < MaxTransientDelay ? delay : MaxTransientDelay;
     }
 
-    private void RecordStored(List<Tick> batch, int stored)
+    private void RecordStored(List<Tick> batch, int stored, Dictionary<int, int> inserted, TimeSpan duration)
     {
         var now = clock.GetUtcNow().UtcDateTime;
         var newest = DateTime.MinValue;
+        var newestReceived = DateTime.MinValue;
         var last = new Dictionary<int, Tick>();
         foreach (var tick in batch)
         {
             if (tick.TradeTimeUtc > newest)
             {
                 newest = tick.TradeTimeUtc;
+                newestReceived = tick.ReceivedAtUtc;
             }
 
             if (!last.TryGetValue(tick.SymbolId, out var seen) || tick.AggTradeId > seen.AggTradeId)
@@ -202,9 +220,22 @@ public sealed partial class TickBatchWriter(
         }
 
         LogFlushed(batch.Count, stored);
+        var lagMs = (now - newest).TotalMilliseconds;
+        foreach (var (symbolId, count) in inserted)
+        {
+            if (symbols.TryGetName(symbolId, out var name))
+            {
+                metrics.TicksPersisted(name, count);
+            }
+        }
+
+        // Not ingest lag: a batch with nothing new (a gap-fill or rotation replay), or one whose newest tick was
+        // recovered over REST long after it traded (a gap-fill batch, which carries old trade times).
+        var recovered = newestReceived - newest > RecoveredTickAge;
+        metrics.BatchStored(batch.Count, duration, stored > 0 && !recovered ? lagMs : null);
         try
         {
-            state.RecordBatch(stored, (now - newest).TotalMilliseconds, prices);
+            state.RecordBatch(stored, lagMs, prices);
         }
         catch (AggregateException ex)
         {

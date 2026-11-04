@@ -42,6 +42,9 @@ public sealed class SymbolIdCache
 
     public bool TryGetName(int id, [NotNullWhen(true)] out string? name) => _names.TryGetValue(id, out name);
 
+    /// <summary>Every symbol name seen since start, active or not (a live, thread-safe view).</summary>
+    public IEnumerable<string> KnownNames => _names.Values;
+
     /// <summary>Whether the symbol was active at the last refresh.</summary>
     public bool IsActive(string name) => _active.Contains(name);
 }

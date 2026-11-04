@@ -12,6 +12,7 @@ using TickPulse.Infrastructure.Backfill;
 using TickPulse.Infrastructure.Binance;
 using TickPulse.Infrastructure.Ingestion;
 using TickPulse.Infrastructure.Persistence;
+using TickPulse.Infrastructure.Telemetry;
 
 namespace TickPulse.Infrastructure;
 
@@ -58,6 +59,11 @@ public static class DependencyInjection
         services.TryAddSingleton<IngestionState>();
         services.TryAddSingleton<ISymbolChangeSignal, SymbolChangeSignal>();
 
+        // The TickPulse meter; its observable instruments read the ingestion state and the symbol cache.
+        services.AddMetrics();
+        services.TryAddSingleton<SymbolIdCache>();
+        services.TryAddSingleton<TickPulseMetrics>();
+
         return services;
     }
 
@@ -87,7 +93,8 @@ public static class DependencyInjection
         services.TryAddSingleton(sp => new GapFiller(
             sp.GetRequiredService<IAggTradeSource>(),
             sp.GetRequiredService<TimeProvider>(),
-            sp.GetService<ILogger<GapFiller>>() ?? NullLogger<GapFiller>.Instance));
+            sp.GetService<ILogger<GapFiller>>() ?? NullLogger<GapFiller>.Instance,
+            sp.GetRequiredService<TickPulseMetrics>()));
         services.TryAddSingleton(sp => new SymbolReconciler(
             sp.GetRequiredService<ISymbolRepository>(),
             sp.GetRequiredService<SymbolIdCache>(),
@@ -105,7 +112,8 @@ public static class DependencyInjection
             sp.GetRequiredService<IngestionState>(),
             sp.GetRequiredService<IOptions<IngestionOptions>>(),
             sp.GetRequiredService<TimeProvider>(),
-            sp.GetService<ILoggerFactory>() ?? NullLoggerFactory.Instance));
+            sp.GetService<ILoggerFactory>() ?? NullLoggerFactory.Instance,
+            sp.GetRequiredService<TickPulseMetrics>()));
 
         AddBackfill(services, configuration);
         return services;
@@ -128,7 +136,8 @@ public static class DependencyInjection
             sp.GetRequiredService<IngestionState>(),
             sp.GetRequiredService<IOptions<BackfillOptions>>(),
             sp.GetRequiredService<TimeProvider>(),
-            sp.GetService<ILogger<BackfillWorker>>() ?? NullLogger<BackfillWorker>.Instance));
+            sp.GetService<ILogger<BackfillWorker>>() ?? NullLogger<BackfillWorker>.Instance,
+            sp.GetRequiredService<TickPulseMetrics>()));
         services.TryAddSingleton<IBackfillQueue>(sp => sp.GetRequiredService<BackfillWorker>());
         services.AddHostedService(sp => sp.GetRequiredService<BackfillWorker>());
     }

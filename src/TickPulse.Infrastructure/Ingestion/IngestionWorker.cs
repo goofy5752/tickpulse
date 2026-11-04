@@ -7,6 +7,7 @@ using TickPulse.Application.Abstractions;
 using TickPulse.Application.Ingestion;
 using TickPulse.Domain;
 using TickPulse.Infrastructure.Persistence;
+using TickPulse.Infrastructure.Telemetry;
 
 namespace TickPulse.Infrastructure.Ingestion;
 
@@ -41,7 +42,8 @@ internal sealed partial class IngestionWorker(
     IngestionState state,
     IOptions<IngestionOptions> options,
     TimeProvider clock,
-    ILoggerFactory loggerFactory) : BackgroundService
+    ILoggerFactory loggerFactory,
+    TickPulseMetrics metrics) : BackgroundService
 {
     /// <summary>How long the end of a session waits for the remaining ticks to be written.</summary>
     /// <remarks>
@@ -156,7 +158,8 @@ internal sealed partial class IngestionWorker(
         var writer = batchWriter.RunAsync(channel.Reader, abandon.Token);
         var supervisor = new StreamSupervisor(
             connections, reconciler, gapFiller, symbols, signal, state, settings, clock,
-            loggerFactory.CreateLogger<StreamSupervisor>(), channel.Writer, watermarks);
+            loggerFactory.CreateLogger<StreamSupervisor>(), channel.Writer, watermarks, metrics);
+        metrics.TrackChannel(channel.Reader);
         var watchdog = WatchLeadershipAsync(session);
         try
         {
@@ -187,6 +190,7 @@ internal sealed partial class IngestionWorker(
             // 2. Complete the channel and write what it still holds, within the deadline.
             channel.Writer.TryComplete();
             await FlushAsync(writer, abandon).ConfigureAwait(false);
+            metrics.TrackChannel(null);
 
             // 3. Close the connections, then give the lock up.
             try

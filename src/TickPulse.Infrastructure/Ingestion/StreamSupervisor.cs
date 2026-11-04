@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using TickPulse.Application.Abstractions;
 using TickPulse.Application.Ingestion;
 using TickPulse.Domain;
+using TickPulse.Infrastructure.Telemetry;
 
 namespace TickPulse.Infrastructure.Ingestion;
 
@@ -36,7 +37,8 @@ internal sealed partial class StreamSupervisor(
     TimeProvider clock,
     ILogger logger,
     ChannelWriter<Tick> output,
-    GapFillWatermarks watermarks) : IAsyncDisposable
+    GapFillWatermarks watermarks,
+    TickPulseMetrics metrics) : IAsyncDisposable
 {
     /// <summary>A connect that takes longer is abandoned and retried.</summary>
     public static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(10);
@@ -75,7 +77,7 @@ internal sealed partial class StreamSupervisor(
             while (true)
             {
                 state.SetConnecting();
-                var opened = await OpenLinkAsync(ct).ConfigureAwait(false);
+                var opened = await OpenLinkAsync(reconnecting ? WsConnectionReason.Reconnect : WsConnectionReason.Initial, ct).ConfigureAwait(false);
                 if (opened is null)
                 {
                     state.SetDisconnected();
@@ -239,7 +241,7 @@ internal sealed partial class StreamSupervisor(
     private async Task<(StreamLink Link, ReconcileOutcome Outcome)?> RotateAsync(StreamLink old, CancellationToken ct)
     {
         LogRotating(old.ConnectedAtUtc);
-        var opened = await OpenLinkAsync(ct).ConfigureAwait(false);
+        var opened = await OpenLinkAsync(WsConnectionReason.Rotation, ct).ConfigureAwait(false);
         if (opened is null)
         {
             LogRotationFailed(0);
@@ -274,7 +276,7 @@ internal sealed partial class StreamSupervisor(
     }
 
     // Null when the connection could not be opened; the subscribe may still be incomplete (see the outcome).
-    private async Task<(StreamLink Link, ReconcileOutcome Outcome)?> OpenLinkAsync(CancellationToken ct)
+    private async Task<(StreamLink Link, ReconcileOutcome Outcome)?> OpenLinkAsync(WsConnectionReason reason, CancellationToken ct)
     {
         var connection = connections.Create();
         var connected = false;
@@ -284,6 +286,7 @@ internal sealed partial class StreamSupervisor(
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
             await connection.ConnectAsync(linked.Token).ConfigureAwait(false);
             connected = true;
+            metrics.WsConnected(reason);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
@@ -320,6 +323,10 @@ internal sealed partial class StreamSupervisor(
         await Task.Yield();
         var trades = link.Connection.Trades;
         Dictionary<string, long>? unknown = null;
+
+        // Received trades are counted per run of one symbol within a burst, not per trade.
+        var runSymbol = 0;
+        var run = 0L;
         try
         {
             while (await trades.WaitToReadAsync(ct).ConfigureAwait(false))
@@ -338,15 +345,25 @@ internal sealed partial class StreamSupervisor(
                         continue;
                     }
 
+                    if (symbolId != runSymbol)
+                    {
+                        CountReceived(runSymbol, ref run);
+                        runSymbol = symbolId;
+                    }
+
                     var tick = new Tick(symbolId, trade.AggTradeId, trade.Price, trade.Quantity, trade.TradeTimeUtc, UtcNow);
                     if (!output.TryWrite(tick))
                     {
                         // The channel is full: wait (back-pressure), never drop.
+                        CountReceived(runSymbol, ref run);
                         await output.WriteAsync(tick, ct).ConfigureAwait(false);
                     }
 
+                    run++;
                     link.Record(trade.Symbol, trade.AggTradeId);
                 }
+
+                CountReceived(runSymbol, ref run);
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -358,6 +375,20 @@ internal sealed partial class StreamSupervisor(
             // A bug, not a network failure. The control loop sees the pump end and replaces the link.
             LogPumpFailed(ex);
         }
+        finally
+        {
+            CountReceived(runSymbol, ref run);
+        }
+    }
+
+    private void CountReceived(int symbolId, ref long count)
+    {
+        if (count > 0 && symbols.TryGetName(symbolId, out var name))
+        {
+            metrics.TicksReceived(name, count);
+        }
+
+        count = 0;
     }
 
     // Considers every subscribed symbol not yet considered on this link (control loop only).

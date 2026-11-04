@@ -10,6 +10,7 @@ using TickPulse.Application.Analytics;
 using TickPulse.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.AddTickPulseTelemetry();
 var services = builder.Services;
 
 // First hosted service: the schema is migrated before the ingestion and backfill workers (and the server) start.
@@ -61,6 +62,7 @@ services.AddOpenApi(o => o.AddDocumentTransformer((document, _, _) =>
 var app = builder.Build();
 
 app.UseForwardedHeaders();
+app.UseTickPulseTelemetry(); // request log and API metrics: after the forwarded headers, before everything else
 app.UseSecurityHeaders();
 app.UseVaryByAcceptOnApi();
 app.UseAcceptHeaderNormalization();

@@ -1,6 +1,8 @@
+using System.Diagnostics.Metrics;
 using System.Globalization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Diagnostics.Metrics.Testing;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Time.Testing;
 using Npgsql;
@@ -11,7 +13,9 @@ using TickPulse.Infrastructure;
 using TickPulse.Infrastructure.Backfill;
 using TickPulse.Infrastructure.Binance;
 using TickPulse.Infrastructure.Persistence;
+using TickPulse.Infrastructure.Telemetry;
 using TickPulse.Integration.Tests.Fixtures;
+using TickPulse.Integration.Tests.Telemetry;
 using static TickPulse.Integration.Tests.Ingestion.IngestionTestHost;
 
 namespace TickPulse.Integration.Tests.Ingestion;
@@ -103,6 +107,34 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         _logs.Count("LogProgress").ShouldBeInRange(1, 10);
         _logs.Count("LogStarted").ShouldBe(1);
         _logs.Count("LogCompleted").ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Pages_CountStoredCandles_AndAreTraced()
+    {
+        // 1,500 minutes of history: one full page and one short page.
+        SeedTrades("BTCUSDT", From, 1500);
+        using var meters = new ServiceCollection().AddMetrics().BuildServiceProvider();
+        var factory = meters.GetRequiredService<IMeterFactory>();
+        using var candles = new MetricCollector<long>(factory, TickPulseMetrics.MeterName, "tickpulse.backfill.candles");
+        using var spans = new SpanCapture(TickPulseMetrics.ActivitySourceName);
+        var run = CreateRun(configureServices: s => s.AddSingleton(factory));
+        await MarkCompletedAsync(run, Ada, Eth);
+
+        await run.StartAsync();
+        await WaitForStatusAsync(run, Btc, BackfillStatus.Completed);
+
+        // One measurement per stored page, tagged with the symbol.
+        var measured = candles.GetMeasurementSnapshot();
+        measured.Select(m => m.Value).ShouldBe([1000L, 500L]);
+        measured.ShouldAllBe(m => (string?)m.Tags["symbol"] == "BTCUSDT");
+
+        var pages = spans.Named(TickPulseMetrics.BackfillPageSpan);
+        pages.Count.ShouldBe(2);
+        pages[0].GetTagItem("tickpulse.symbol").ShouldBe("BTCUSDT");
+        pages[0].GetTagItem("tickpulse.backfill.start").ShouldBe(From.ToString("O", CultureInfo.InvariantCulture));
+        pages[0].GetTagItem("tickpulse.backfill.fetched").ShouldBe(1000);
+        pages[1].GetTagItem("tickpulse.backfill.inserted").ShouldBe(500);
     }
 
     [Fact]
