@@ -78,6 +78,9 @@ internal sealed partial class BackfillWorker(
     /// <summary>How long to wait after a ban that carries no end time (the shortest Binance ban).</summary>
     public static readonly TimeSpan DefaultBanWait = TimeSpan.FromMinutes(2);
 
+    /// <summary>Upper bound of the interval at which a symbol the session has not streamed yet is checked again.</summary>
+    public static readonly TimeSpan MaxStreamCheckInterval = TimeSpan.FromMinutes(10);
+
     /// <summary>How long the worker waits before it starts over after an unexpected error.</summary>
     public static readonly TimeSpan RestartDelay = TimeSpan.FromSeconds(30);
 
@@ -100,8 +103,9 @@ internal sealed partial class BackfillWorker(
     private DateTime? _scannedSession;
 
     // Symbols whose stretch before this session's stream is filled up to the session start only, because the session
-    // had not streamed them yet: queued again on every poll until it has. Loop only; cleared by every scan.
-    private readonly HashSet<int> _awaitingStream = [];
+    // had not streamed them yet: queued again when due, at an interval that doubles from LeaderPollInterval up to
+    // MaxStreamCheckInterval (a symbol that does not trade is not looked up every poll). Loop only; cleared by every scan.
+    private readonly Dictionary<int, (DateTime Due, TimeSpan Interval)> _awaitingStream = [];
 
     /// <summary>The wait before retry <paramref name="attempt"/> (1-based): 1 s, doubling, at most <see cref="MaxRetryDelay"/>.</summary>
     public static TimeSpan RetryDelay(int attempt)
@@ -201,11 +205,14 @@ internal sealed partial class BackfillWorker(
 
         if (!await WaitForWorkAsync(stoppingToken).ConfigureAwait(false))
         {
-            // A poll: look again at the symbols whose stream had not started in this session.
-            foreach (var id in _awaitingStream.ToArray())
+            // A poll: look again at the symbols, due by now, whose stream had not started in this session.
+            var now = clock.GetUtcNow().UtcDateTime;
+            foreach (var (id, wait) in _awaitingStream)
             {
-                _awaitingStream.Remove(id);
-                Enqueue(id);
+                if (wait.Due <= now)
+                {
+                    Enqueue(id);
+                }
             }
         }
     }
@@ -306,7 +313,7 @@ internal sealed partial class BackfillWorker(
             if (symbol.BackfillStatus == BackfillStatus.Completed)
             {
                 // Its history is done; only this session may have a stretch before its stream to fill.
-                await SessionStretchAsync(symbol, name, ct).ConfigureAwait(false);
+                await SessionStretchAsync(symbol, name, historyJustWalked: false, ct).ConfigureAwait(false);
                 return;
             }
 
@@ -369,7 +376,7 @@ internal sealed partial class BackfillWorker(
             end = gap.End;
         }
 
-        await SessionStretchAsync(symbol, name, ct).ConfigureAwait(false);
+        await SessionStretchAsync(symbol, name, historyJustWalked: true, ct).ConfigureAwait(false);
 
         // backfilled_from is what is actually stored: later than `from` when the symbol's history is shorter.
         var stored = await queries.BackfillRangeBeforeAsync(symbolId, end, ct).ConfigureAwait(false);
@@ -396,12 +403,13 @@ internal sealed partial class BackfillWorker(
         return start < end ? (start, end) : null;
     }
 
-    // The minutes before this leadership session's stream that no trade can fill: the symbol's last streamed minute
-    // before the session is older than the seed window, so the session seed found no trade to gap-fill from. Filled from
-    // right after the latest minute stored before the session's first streamed minute (or `from`, if that is later) up
-    // to that minute. While the session has not streamed the symbol, up to the session start, and the symbol waits for
-    // its stream (see _awaitingStream). Klines only add minutes: ON CONFLICT DO NOTHING keeps every stored one.
-    private async Task SessionStretchAsync(MonitoredSymbol symbol, SymbolName name, CancellationToken ct)
+    // The minutes before this leadership session's stream that no trade can fill: the session seed found no trade of the
+    // symbol to gap-fill from (its last streamed minute before the session starts at or before the seed bound, or it
+    // never streamed at all). Filled from right after the latest minute stored before the session's first streamed
+    // minute (or `from`, if that is later) up to that minute. While the session has not streamed the symbol, up to the
+    // session start, and the symbol waits for its stream (see _awaitingStream). Klines only add minutes: ON CONFLICT DO
+    // NOTHING keeps every stored one.
+    private async Task SessionStretchAsync(MonitoredSymbol symbol, SymbolName name, bool historyJustWalked, CancellationToken ct)
     {
         if (state.LeaderSinceUtc is not { } since)
         {
@@ -412,10 +420,22 @@ internal sealed partial class BackfillWorker(
         // minus the clock-skew allowance), and the minutes the session's gap-fill recovered lie before it.
         var sessionStart = Period.OneMinute.AlignDown(since - StreamSupervisor.LeadInClockSkew);
         var lastStream = await queries.LastStreamMinuteBeforeAsync(symbol.Id, sessionStart, ct).ConfigureAwait(false);
-        if (lastStream is not { } streamed || streamed + Minute > since - IngestionWorker.SeedWindow)
+
+        // The seed ran at or before `since` and looked for trades after (its start − SeedWindow). A streamed minute that
+        // starts after since − SeedWindow holds trades no older than that, so the seed found one and the trade gap-fill
+        // rebuilds the stretch. Comparing the minute's end instead would skip a minute whose trades all lie before the
+        // bound, which the seed missed. A minute straddling the bound may get both fills: harmless overlap.
+        if (lastStream is { } streamed && streamed > since - IngestionWorker.SeedWindow)
         {
-            // Never streamed before (its history backfill covers it), or the trades after its last stored one are
-            // recovered by the gap-fill.
+            LogNoSessionStretch(name.Value);
+            return;
+        }
+
+        // Never streamed before the session: no trade of it is stored, so no seed covers it either. A completed symbol's
+        // stretch starts after whatever was backfilled; with nothing stored at all, or right after its history walk
+        // (which went up to its first streamed minute or the current one), there is nothing more to fill.
+        if (lastStream is null && (historyJustWalked || await queries.LastMinuteBeforeAsync(symbol.Id, sessionStart, ct).ConfigureAwait(false) is null))
+        {
             LogNoSessionStretch(name.Value);
             return;
         }
@@ -425,7 +445,14 @@ internal sealed partial class BackfillWorker(
         var firstInSession = await queries.FirstStreamMinuteAtOrAfterAsync(symbol.Id, sessionStart, ct).ConfigureAwait(false);
         if (firstInSession is null)
         {
-            _awaitingStream.Add(symbol.Id);
+            var interval = _awaitingStream.TryGetValue(symbol.Id, out var wait)
+                ? TimeSpan.FromTicks(Math.Min(wait.Interval.Ticks * 2, MaxStreamCheckInterval.Ticks))
+                : LeaderPollInterval;
+            _awaitingStream[symbol.Id] = (now + interval, interval);
+        }
+        else
+        {
+            _awaitingStream.Remove(symbol.Id);
         }
 
         var end = firstInSession ?? sessionStart;

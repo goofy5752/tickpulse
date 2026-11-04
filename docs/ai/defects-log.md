@@ -419,7 +419,10 @@ if the final version differs.
     `max(agg_trade_id)` decompressed and sorted every compressed chunk in the window.
     Every leadership session queues every active symbol in the backfill worker. Klines then fill the
     minutes between the last stored minute and the session's first streamed minute when the outage was
-    longer than the seed window.
+    longer than the seed window. The PR review found a boundary mismatch: the stretch was skipped when its last
+    streamed minute *ended* after the seed bound, though its trades could all lie before it, which left up to
+    12 days uncovered. The check is now on the minute's start. A completed symbol that never streamed gets
+    its stretch too, and re-checks of a symbol the session has not streamed back off from 5 s to 10 minutes.
   - *Rotation race under lagging REST*
     ([issue #19](https://github.com/goofy5752/tickpulse/issues/19)). A new link that had not streamed a
     symbol gave its fill no boundary, so a short REST page closed the gap below ids that only the
@@ -444,7 +447,8 @@ if the final version differs.
   `IngestionWorkerTests.RestartAfterAnOutageOfDays_GapFillsFromTheLastStoredTrade`,
   `Rotation_NewLinkSilent_RestBehind_GapStaysOpenUntilTheRetiredLinksLastId`,
   `SeedWindow_LeavesTheFillADayInsideTheReplayWindow`, `BackfillWorkerTests.OutageLongerThanTheSeedWindow_*`,
-  `OutageInsideTheSeedWindow_IsLeftToTheTradeGapFill`,
+  `OutageInsideTheSeedWindow_IsLeftToTheTradeGapFill`, `OutageAtTheSeedWindowBoundary_FillsExactlyWhenTheSeedFindsNothing`,
+  `CompletedSymbolThatNeverStreamed_FillsUpToThisSessionsStream`, `NotStreamedInThisSession_IsCheckedAgainWithBackoff`,
   `NewLeadershipSession_EvenOneTheWorkerNeverSawStart_ChecksCompletedSymbolsAgain`,
   `TickBatchWriterTests.Run_RecoveredBatch_RecordsNoLagSample`,
   `TickWriterTests.WriteBatch_ReplayIntoACompressedChunk_InsertsNothingAndLeavesCandlesAndRollups`.

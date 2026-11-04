@@ -79,11 +79,16 @@ gap as before.
 its first minute. Trades older than the replay window cannot be inserted anyway. The candles of that
 stretch come from klines instead, when backfill is enabled. Every leadership session queues every
 active symbol in the backfill worker. That includes completed symbols and sessions the worker never saw
-begin, which `IngestionState.LeaderSinceUtc` reveals. A symbol whose last streamed minute before the
-session is older than the seed window gets the minutes from right after the latest minute stored before
-the session's first streamed minute, up to that minute. Until the session has streamed the symbol, the
-fill goes up to the session start, and the symbol is checked again on every poll. A shorter outage is
-left to the trade gap-fill, which rebuilds the exact candles.
+begin, which `IngestionState.LeaderSinceUtc` reveals. Klines are needed when the seed found no trade of
+the symbol. That is when its last streamed minute before the session *starts* at or before
+`since − 12 days`, or when it never streamed and only backfilled minutes are stored. The test is on the
+minute's start: comparing its end would skip a minute whose trades all lie before the seed bound, and
+leave the whole outage uncovered. A minute that straddles the bound may get both fills, which is
+harmless. Such a symbol gets the minutes from right after the latest minute stored before the session's
+first streamed minute, up to that minute. Until the session has streamed the symbol, the fill goes up to
+the session start. The symbol is then checked again at an interval that doubles from 5 s to 10 minutes,
+so a symbol that does not trade is not looked up every poll. A shorter outage is left to the trade
+gap-fill, which rebuilds the exact candles.
 
 **Lead-in.** A symbol streamed for the first time in a session with nothing stored gets a lead-in: REST
 finds the first trade at or after the start of the current minute (minus 5 s for clock skew), and the

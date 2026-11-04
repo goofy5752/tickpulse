@@ -328,9 +328,8 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
 
         // Exactly the minutes between the last stored one and this session's first: klines, in pages.
         var requests = _server.KlineRequests;
-        // Every page of the stretch (a transport-level retry may repeat a request), walked once.
-        requests.Select(r => r["startTime"]).Distinct().Count().ShouldBe((gap + 999) / 1000);
-        _logs.Count("LogStarted").ShouldBe(1);
+        requests.Count.ShouldBe((gap + 999) / 1000);
+        PollyEvents().ShouldBe(0);
         requests[0]["startTime"].ShouldBe(UnixMs(outageStart));
         requests.ShouldAllBe(r => r["symbol"] == "BTCUSDT" && r["endTime"] == (long.Parse(UnixMs(End), CultureInfo.InvariantCulture) - 1).ToString(CultureInfo.InvariantCulture));
         var stats = await CandleStatsAsync(Btc);
@@ -340,6 +339,88 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         var btc = await FindAsync(run, Btc);
         btc.BackfillStatus.ShouldBe(BackfillStatus.Completed);
         btc.BackfilledFromUtc.ShouldBe(From); // unchanged: the stretch is not part of the history backfill
+    }
+
+    [Theory]
+    [InlineData(-30, true)] // the last trade lies 30 s before the seed bound: the seed misses it, klines must fill
+    [InlineData(30, false)] // 30 s after it: the seed finds it, and the trade gap-fill rebuilds the stretch
+    public async Task OutageAtTheSeedWindowBoundary_FillsExactlyWhenTheSeedFindsNothing(int secondsFromBound, bool filled)
+    {
+        // Leadership starts 40 s into the minute, so the seed bound (since − SeedWindow) lies inside a minute: the last
+        // trade's minute can start before the bound while the trade itself is older than it (or not).
+        var run = CreateRun(depth: TimeSpan.FromDays(20), leader: false);
+        await MarkCompletedAsync(run, Btc, Ada, Eth);
+        _clock.Advance(TimeSpan.FromSeconds(35)); // End + 40 s
+        var since = _clock.GetUtcNow().UtcDateTime;
+        var lastTrade = since - IngestionWorker.SeedWindow + TimeSpan.FromSeconds(secondsFromBound);
+        var lastMinute = Period.OneMinute.AlignDown(lastTrade);
+        var gap = (int)(End - lastMinute).TotalMinutes - 1;
+        SeedTrades("BTCUSDT", lastMinute.AddMinutes(1), gap);
+        await InsertStreamCandlesAsync(Btc, lastMinute.AddMinutes(-9), 10);
+        await WriteStreamAsync(run, End, 1, firstId: 90_000_000);
+        run.State.SetConnecting();
+        run.State.LeaderSinceUtc.ShouldBe(since);
+
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogSessionStretchFilled") == 1 || NotNeeded("BTCUSDT") == 1, "BTC checked");
+
+        if (filled)
+        {
+            _logs.Count("LogSessionStretchFilled").ShouldBe(1);
+            _server.KlineRequests[0]["startTime"].ShouldBe(UnixMs(lastMinute.AddMinutes(1)));
+            (await CandleStatsAsync(Btc)).Count.ShouldBe(10 + gap + 1);
+        }
+        else
+        {
+            NotNeeded("BTCUSDT").ShouldBe(1);
+            _server.KlineRequests.ShouldBeEmpty();
+        }
+    }
+
+    [Fact]
+    public async Task CompletedSymbolThatNeverStreamed_FillsUpToThisSessionsStream()
+    {
+        // Backfilled up to two weeks ago, then the process went down before the symbol streamed at all: no trade of it
+        // is stored, so no seed covers anything after its last backfilled minute.
+        var lastBackfilled = End - TimeSpan.FromDays(14);
+        var gap = (int)(End - lastBackfilled).TotalMinutes - 1;
+        SeedTrades("BTCUSDT", lastBackfilled.AddMinutes(1), gap);
+        var run = CreateRun(depth: TimeSpan.FromDays(20));
+        await MarkCompletedAsync(run, Btc, Ada, Eth);
+        Kline[] history = [.. Enumerable.Range(0, 10).Select(i => new Kline(lastBackfilled.AddMinutes(i - 9), 1m, 1m, 1m, 1m, 0m, 0m))];
+        (await run.Services.GetRequiredService<ICandleWriter>().InsertBackfillAsync(Btc, history, Ct)).ShouldBe(10);
+        await WriteStreamAsync(run, End, 1, firstId: 90_000_000);
+
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogSessionStretchFilled") == 1, "the stretch after the last backfilled minute");
+
+        _server.KlineRequests[0]["startTime"].ShouldBe(UnixMs(lastBackfilled.AddMinutes(1)));
+        (await CandleStatsAsync(Btc)).Count.ShouldBe(10 + gap + 1);
+        NotNeeded("ADAUSDT").ShouldBe(1); // nothing stored at all: nothing to anchor a stretch on
+    }
+
+    [Fact]
+    public async Task NotStreamedInThisSession_IsCheckedAgainWithBackoff()
+    {
+        // A completed symbol with a stretch before the session that the session never streams (it does not trade).
+        var outageStart = End - IngestionWorker.SeedWindow - TimeSpan.FromHours(1);
+        SeedTrades("BTCUSDT", outageStart, (int)(End - outageStart).TotalMinutes);
+        var run = CreateRun(depth: TimeSpan.FromDays(20));
+        await MarkCompletedAsync(run, Btc, Ada, Eth);
+        await InsertStreamCandlesAsync(Btc, outageStart.AddMinutes(-10), 10);
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogSessionStretchFilled") == 1, "the stretch up to the session start");
+
+        // Ten minutes of polls: the re-checks double their interval (5 s, 10 s, 20 s, ...) instead of one per poll.
+        for (var i = 0; i < 120; i++)
+        {
+            _clock.Advance(BackfillWorker.LeaderPollInterval);
+            await Task.Delay(15, Ct);
+        }
+
+        await Task.Delay(200, Ct);
+        NotNeeded("BTCUSDT").ShouldBeInRange(2, 10);
+        _logs.Count("LogSessionStretchFilled").ShouldBe(1);
     }
 
     [Fact]
@@ -382,7 +463,7 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         await WaitForAsync(
             () =>
             {
-                _clock.Advance(BackfillWorker.LeaderPollInterval);
+                PollUntilTheWalkStarts(walksBefore: 1);
                 return _logs.Count("LogSessionStretchFilled") == 2;
             },
             "the stretch up to the first stream minute");
@@ -428,14 +509,14 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         await WaitForAsync(
             () =>
             {
-                _clock.Advance(BackfillWorker.LeaderPollInterval);
+                PollUntilTheWalkStarts(walksBefore: 0);
                 return _logs.Count("LogSessionStretchFilled") == 1;
             },
             "the new session's stretch");
 
         _server.KlineRequests[0]["startTime"].ShouldBe(UnixMs(lastStream));
-        _server.KlineRequests.Select(r => r["startTime"]).Distinct().Count().ShouldBe((gap + 999) / 1000);
-        _logs.Count("LogStarted").ShouldBe(1); // walked once
+        _server.KlineRequests.Count.ShouldBe((gap + 999) / 1000);
+        PollyEvents().ShouldBe(0); // no request timed out and was repeated
         (await CandleStatsAsync(Btc)).Count.ShouldBe(10 + gap + 1);
         _logs.Count("LogQueuedPending").ShouldBe(2);
     }
@@ -741,6 +822,20 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = minutes });
         (await command.ExecuteNonQueryAsync(Ct)).ShouldBe(minutes);
     }
+
+    // Wakes the worker with a poll until a stretch walk has started, and then leaves the clock alone: Polly's attempt
+    // timeout runs on this clock, so advancing it while a kline request is in flight can time the request out and
+    // repeat it (seen once as a 22nd request for a 21-page stretch).
+    private void PollUntilTheWalkStarts(int walksBefore)
+    {
+        if (_logs.Count("LogStarted") == walksBefore)
+        {
+            _clock.Advance(BackfillWorker.LeaderPollInterval);
+        }
+    }
+
+    // Kline requests that timed out or failed and were retried by the resilience pipeline.
+    private int PollyEvents() => _logs.Entries.Count(e => e.Category.StartsWith("Polly", StringComparison.Ordinal) && e.Level >= LogLevel.Warning);
 
     // How often the worker found no stretch to fill before a session's stream for the symbol.
     private int NotNeeded(string symbol) =>
