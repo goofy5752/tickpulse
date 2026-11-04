@@ -21,6 +21,8 @@ RUN npm run build
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY global.json Directory.Build.props Directory.Packages.props .editorconfig ./
+# Hand-maintained: one line per project under src/ that Api or Cli references. A new project needs a line here,
+# otherwise the restore below misses it and the --no-restore publish fails.
 COPY src/TickPulse.Domain/TickPulse.Domain.csproj                 src/TickPulse.Domain/
 COPY src/TickPulse.Application/TickPulse.Application.csproj       src/TickPulse.Application/
 COPY src/TickPulse.Infrastructure/TickPulse.Infrastructure.csproj src/TickPulse.Infrastructure/
@@ -40,11 +42,11 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine AS api
 # Npgsql probes for GSSAPI on every new connection; without the library each probe prints a load error to stderr.
 RUN apk add --no-cache krb5-libs
 WORKDIR /app
-ENV ASPNETCORE_HTTP_PORTS=8080 \
-    DOTNET_NOLOGO=1
-COPY --from=build --chown=root:root /out/api ./
-COPY --from=web   --chown=root:root /web/dist ./wwwroot
-# The files stay owned by root and read-only to the process; it runs as the image's unprivileged "app" user.
+ENV DOTNET_NOLOGO=1
+# COPY leaves the files owned by root, so the process (the image's unprivileged "app" user) cannot modify them.
+# The base image already listens on 8080 (ASPNETCORE_HTTP_PORTS).
+COPY --from=build /out/api ./
+COPY --from=web /web/dist ./wwwroot
 USER app
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
@@ -55,6 +57,6 @@ ENTRYPOINT ["dotnet", "TickPulse.Api.dll"]
 FROM mcr.microsoft.com/dotnet/runtime:10.0-alpine AS cli
 WORKDIR /app
 ENV DOTNET_NOLOGO=1
-COPY --from=build --chown=root:root /out/cli ./
+COPY --from=build /out/cli ./
 USER app
 ENTRYPOINT ["dotnet", "TickPulse.Cli.dll"]

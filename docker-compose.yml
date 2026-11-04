@@ -30,7 +30,9 @@ services:
       - tickpulse-db:/var/lib/postgresql/data
     # No host port: 5432 is often taken by a local PostgreSQL. Use `docker compose exec db psql -U tickpulse`.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      # Over TCP: during first-time init the image runs a temporary server on the Unix socket only, which a
+      # socket check would already report as ready.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -64,7 +66,13 @@ services:
       # The dashboards expect 15 s metric exports (the SDK default is 60 s).
       OTEL_METRIC_EXPORT_INTERVAL: "15000"
     ports:
-      - "${API_PORT:-8080}:8080"
+      # Loopback by default; API_BIND=0.0.0.0 exposes it to the LAN.
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     restart: unless-stopped
     logging: *logging
     networks: [tickpulse]
@@ -80,15 +88,13 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
     networks: [tickpulse]
 
-networks:
-  # Shared with the included observability services. Declared here with a fixed subnet, so
-  # ForwardedHeaders__KnownNetworks can name it.
-  tickpulse:
-    ipam:
-      config:
-        - subnet: ${TICKPULSE_SUBNET:-172.30.0.0/24}
+# The tickpulse network (fixed subnet ${TICKPULSE_SUBNET:-172.30.0.0/24}) is defined in the included
+# deploy/observability/compose.observability.yml.
 
 volumes:
   tickpulse-db: {}

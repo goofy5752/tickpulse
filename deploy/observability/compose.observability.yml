@@ -180,7 +180,12 @@ services:
     networks: [tickpulse]
 
 networks:
-  tickpulse: {}
+  # Shared with the root docker-compose.yml (db, api, cli), which includes this file. The api trusts
+  # this subnet for CF-Connecting-IP (ForwardedHeaders__KnownNetworks reads the same TICKPULSE_SUBNET).
+  tickpulse:
+    ipam:
+      config:
+        - subnet: ${TICKPULSE_SUBNET:-172.30.0.0/24}
 
 volumes:
   prometheus-data: {}
