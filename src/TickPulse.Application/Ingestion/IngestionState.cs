@@ -38,6 +38,7 @@ public sealed class IngestionState(TimeProvider clock)
     private DateTime? _connectedSinceUtc;
     private DateTime? _lastReconnectUtc;
     private DateTime? _nextRotationUtc;
+    private DateTime? _leaderSinceUtc;
     private double _lastLagMs;
 
     // Exponentially decaying event rate: every tick adds 1/τ, and the sum decays by e^(−Δt/τ).
@@ -72,6 +73,21 @@ public sealed class IngestionState(TimeProvider clock)
             lock (_gate)
             {
                 return _isLeader;
+            }
+        }
+    }
+
+    /// <summary>
+    /// When this process became leader for the current leadership session (UTC); <see langword="null"/> while not
+    /// leader. Connection changes within a session keep it; every new session gets a new value.
+    /// </summary>
+    public DateTime? LeaderSinceUtc
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _leaderSinceUtc;
             }
         }
     }
@@ -125,7 +141,10 @@ public sealed class IngestionState(TimeProvider clock)
         }
     }
 
-    /// <summary>Time from trade to storage of the newest tick in the last stored batch, in milliseconds.</summary>
+    /// <summary>
+    /// Time from trade to storage of the newest tick in the last stored batch that sampled it (streamed trades, not ones
+    /// recovered over REST), in milliseconds.
+    /// </summary>
     public double LastLagMs
     {
         get
@@ -146,6 +165,7 @@ public sealed class IngestionState(TimeProvider clock)
         lock (_gate)
         {
             _isLeader = false;
+            _leaderSinceUtc = null;
             _status = WsState.Standby;
             _connectedSinceUtc = null;
             _nextRotationUtc = null;
@@ -163,7 +183,7 @@ public sealed class IngestionState(TimeProvider clock)
     {
         lock (_gate)
         {
-            _isLeader = true;
+            BecomeLeader();
             _status = WsState.Connected;
             _connectedSinceUtc = connectedSinceUtc;
             _nextRotationUtc = nextRotationUtc;
@@ -190,8 +210,15 @@ public sealed class IngestionState(TimeProvider clock)
     /// Records a stored batch: <paramref name="stored"/> newly stored ticks, the lag of its newest tick, and the last
     /// price per symbol in it. A price older than the one already known (e.g. from a gap-fill) is ignored.
     /// </summary>
+    /// <param name="stored">Ticks the batch newly stored.</param>
+    /// <param name="lagMs">
+    /// Trade-to-storage lag of the batch's newest tick, or <see langword="null"/> when the batch says nothing about
+    /// ingest lag (trades recovered over REST long after they traded, or nothing new): <see cref="LastLagMs"/> keeps
+    /// the previous sample.
+    /// </param>
+    /// <param name="latest">The last price per symbol in the batch.</param>
     /// <exception cref="AggregateException">One or more <see cref="PriceUpdated"/> handlers threw; all were still called.</exception>
-    public void RecordBatch(int stored, double lagMs, IEnumerable<LivePrice> latest)
+    public void RecordBatch(int stored, double? lagMs, IEnumerable<LivePrice> latest)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(stored);
         ArgumentNullException.ThrowIfNull(latest);
@@ -201,7 +228,10 @@ public sealed class IngestionState(TimeProvider clock)
             var now = clock.GetTimestamp();
             _rate = (_rate * Decay(now)) + (stored / RateWindow.TotalSeconds);
             _rateTimestamp = now;
-            _lastLagMs = lagMs;
+            if (lagMs is { } lag)
+            {
+                _lastLagMs = lag;
+            }
         }
 
         List<LivePrice>? advanced = null;
@@ -220,13 +250,23 @@ public sealed class IngestionState(TimeProvider clock)
     }
 
     // Caller holds _gate.
+    private void BecomeLeader()
+    {
+        if (!_isLeader)
+        {
+            _isLeader = true;
+            _leaderSinceUtc = clock.GetUtcNow().UtcDateTime;
+        }
+    }
+
+    // Caller holds _gate.
     private double Decay(long now) => Math.Exp(-clock.GetElapsedTime(_rateTimestamp, now).TotalSeconds / RateWindow.TotalSeconds);
 
     private void SetLeaderStatus(WsState status)
     {
         lock (_gate)
         {
-            _isLeader = true;
+            BecomeLeader();
             _status = status;
             _connectedSinceUtc = null;
             _nextRotationUtc = null;

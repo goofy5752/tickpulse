@@ -230,12 +230,14 @@ public sealed partial class TickBatchWriter(
         }
 
         // Not ingest lag: a batch with nothing new (a gap-fill or rotation replay), or one whose newest tick was
-        // recovered over REST long after it traded (a gap-fill batch, which carries old trade times).
+        // recovered over REST long after it traded (a gap-fill batch, which carries old trade times). Neither the
+        // metric nor the status and health lag take a sample from those.
         var recovered = newestReceived - newest > RecoveredTickAge;
-        metrics.BatchStored(batch.Count, duration, stored > 0 && !recovered ? lagMs : null);
+        double? lagSample = stored > 0 && !recovered ? lagMs : null;
+        metrics.BatchStored(batch.Count, duration, lagSample);
         try
         {
-            state.RecordBatch(stored, lagMs, prices);
+            state.RecordBatch(stored, lagSample, prices);
         }
         catch (AggregateException ex)
         {

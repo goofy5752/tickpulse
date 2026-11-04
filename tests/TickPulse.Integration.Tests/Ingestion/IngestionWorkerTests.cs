@@ -258,6 +258,52 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RestartAfterAnOutageOfDays_GapFillsFromTheLastStoredTrade()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        // The last trades were stored three days ago (longer than a day, well inside the replay window), in a chunk the
+        // compression policy has compressed by now.
+        var t0 = Now.AddDays(-3);
+        await ExecuteSqlAsync(db, string.Create(
+            CultureInfo.InvariantCulture,
+            $"""
+            INSERT INTO price_ticks (symbol_id, agg_trade_id, price, quantity, trade_time, ingested_at)
+            SELECT s.id, i, 100 + i, 1, '{t0:O}'::timestamptz + i * interval '1 millisecond', now()
+              FROM symbols s, generate_series(1, 5) AS i
+             WHERE s.name = 'BTCUSDT'
+            """));
+        await ExecuteSqlAsync(db, "SELECT compress_chunk(c) FROM show_chunks('price_ticks') AS c");
+        try
+        {
+            for (var i = 6; i <= 10; i++)
+            {
+                _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i)); // while no instance ran
+            }
+
+            for (var i = 11; i <= 13; i++)
+            {
+                _server.AddTrade("BTCUSDT", i, 100m + i, Now.AddMinutes(-10).AddMilliseconds(i));
+            }
+
+            await using var host = await StartBtcOnlyAsync();
+            for (var i = 14; i <= 18; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, Now.AddSeconds(-1));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 18);
+            (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 18).Select(i => (long)i));
+            (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(13); // 1..5 were stored without candles
+            _server.ReceivedRequests.ShouldContain("/api/v3/aggTrades?symbol=BTCUSDT&fromId=6&limit=1000");
+        }
+        finally
+        {
+            await ExecuteSqlAsync(db, "SELECT decompress_chunk(c, if_compressed => true) FROM show_chunks('price_ticks') AS c");
+        }
+    }
+
+    [Fact]
     public async Task FirstStreamedMinute_IsCompletedFromRest()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -792,6 +838,126 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Rotation_NewLinkSilent_RestBehind_GapStaysOpenUntilTheRetiredLinksLastId()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var t0 = Now.AddMinutes(-5);
+        await ExecuteSqlAsync(db, "UPDATE symbols SET is_active = false WHERE name <> 'BTCUSDT'");
+        var logs = new LogCapture();
+        DroppingTickWriter? dropping = null;
+        await using var services = IngestionServices(
+            logs,
+            overrides: new Dictionary<string, string?> { ["Ingestion:ReconcileInterval"] = "00:00:01", ["Ingestion:RotationInterval"] = "00:00:03" },
+            replace: s => s.AddSingleton<ITickWriter>(sp => dropping = new DroppingTickWriter(
+                new TickWriter(sp.GetRequiredKeyedService<NpgsqlDataSource>(DependencyInjection.TickWriterDataSourceKey), TimeProvider.System),
+                dropFromId: 6)));
+        var state = services.GetRequiredService<IngestionState>();
+        var watermarks = services.GetRequiredService<GapFillWatermarks>();
+        using var worker = NewWorker(services, new PostgresLeaderLock(db.ConnectionString));
+        await worker.StartAsync(ct);
+        try
+        {
+            await _server.WaitUntilAsync(s => s.ActiveConnections >= 1 && s.SubscribedStreams.SetEquals([Stream("BTCUSDT")]), WaitTimeout, ct);
+            await WaitForAsync(() => state.Status == WsState.Connected, "connected");
+            for (var i = 1; i <= 5; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 5);
+
+            // The link streams 6..15 and every batch holding them is dropped. REST has 6..10 only (it lags).
+            for (var i = 6; i <= 10; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            for (var i = 11; i <= 15; i++)
+            {
+                await _server.PushRawAsync(AggTradeJson("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i)));
+            }
+
+            await WaitForAsync(() => dropping.ShouldNotBeNull().MaxSeen >= 15, "the writer dropped everything up to 15");
+            dropping!.Dropping = false;
+            await WaitForTradeCountAsync(db, "BTCUSDT", 10); // the fill on that link got 6..10 and stays open (bound 16)
+
+            // A rotation replaces the link. The new one streams nothing for the symbol, so it has no boundary of its own;
+            // the retired link delivered up to 15, so a lagging REST page from 11 must not close the gap.
+            static bool From11(string r) => r == "/api/v3/aggTrades?symbol=BTCUSDT&fromId=11&limit=1000";
+            var rotations = logs.Count("LogRotated");
+            await WaitForAsync(() => logs.Count("LogRotated") > rotations, "a rotation");
+            var before = _server.ReceivedRequests.Count;
+            await _server.WaitUntilAsync(s => s.ReceivedRequests.Skip(before).Count(From11) >= 3, WaitTimeout, ct);
+            watermarks.IsPending("BTCUSDT").ShouldBeTrue();
+
+            // REST catches up: 11..15 are recovered with nothing more on the stream.
+            for (var i = 11; i <= 15; i++)
+            {
+                _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 15);
+            await WaitForAsync(() => !watermarks.IsPending("BTCUSDT"), "the gap closed");
+            for (var i = 16; i <= 20; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 20);
+            (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 20).Select(i => (long)i));
+            (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(20);
+            state.LastReconnectUtc.ShouldBeNull();
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task RemovedRightAfterACleanRotation_TailsOutFromTheRetiredLinksLastId()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await ExecuteSqlAsync(db, "UPDATE symbols SET is_active = false WHERE name <> 'BTCUSDT'");
+        var clock = new ShiftedClock();
+        await using var host = await StartAsync(
+            db,
+            _server,
+            new Dictionary<string, string?> { ["Ingestion:RotationInterval"] = "00:00:05" },
+            configureServices: s => s.AddSingleton<TimeProvider>(clock));
+        await _server.WaitUntilAsync(s => s.ActiveConnections == 1 && s.SubscribedStreams.SetEquals([Stream("BTCUSDT")]), WaitTimeout, ct);
+        await WaitForAsync(() => host.State.Status == WsState.Connected, "connected");
+        var minute = Period.OneMinute.AlignDown(clock.GetUtcNow().UtcDateTime).AddMinutes(1);
+        for (var i = 1; i <= 3; i++)
+        {
+            await _server.PushTradeAsync("BTCUSDT", i, 100m + i, minute.AddSeconds(10).AddMilliseconds(i));
+        }
+
+        await WaitForTradeCountAsync(db, "BTCUSDT", 3);
+
+        // Ten seconds before the end of the minute: the jump makes the rotation due at once, and the next one is five
+        // seconds away. The rotation replaces the link that delivered 1..3 cleanly; the new one streams nothing for the
+        // symbol.
+        var rotations = host.Logs.Count("LogRotated");
+        clock.Offset = minute.AddSeconds(50) - TimeProvider.System.GetUtcNow().UtcDateTime;
+        await WaitForAsync(() => host.Logs.Count("LogRotated") > rotations, "a rotation");
+        await _server.WaitUntilAsync(s => s.ActiveConnections == 1, WaitTimeout, ct);
+
+        // The symbol is removed before the next rotation. The rest of the minute trades after the UNSUBSCRIBE; only REST
+        // has it. The new link never delivered the symbol: the tail-out starts after the id the retired link handed over.
+        _server.AddTrade("BTCUSDT", 4, 104m, minute.AddSeconds(58.5));
+        _server.AddTrade("BTCUSDT", 5, 105m, minute.AddSeconds(59.9));
+        (await host.Symbols.DeactivateAsync(Symbol("BTCUSDT"), ct)).ShouldBeTrue();
+        host.Signal.Notify();
+        await _server.WaitUntilAsync(s => !s.SubscribedStreams.Contains(Stream("BTCUSDT")), WaitTimeout, ct);
+
+        await WaitForAsync(() => host.Logs.Count("LogTailedOut") == 1, "the removal minute's tail-out");
+        await WaitForTradeCountAsync(db, "BTCUSDT", 5);
+        (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe([1L, 2L, 3L, 4L, 5L]);
+        _server.ReceivedRequests.ShouldContain("/api/v3/aggTrades?symbol=BTCUSDT&fromId=4&limit=1000");
+    }
+
+    [Fact]
     public async Task LeadInFailed_IsRetriedOnTheNextConnection()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -1040,6 +1206,15 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         {
             await worker.StopAsync(CancellationToken.None);
         }
+    }
+
+    [Fact]
+    public void SeedWindow_LeavesTheFillADayInsideTheReplayWindow()
+    {
+        // Every trade a seeded fill recovers is still insertable a day after the session started.
+        (IngestionWorker.SeedWindow + IngestionWorker.SeedFillHeadroom).ShouldBe(TickWriter.ReplayWindow);
+        IngestionWorker.SeedFillHeadroom.ShouldBe(TimeSpan.FromDays(1));
+        IngestionWorker.SeedWindow.ShouldBeGreaterThan(TimeSpan.FromDays(1)); // an outage of days is recovered from trades
     }
 
     [Theory]

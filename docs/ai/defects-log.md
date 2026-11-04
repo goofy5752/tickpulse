@@ -55,7 +55,7 @@ if the final version differs.
 | [RV-26](#rv-26) | `http2` on the vhosts would switch HTTP/2 on for every site on the host's port 443 | Review (T25) | Important | #11 |
 | [RV-27](#rv-27) | A rollback restored the image but not the deployed files | Review (T25) | Important | #11 |
 | [F1](#f1) | A load burst knocked out telemetry and fired the WebSocket alert falsely | E2E run | Important | #14 |
-| [F2](#f2) | Trades lost on every API restart, redeploy or leadership handover | E2E run | Important | #20 |
+| [F2](#f2) | Trades lost on every API restart, redeploy or leadership handover | E2E run | Important | #20, #26 |
 | [F3](#f3) | `change24hPercent` wildly wrong while a backfill runs | E2E run | Important | #15 |
 | [F4](#f4) | Long-period analytics aggregated minutes at query time (p95 83 ms) | E2E run | Important | #12 |
 | [F5](#f5) | Uncaught `AbortError`s in the dashboard console | E2E run | Important | #13 |
@@ -395,7 +395,7 @@ if the final version differs.
 
 ### F2
 
-**Trades lost on every API restart, redeploy or leadership handover** · E2E run · Important · PR #20
+**Trades lost on every API restart, redeploy or leadership handover** · E2E run · Important · PR #20, PR #26
 
 - **Symptom:** after `docker restart` of the api, `agg_trade_id` gaps (13 BTC and 31 ETH trades in one
   restart) and restart-minute candles that differed from Binance.
@@ -416,8 +416,30 @@ if the final version differs.
   stalled connection merged without a gap; a lagging REST page closed a gap inside the live stream.
   Round 4 replaced the accumulated flags with the model above. A live re-check on the local stack found
   0 gaps, 0 missing ids and 0 duplicates over restarts.
-- **Known limitation:** a hole below the stored maximum that only another, or a crashed, process knew
-  about is invisible to the seed. Tracked as [issue #19](https://github.com/goofy5752/tickpulse/issues/19).
+- **Known limitation:** a hole below the newest stored trade that only another, or a crashed, process
+  knew about is invisible to the seed.
+- **What the final review found** (fixed in PR #26):
+  - *An outage longer than the 1-day seed window left a permanent hole.* The symbol got only a lead-in,
+    and the backfill skipped completed symbols. The seed now looks back 12 days: the 13-day replay
+    window less a day of headroom for the fill. It reads the newest trade with an ordered ChunkAppend,
+    with sorts disabled so the plan cannot fall back to a top-N sort over every chunk. The old
+    `max(agg_trade_id)` decompressed and sorted every compressed chunk in the window.
+    Every leadership session queues every active symbol in the backfill worker. Klines then fill the
+    minutes between the last stored minute and the session's first streamed minute when the outage was
+    longer than the seed window. The PR review found a boundary mismatch: the stretch was skipped when its last
+    streamed minute *ended* after the seed bound, though its trades could all lie before it, which left up to
+    12 days uncovered. The check is now on the minute's start. A completed symbol that never streamed gets
+    its stretch too, and re-checks of a symbol the session has not streamed back off from 5 s to 10 minutes.
+  - *Rotation race under lagging REST*
+    ([issue #19](https://github.com/goofy5752/tickpulse/issues/19)). A new link that had not streamed a
+    symbol gave its fill no boundary, so a short REST page closed the gap below ids that only the
+    retired link had delivered. A clean rotation now hands the retired link's last ids to the new link,
+    and a short page completes the fill only past them.
+  - *Gap-fill batches spiked the ingest lag on the stats endpoint and the dashboard.* Only the metric
+    skipped them; the state now skips them too.
+  - *Replays into compressed chunks were untested.* The 12-day window reaches chunks compressed after 2
+    days. A test now compresses a chunk, replays its ticks, and checks that nothing is inserted and
+    that candles and rollups are unchanged.
 - **Test:** `IngestionWorkerTests.Restart_GapFillsTradesMissedWhileDown_ExactlyOnce`,
   `HandoverAndBack_FillsFromTheOtherLeadersLastStoredTrade`,
   `SeededFill_ConnectionBreaksDuringIt_TradesAfterTheDeadConnectionAreRecovered`,
@@ -427,7 +449,16 @@ if the final version differs.
   `Rotation_OverAStalledConnection_FillsTheTradesItMissed`,
   `DroppedBatch_RestBehindTheStream_FillDoesNotCloseTheGap_UntilRestCatchesUp`, the
   `GapFillWatermarksTests` rules (`Seed_*`, `NoteStored_*`, `Filled_*`, `Merge_*`, `Verify_*`),
-  `GapFillerTests.Fill_ShortPage_*` and `Fill_EmptyPage_*`, `MarketDataQueriesTests.LatestTradeIds*`.
+  `GapFillerTests.Fill_ShortPage_*`, `Fill_EmptyPage_*` and `Fill_NoStreamTradeYet_*`,
+  `MarketDataQueriesTests.LatestTradeIds*`; for the final-review findings
+  `IngestionWorkerTests.RestartAfterAnOutageOfDays_GapFillsFromTheLastStoredTrade`,
+  `Rotation_NewLinkSilent_RestBehind_GapStaysOpenUntilTheRetiredLinksLastId`,
+  `SeedWindow_LeavesTheFillADayInsideTheReplayWindow`, `BackfillWorkerTests.OutageLongerThanTheSeedWindow_*`,
+  `OutageInsideTheSeedWindow_IsLeftToTheTradeGapFill`, `OutageAtTheSeedWindowBoundary_FillsExactlyWhenTheSeedFindsNothing`,
+  `CompletedSymbolThatNeverStreamed_FillsUpToThisSessionsStream`, `NotStreamedInThisSession_IsCheckedAgainWithBackoff`,
+  `NewLeadershipSession_EvenOneTheWorkerNeverSawStart_ChecksCompletedSymbolsAgain`,
+  `TickBatchWriterTests.Run_RecoveredBatch_RecordsNoLagSample`,
+  `TickWriterTests.WriteBatch_ReplayIntoACompressedChunk_InsertsNothingAndLeavesCandlesAndRollups`.
 
 ### F3
 
@@ -724,8 +755,11 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
   column `symbols.reactivated_at`), not at the first stream row after the deactivation: when the UNSUBSCRIBE took
   effect late, the old stream and its tail-out store a minute after `deactivated_at`, and the stretch would have
   ended there, unfilled.
+  Combined with the rotation handover of [F2](#f2) (PR #26): a symbol removed right after a clean rotation,
+  before the new connection delivered it, tails out from the id the retired connection handed over.
 - **Test:** `IngestionWorkerTests.RemovedSymbol_LastStreamedMinuteIsCompletedFromRest`,
-  `GapFillerTests.TailOut_*`, `BackfillWorkerTests.Reactivated_LateUnsubscribe_StillFillsTheInactiveStretch`.
+  `GapFillerTests.TailOut_*`, `BackfillWorkerTests.Reactivated_LateUnsubscribe_StillFillsTheInactiveStretch`,
+  `IngestionWorkerTests.RemovedRightAfterACleanRotation_TailsOutFromTheRetiredLinksLastId`.
 
 ### N3
 

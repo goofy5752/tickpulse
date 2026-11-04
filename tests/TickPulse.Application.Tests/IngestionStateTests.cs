@@ -54,6 +54,31 @@ public sealed class IngestionStateTests
     }
 
     [Fact]
+    public void LeaderSinceUtc_MarksTheStartOfEachLeadershipSession()
+    {
+        var state = new IngestionState(_clock);
+        state.LeaderSinceUtc.ShouldBeNull();
+
+        state.SetConnecting();
+        state.LeaderSinceUtc.ShouldBe(T0);
+        state.LeaderSinceUtc!.Value.Kind.ShouldBe(DateTimeKind.Utc);
+
+        // Connection changes within the session keep it.
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        state.SetConnected(T0, T0.AddHours(23));
+        state.SetDisconnected();
+        state.SetConnecting();
+        state.LeaderSinceUtc.ShouldBe(T0);
+
+        // A new session after standing by starts a new one.
+        state.SetStandby();
+        state.LeaderSinceUtc.ShouldBeNull();
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        state.SetConnecting();
+        state.LeaderSinceUtc.ShouldBe(T0.AddMinutes(2));
+    }
+
+    [Fact]
     public void TicksPerSecond_SteadyRate_ConvergesThenDecays()
     {
         var state = new IngestionState(_clock);
@@ -90,6 +115,19 @@ public sealed class IngestionStateTests
         state.Latest["ETHUSDT"].Price.ShouldBe(3000m);
         state.LastLagMs.ShouldBe(97);
         raised.Select(p => p.Price).ShouldBe([100m, 3000m, 101m]);
+    }
+
+    [Fact]
+    public void RecordBatch_WithoutALagSample_KeepsTheLastLag()
+    {
+        var state = new IngestionState(_clock);
+
+        state.RecordBatch(1, 120.5, []);
+        state.RecordBatch(3, null, [new("BTCUSDT", 100m, T0)]); // a recovered batch: its age is not ingest lag
+
+        state.LastLagMs.ShouldBe(120.5);
+        state.TicksPerSecond.ShouldBe(4 / IngestionState.RateWindow.TotalSeconds, 1e-9);
+        state.Latest["BTCUSDT"].Price.ShouldBe(100m);
     }
 
     [Fact]

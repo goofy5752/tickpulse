@@ -53,15 +53,39 @@ public sealed partial class GapFiller(
     /// </param>
     /// <param name="output">The tick channel.</param>
     /// <param name="ct">Cancels the fill (leadership lost, shutdown).</param>
-    public async Task<GapFillResult> FillAsync(
+    public Task<GapFillResult> FillAsync(
         int symbolId,
         string symbol,
         long lastKnownId,
         Func<long?> firstStreamId,
         ChannelWriter<Tick> output,
+        CancellationToken ct) =>
+        FillAsync(symbolId, symbol, lastKnownId, firstStreamId, static () => null, output, ct);
+
+    /// <summary>Fills the gap after <paramref name="lastKnownId"/> for one symbol.</summary>
+    /// <param name="symbolId">Database id of the symbol.</param>
+    /// <param name="symbol">Symbol name.</param>
+    /// <param name="lastKnownId">The last trade id stored before the gap.</param>
+    /// <param name="firstStreamId">As in the overload without <paramref name="deliveredUpTo"/>.</param>
+    /// <param name="deliveredUpTo">
+    /// While <paramref name="firstStreamId"/> is not known: the last id that connections this one replaced delivered
+    /// (or <see langword="null"/>). The live connection carries every trade after it, so a short REST page counts as
+    /// the end of the data only once it reached past that id; before, REST lags. It never stops what is emitted.
+    /// Read again for every page.
+    /// </param>
+    /// <param name="output">The tick channel.</param>
+    /// <param name="ct">Cancels the fill (leadership lost, shutdown).</param>
+    public async Task<GapFillResult> FillAsync(
+        int symbolId,
+        string symbol,
+        long lastKnownId,
+        Func<long?> firstStreamId,
+        Func<long?> deliveredUpTo,
+        ChannelWriter<Tick> output,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(firstStreamId);
+        ArgumentNullException.ThrowIfNull(deliveredUpTo);
         ArgumentNullException.ThrowIfNull(output);
         if (!SymbolName.TryCreate(symbol, out var name))
         {
@@ -73,7 +97,7 @@ public sealed partial class GapFiller(
         activity?.SetTag("tickpulse.gapfill.from_id", lastKnownId + 1);
         try
         {
-            var result = await FillPagesAsync(symbolId, name, lastKnownId, firstStreamId, output, ct).ConfigureAwait(false);
+            var result = await FillPagesAsync(symbolId, name, lastKnownId, firstStreamId, deliveredUpTo, output, ct).ConfigureAwait(false);
             activity?.SetTag("tickpulse.gapfill.emitted", result.Emitted);
             activity?.SetTag("tickpulse.gapfill.complete", result.Complete);
             return result;
@@ -90,6 +114,7 @@ public sealed partial class GapFiller(
         SymbolName name,
         long lastKnownId,
         Func<long?> firstStreamId,
+        Func<long?> deliveredUpTo,
         ChannelWriter<Tick> output,
         CancellationToken ct)
     {
@@ -132,9 +157,10 @@ public sealed partial class GapFiller(
 
                 if (trades.Count < PageSize)
                 {
-                    // Nothing more on REST. That is the end of the data only when REST has caught up with the stream;
-                    // otherwise it lags behind, and the ids up to the boundary are still missing.
-                    var reached = before ?? boundary;
+                    // Nothing more on REST. That is the end of the data only when REST has caught up with the stream
+                    // (or, before the live connection delivered anything, with what the connections it replaced
+                    // delivered); otherwise it lags behind, and the ids up to the boundary are still missing.
+                    var reached = before ?? boundary ?? deliveredUpTo() + 1;
                     if (reached is null || next >= reached)
                     {
                         return Done(name, emitted, lastEmitted, page);

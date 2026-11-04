@@ -15,6 +15,7 @@ namespace TickPulse.Infrastructure.Ingestion;
 internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, IdSpan> _spans = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, long> _handedOver = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTime> _lastTimes = new(StringComparer.OrdinalIgnoreCase);
 
     public BinanceWebSocketConnection Connection { get; } = connection;
@@ -55,11 +56,32 @@ internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsync
     /// <summary>The first trade id this link delivered for the symbol, if any yet.</summary>
     public long? FirstId(string symbol) => _spans.TryGetValue(symbol, out var span) ? span.First : null;
 
+    /// <summary>
+    /// The last trade id delivered for the symbol by the links this one replaced in clean rotations (the retired link,
+    /// and what that one had taken over in turn), if any. This link was subscribed before the retired one closed, so it
+    /// carries every trade after that id, whether or not it has delivered one yet.
+    /// </summary>
+    public long? HandedOverId(string symbol) => _handedOver.TryGetValue(symbol, out var id) ? id : null;
+
+    /// <summary>
+    /// Takes over the last ids of <paramref name="retired"/>, a link this one replaced cleanly, once its pump has ended
+    /// (its spans are final then). Called before the retirement completes, so a gap-fill that waits for it sees them.
+    /// </summary>
+    public void TakeOver(StreamLink retired)
+    {
+        ArgumentNullException.ThrowIfNull(retired);
+        foreach (var (symbol, id) in retired._handedOver.Concat(retired._spans.Select(s => KeyValuePair.Create(s.Key, s.Value.Last))))
+        {
+            _handedOver.AddOrUpdate(symbol, static (_, id) => id, static (_, known, id) => Math.Max(known, id), id);
+        }
+    }
+
     /// <summary>Drops the bookkeeping of a symbol that is no longer monitored. Control loop only.</summary>
     public void Forget(string symbol)
     {
         GapFillHandled.Remove(symbol);
         _spans.TryRemove(symbol, out _);
+        _handedOver.TryRemove(symbol, out _);
         _lastTimes.TryRemove(symbol, out _);
     }
 

@@ -101,18 +101,32 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
 
     internal const string LastMinuteBeforeSql = "SELECT max(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND bucket_start < $2";
 
+    // Reads the partial index ix_candles_1m_stream, backwards from $2.
+    internal const string LastStreamMinuteBeforeSql =
+        "SELECT max(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 1 AND bucket_start < $2";
+
     internal const string BackfillRangeSql =
         "SELECT min(bucket_start), max(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 2 AND bucket_start < $2";
 
-    // $1 the lower trade-time bound (exclusive). Per active symbol, one backward probe of the primary key
-    // (symbol_id, agg_trade_id, trade_time) in each chunk that the bound leaves, so only the recent chunks are read.
+    // Runs before LatestTradeIdsSql in its transaction. The ordered plan below is cost-based: with few rows per chunk a
+    // top-N sort over every chunk looks as cheap, and stale statistics after an outage could pick it with real
+    // volumes, decompressing every compressed chunk. With sorts disabled only the ordered path is left.
+    internal const string LatestTradeIdsSettingsSql = "SET LOCAL enable_sort = off";
+
+    // $1 the lower trade-time bound (exclusive). Per active symbol, the newest trade: an ordered ChunkAppend reads
+    // the chunks newest first through (symbol_id, trade_time DESC), or the compressed batches' trade-time metadata,
+    // and stops at the first row, so older chunks are never read and compressed ones never decompressed. A
+    // max(agg_trade_id) instead needs one row from every chunk in the bound in id order, which on a compressed chunk
+    // means decompressing and sorting all of the symbol's rows there.
     internal const string LatestTradeIdsSql = """
         SELECT s.name, t.id
           FROM symbols AS s
          CROSS JOIN LATERAL (
-               SELECT max(agg_trade_id) AS id FROM price_ticks
-                WHERE symbol_id = s.id AND trade_time > $1) AS t
-         WHERE s.is_active AND t.id IS NOT NULL
+               SELECT agg_trade_id AS id FROM price_ticks
+                WHERE symbol_id = s.id AND trade_time > $1
+                ORDER BY trade_time DESC
+                LIMIT 1) AS t
+         WHERE s.is_active
         """;
 
     /// <inheritdoc />
@@ -289,6 +303,17 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     }
 
     /// <inheritdoc />
+    /// <remarks>One endpoint scan of the partial stream index, backwards from <paramref name="beforeUtc"/>.</remarks>
+    public async Task<DateTime?> LastStreamMinuteBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct)
+    {
+        RequireUtc(beforeUtc, nameof(beforeUtc));
+        await using var command = dataSource.CreateCommand(LastStreamMinuteBeforeSql);
+        command.Parameters.Add(Integer(symbolId));
+        command.Parameters.Add(TimestampTz(beforeUtc));
+        return await command.ExecuteScalarAsync(ct) is DateTime minute ? minute : null;
+    }
+
+    /// <inheritdoc />
     /// <remarks>Two primary-key endpoint scans (min forwards, max backwards from <paramref name="beforeUtc"/>).</remarks>
     public async Task<MinuteRange?> BackfillRangeBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct)
     {
@@ -304,21 +329,34 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
 
     /// <inheritdoc />
     /// <remarks>
-    /// Keep <paramref name="sinceUtc"/> recent: the bound decides how many chunks are probed, and a bound inside the
-    /// compressed chunks makes the probe decompress them.
+    /// The id of each symbol's newest trade by trade time. Binance assigns aggTrade ids in trade-time order, so that is
+    /// the highest stored id; where ids are out of order it is a lower one, which is safe for a gap-fill start (it only
+    /// reads a few stored trades again). The lookup reads the newest chunk that holds a trade of the symbol, compressed
+    /// or not, and probes each newer, empty chunk once; the bound only limits how far back a symbol without recent
+    /// trades is looked for.
     /// </remarks>
     public async Task<IReadOnlyDictionary<string, long>> GetLatestTradeIdsAsync(DateTime sinceUtc, CancellationToken ct)
     {
         RequireUtc(sinceUtc, nameof(sinceUtc));
-        await using var command = dataSource.CreateCommand(LatestTradeIdsSql);
-        command.Parameters.Add(TimestampTz(sinceUtc));
-        var ids = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        await using var connection = await dataSource.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await using (var settings = new NpgsqlCommand(LatestTradeIdsSettingsSql, connection, transaction))
         {
-            ids[reader.GetString(0)] = reader.GetInt64(1);
+            await settings.ExecuteNonQueryAsync(ct);
         }
 
+        var ids = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        await using (var command = new NpgsqlCommand(LatestTradeIdsSql, connection, transaction))
+        {
+            command.Parameters.Add(TimestampTz(sinceUtc));
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                ids[reader.GetString(0)] = reader.GetInt64(1);
+            }
+        }
+
+        await transaction.CommitAsync(ct);
         return ids;
     }
 

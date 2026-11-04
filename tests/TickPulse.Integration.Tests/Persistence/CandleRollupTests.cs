@@ -292,9 +292,11 @@ public sealed class CandleRollupTests(TimescaleFixture db) : IAsyncLifetime
             MarketDataQueries.DailyClosesSql, Int(Btc), Interval(Period.OneWeek.Length), Ts(Period.Origin), Ts(day), Ts(Now.Date));
 
         candles.ShouldContain("InitPlan");
-        candles.ShouldMatch(@"(Index|Index Only|Bitmap Index) Scan using pk_candles_1d on candles_1d\b[\s\S]*Index Cond: \(\(symbol_id = [^)]+\) AND \(bucket_start >= \(\(InitPlan \d+\)");
+        // A plain or index-only scan prints "Scan using <index> on <table>", a bitmap scan "Bitmap Index Scan on <index>".
+        const string PrimaryKeyScan = @"(?:(?:Index|Index Only) Scan using pk_candles_1d on candles_1d|Bitmap Index Scan on pk_candles_1d)\b";
+        candles.ShouldMatch(PrimaryKeyScan + @"[\s\S]*Index Cond: \(\(symbol_id = [^)]+\) AND \(bucket_start >= \(\(InitPlan \d+\)", customMessage: candles);
         candles.ShouldNotContain("candles_1m");
-        closes.ShouldMatch(@"(Index|Index Only|Bitmap Index) Scan using pk_candles_1d on candles_1d");
+        closes.ShouldMatch(PrimaryKeyScan, customMessage: closes);
         closes.ShouldNotContain("candles_1m");
     }
 

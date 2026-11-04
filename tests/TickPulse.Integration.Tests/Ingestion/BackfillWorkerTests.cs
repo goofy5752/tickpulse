@@ -12,6 +12,7 @@ using TickPulse.Domain;
 using TickPulse.Infrastructure;
 using TickPulse.Infrastructure.Backfill;
 using TickPulse.Infrastructure.Binance;
+using TickPulse.Infrastructure.Ingestion;
 using TickPulse.Infrastructure.Persistence;
 using TickPulse.Infrastructure.Telemetry;
 using TickPulse.Integration.Tests.Fixtures;
@@ -374,6 +375,218 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task OutageLongerThanTheSeedWindow_CompletedSymbol_FillsTheStretchBeforeThisSessionsStream()
+    {
+        // BTC streamed until an hour before the seed window (12 days), so the session seed finds no trade to recover from:
+        // the process was down that long. This session streams again from the current minute.
+        var outageStart = End - IngestionWorker.SeedWindow - TimeSpan.FromHours(1);
+        var gap = (int)(End - outageStart).TotalMinutes;
+        var prices = SeedTrades("BTCUSDT", outageStart, gap);
+        var run = CreateRun(depth: TimeSpan.FromDays(20));
+        await MarkCompletedAsync(run, Btc, Ada, Eth);
+        await InsertStreamCandlesAsync(Btc, outageStart.AddMinutes(-10), 10);
+        await WriteStreamAsync(run, End, 1, firstId: 90_000_000);
+
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogSessionStretchFilled") == 1, "the stretch before this session's stream");
+
+        // Exactly the minutes between the last stored one and this session's first: klines, in pages.
+        var requests = _server.KlineRequests;
+        requests.Count.ShouldBe((gap + 999) / 1000);
+        PollyEvents().ShouldBe(0);
+        requests[0]["startTime"].ShouldBe(UnixMs(outageStart));
+        requests.ShouldAllBe(r => r["symbol"] == "BTCUSDT" && r["endTime"] == (long.Parse(UnixMs(End), CultureInfo.InvariantCulture) - 1).ToString(CultureInfo.InvariantCulture));
+        var stats = await CandleStatsAsync(Btc);
+        stats.Count.ShouldBe(10 + gap + 1);
+        stats.Backfilled.ShouldBe(gap);
+        (await CloseAtAsync(Btc, End.AddMinutes(-1))).ShouldBe(prices[^1]);
+        var btc = await FindAsync(run, Btc);
+        btc.BackfillStatus.ShouldBe(BackfillStatus.Completed);
+        btc.BackfilledFromUtc.ShouldBe(From); // unchanged: the stretch is not part of the history backfill
+    }
+
+    [Theory]
+    [InlineData(-30, true)] // the last trade lies 30 s before the seed bound: the seed misses it, klines must fill
+    [InlineData(30, false)] // 30 s after it: the seed finds it, and the trade gap-fill rebuilds the stretch
+    public async Task OutageAtTheSeedWindowBoundary_FillsExactlyWhenTheSeedFindsNothing(int secondsFromBound, bool filled)
+    {
+        // Leadership starts 40 s into the minute, so the seed bound (since − SeedWindow) lies inside a minute: the last
+        // trade's minute can start before the bound while the trade itself is older than it (or not).
+        var run = CreateRun(depth: TimeSpan.FromDays(20), leader: false);
+        await MarkCompletedAsync(run, Btc, Ada, Eth);
+        _clock.Advance(TimeSpan.FromSeconds(35)); // End + 40 s
+        var since = _clock.GetUtcNow().UtcDateTime;
+        var lastTrade = since - IngestionWorker.SeedWindow + TimeSpan.FromSeconds(secondsFromBound);
+        var lastMinute = Period.OneMinute.AlignDown(lastTrade);
+        var gap = (int)(End - lastMinute).TotalMinutes - 1;
+        SeedTrades("BTCUSDT", lastMinute.AddMinutes(1), gap);
+        await InsertStreamCandlesAsync(Btc, lastMinute.AddMinutes(-9), 10);
+        await WriteStreamAsync(run, End, 1, firstId: 90_000_000);
+        run.State.SetConnecting();
+        run.State.LeaderSinceUtc.ShouldBe(since);
+
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogSessionStretchFilled") == 1 || NotNeeded("BTCUSDT") == 1, "BTC checked");
+
+        if (filled)
+        {
+            _logs.Count("LogSessionStretchFilled").ShouldBe(1);
+            _server.KlineRequests[0]["startTime"].ShouldBe(UnixMs(lastMinute.AddMinutes(1)));
+            (await CandleStatsAsync(Btc)).Count.ShouldBe(10 + gap + 1);
+        }
+        else
+        {
+            NotNeeded("BTCUSDT").ShouldBe(1);
+            _server.KlineRequests.ShouldBeEmpty();
+        }
+    }
+
+    [Fact]
+    public async Task CompletedSymbolThatNeverStreamed_FillsUpToThisSessionsStream()
+    {
+        // Backfilled up to two weeks ago, then the process went down before the symbol streamed at all: no trade of it
+        // is stored, so no seed covers anything after its last backfilled minute.
+        var lastBackfilled = End - TimeSpan.FromDays(14);
+        var gap = (int)(End - lastBackfilled).TotalMinutes - 1;
+        SeedTrades("BTCUSDT", lastBackfilled.AddMinutes(1), gap);
+        var run = CreateRun(depth: TimeSpan.FromDays(20));
+        await MarkCompletedAsync(run, Btc, Ada, Eth);
+        Kline[] history = [.. Enumerable.Range(0, 10).Select(i => new Kline(lastBackfilled.AddMinutes(i - 9), 1m, 1m, 1m, 1m, 0m, 0m))];
+        (await run.Services.GetRequiredService<ICandleWriter>().InsertBackfillAsync(Btc, history, Ct)).ShouldBe(10);
+        await WriteStreamAsync(run, End, 1, firstId: 90_000_000);
+
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogSessionStretchFilled") == 1, "the stretch after the last backfilled minute");
+
+        _server.KlineRequests[0]["startTime"].ShouldBe(UnixMs(lastBackfilled.AddMinutes(1)));
+        (await CandleStatsAsync(Btc)).Count.ShouldBe(10 + gap + 1);
+        NotNeeded("ADAUSDT").ShouldBe(1); // nothing stored at all: nothing to anchor a stretch on
+    }
+
+    [Fact]
+    public async Task NotStreamedInThisSession_IsCheckedAgainWithBackoff()
+    {
+        // A completed symbol with a stretch before the session that the session never streams (it does not trade).
+        var outageStart = End - IngestionWorker.SeedWindow - TimeSpan.FromHours(1);
+        SeedTrades("BTCUSDT", outageStart, (int)(End - outageStart).TotalMinutes);
+        var run = CreateRun(depth: TimeSpan.FromDays(20));
+        await MarkCompletedAsync(run, Btc, Ada, Eth);
+        await InsertStreamCandlesAsync(Btc, outageStart.AddMinutes(-10), 10);
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogSessionStretchFilled") == 1, "the stretch up to the session start");
+
+        // Ten minutes of polls: the re-checks double their interval (5 s, 10 s, 20 s, ...) instead of one per poll.
+        for (var i = 0; i < 120; i++)
+        {
+            _clock.Advance(BackfillWorker.LeaderPollInterval);
+            await Task.Delay(15, Ct);
+        }
+
+        await Task.Delay(200, Ct);
+        NotNeeded("BTCUSDT").ShouldBeInRange(2, 10);
+        _logs.Count("LogSessionStretchFilled").ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task OutageInsideTheSeedWindow_IsLeftToTheTradeGapFill()
+    {
+        // Down for two hours: the session seed finds the last stored trade, and the gap-fill recovers every trade (and
+        // so the exact candles) after it. Klines would only add rows the trades replace.
+        SeedTrades("BTCUSDT", End.AddHours(-2), 120);
+        var run = CreateRun();
+        await MarkCompletedAsync(run, Btc, Ada, Eth);
+        await InsertStreamCandlesAsync(Btc, End.AddHours(-2).AddMinutes(-10), 10);
+        await WriteStreamAsync(run, End, 1, firstId: 90_000_000);
+
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogQueuedPending") == 1, "the start-up scan");
+        await WaitForAsync(() => NotNeeded("BTCUSDT") == 1, "BTC checked");
+
+        _server.KlineRequests.ShouldBeEmpty();
+        (await CandleStatsAsync(Btc)).Count.ShouldBe(11);
+    }
+
+    [Fact]
+    public async Task OutageLongerThanTheSeedWindow_NotStreamedYet_FillsUpToNow_ThenUpToTheFirstStreamMinute()
+    {
+        var outageStart = End - IngestionWorker.SeedWindow - TimeSpan.FromHours(1);
+        var gap = (int)(End - outageStart).TotalMinutes;
+        SeedTrades("BTCUSDT", outageStart, gap + 5);
+        var run = CreateRun(depth: TimeSpan.FromDays(20));
+        await MarkCompletedAsync(run, Btc, Ada, Eth);
+        await InsertStreamCandlesAsync(Btc, outageStart.AddMinutes(-10), 10);
+
+        // The stream has not started yet (the connection is still being opened): fill up to the current minute.
+        await run.StartAsync();
+        await WaitForAsync(() => _logs.Count("LogSessionStretchFilled") == 1, "the stretch up to now");
+        (await CandleStatsAsync(Btc)).Count.ShouldBe(10 + gap);
+
+        // Three minutes later the stream starts; the minutes between are filled on the next poll.
+        _clock.Advance(TimeSpan.FromMinutes(3));
+        await WriteStreamAsync(run, End.AddMinutes(3), 1, firstId: 90_000_000);
+        await WaitForAsync(
+            () =>
+            {
+                PollUntilTheWalkStarts(walksBefore: 1);
+                return _logs.Count("LogSessionStretchFilled") == 2;
+            },
+            "the stretch up to the first stream minute");
+
+        _server.KlineRequests[^1]["startTime"].ShouldBe(UnixMs(End));
+        _server.KlineRequests[^1]["endTime"].ShouldBe((long.Parse(UnixMs(End.AddMinutes(3)), CultureInfo.InvariantCulture) - 1).ToString(CultureInfo.InvariantCulture));
+        var stats = await CandleStatsAsync(Btc);
+        stats.Count.ShouldBe(10 + gap + 3 + 1);
+        stats.Last.ShouldBe(End.AddMinutes(3));
+
+        // Done: later polls fetch nothing more.
+        var requests = _server.KlineRequests.Count;
+        for (var i = 0; i < 3; i++)
+        {
+            _clock.Advance(BackfillWorker.LeaderPollInterval);
+            await Task.Delay(50, Ct);
+        }
+
+        _server.KlineRequests.Count.ShouldBe(requests);
+    }
+
+    [Fact]
+    public async Task NewLeadershipSession_EvenOneTheWorkerNeverSawStart_ChecksCompletedSymbolsAgain()
+    {
+        // The first session finds nothing to fill: BTC streamed until two hours ago (the trade gap-fill covers that).
+        var lastStream = End.AddHours(-2);
+        var later = TimeSpan.FromDays(14);
+        var gap = (int)(End + later - lastStream).TotalMinutes;
+        SeedTrades("BTCUSDT", lastStream, gap);
+        var run = CreateRun(depth: TimeSpan.FromDays(20));
+        await MarkCompletedAsync(run, Btc, Ada, Eth);
+        await InsertStreamCandlesAsync(Btc, lastStream.AddMinutes(-10), 10);
+        await run.StartAsync();
+        await WaitForAsync(() => NotNeeded("BTCUSDT") == 1, "the first session's check");
+        _server.KlineRequests.ShouldBeEmpty();
+
+        // Two weeks later this instance loses leadership and wins it back at once (between two of the worker's polls):
+        // a new session, now with a stretch older than the replay window before its stream.
+        _clock.Advance(later);
+        run.State.SetStandby();
+        run.State.SetConnecting();
+        await WriteStreamAsync(run, End + later, 1, firstId: 90_000_000);
+        await WaitForAsync(
+            () =>
+            {
+                PollUntilTheWalkStarts(walksBefore: 0);
+                return _logs.Count("LogSessionStretchFilled") == 1;
+            },
+            "the new session's stretch");
+
+        _server.KlineRequests[0]["startTime"].ShouldBe(UnixMs(lastStream));
+        _server.KlineRequests.Count.ShouldBe((gap + 999) / 1000);
+        PollyEvents().ShouldBe(0); // no request timed out and was repeated
+        (await CandleStatsAsync(Btc)).Count.ShouldBe(10 + gap + 1);
+        _logs.Count("LogQueuedPending").ShouldBe(2);
+        (await FindAsync(run, Btc)).BackfillStatus.ShouldBe(BackfillStatus.Completed); // queued, but never marked Pending
+    }
+
+    [Fact]
     public async Task PartialRun_Resumes_WithoutRefetching()
     {
         SeedTrades("BTCUSDT", From, DepthMinutes);
@@ -514,6 +727,7 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         (await CandleStatsAsync(Btc)).Count.ShouldBe(DepthMinutes);
         _logs.Count("LogRetrying").ShouldBe(1);
         _logs.Count("LogFailed").ShouldBe(0);
+        PollyEvents().ShouldBeGreaterThan(0); // the pipeline's own retries are visible to the stretch tests' check
     }
 
     [Fact]
@@ -563,7 +777,6 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         (await run.Symbols.ListAsync(Ct)).ShouldAllBe(s => s.BackfillStatus == BackfillStatus.Completed);
         _logs.Count("LogStarted").ShouldBe(3);
         _logs.Count("LogSkippedInactive").ShouldBe(1);
-        _logs.Count("LogSkippedCompleted").ShouldBe(0);
     }
 
     [Fact]
@@ -617,7 +830,7 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         return prices;
     }
 
-    private Run CreateRun(bool enabled = true, bool leader = true, Action<IServiceCollection>? configureServices = null)
+    private Run CreateRun(bool enabled = true, bool leader = true, Action<IServiceCollection>? configureServices = null, TimeSpan? depth = null)
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -626,7 +839,7 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
                 ["Binance:WsBaseUrl"] = _server.WsBaseUrl.ToString(),
                 ["Binance:RestBaseUrl"] = _server.RestBaseUrl.ToString(),
                 ["Backfill:Enabled"] = enabled ? "true" : "false",
-                ["Backfill:Depth"] = "3.00:00:00",
+                ["Backfill:Depth"] = (depth ?? TimeSpan.FromMinutes(DepthMinutes)).ToString("c", CultureInfo.InvariantCulture),
             })
             .Build();
         var services = new ServiceCollection();
@@ -653,6 +866,46 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         Tick[] ticks = [.. Enumerable.Range(0, minutes).Select(i => new Tick(Btc, firstId + i, 500m, 1m, first.AddMinutes(i).AddSeconds(20), first.AddMinutes(i).AddSeconds(20)))];
         (await run.Services.GetRequiredService<ITickWriter>().WriteBatchAsync(ticks, Ct)).ShouldBe(minutes);
     }
+
+    /// <summary>
+    /// Stream candles (source 1) for <paramref name="minutes"/> minutes from <paramref name="first"/>, written directly:
+    /// their ticks may lie beyond the replay window, where the tick writer stores nothing.
+    /// </summary>
+    private async Task InsertStreamCandlesAsync(int symbolId, DateTime first, int minutes)
+    {
+        await using var connection = new NpgsqlConnection(db.ConnectionString);
+        await connection.OpenAsync(Ct);
+        await using var command = new NpgsqlCommand(
+            """
+            INSERT INTO candles_1m (symbol_id, bucket_start, open, high, low, close, first_trade_id, last_trade_id,
+                                    price_sum, tick_count, volume, quote_volume, source)
+            SELECT $1, $2 + i * interval '1 minute', 50, 50, 50, 50, i + 1, i + 1, 50, 1, 1, 50, 1
+              FROM generate_series(0, $3 - 1) AS i
+            """,
+            connection);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = symbolId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = first, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = minutes });
+        (await command.ExecuteNonQueryAsync(Ct)).ShouldBe(minutes);
+    }
+
+    // Wakes the worker with a poll until a stretch walk has started, and then leaves the clock alone: Polly's attempt
+    // timeout runs on this clock, so advancing it while a kline request is in flight can time the request out and
+    // repeat it (seen once as a 22nd request for a 21-page stretch).
+    private void PollUntilTheWalkStarts(int walksBefore)
+    {
+        if (_logs.Count("LogStarted") == walksBefore)
+        {
+            _clock.Advance(BackfillWorker.LeaderPollInterval);
+        }
+    }
+
+    // Kline requests that timed out or failed and were retried by the resilience pipeline.
+    private int PollyEvents() => _logs.Entries.Count(e => e.Category.StartsWith("Polly", StringComparison.Ordinal) && e.Level >= LogLevel.Warning);
+
+    // How often the worker found no stretch to fill before a session's stream for the symbol.
+    private int NotNeeded(string symbol) =>
+        _logs.Entries.Count(e => e.EventName == "LogNoSessionStretch" && e.Message.Contains(symbol, StringComparison.Ordinal));
 
     private async Task SetDeactivatedAtAsync(int symbolId, DateTime utc)
     {

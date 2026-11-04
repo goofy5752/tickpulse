@@ -94,6 +94,21 @@ public sealed class TickBatchWriterTests : IDisposable
         _state.TicksPerSecond.ShouldBe(3 / IngestionState.RateWindow.TotalSeconds, 1e-9);
     }
 
+    [Fact]
+    public async Task Run_RecoveredBatch_RecordsNoLagSample()
+    {
+        // A streamed batch (traded 500 ms ago), then a gap-fill batch: a trade from a minute ago, received just now.
+        _channel.Writer.TryWrite(T(Btc, 1, 101m, ms: 1500));
+        _channel.Writer.TryWrite(new Tick(Btc, 2, 99m, 1m, T0.AddMinutes(-1), T0.AddSeconds(2)));
+        _channel.Writer.Complete();
+
+        await Writer(maxSize: 1).RunAsync(_channel.Reader, Ct);
+
+        _writer.Batches.Count.ShouldBe(2);
+        _state.LastLagMs.ShouldBe(500); // the streamed batch's lag, not the recovered trade's age
+        _state.TicksPerSecond.ShouldBe(2 / IngestionState.RateWindow.TotalSeconds, 1e-9); // both still count as stored
+    }
+
     [Theory]
     [InlineData(PostgresErrorCodes.DeadlockDetected)]
     [InlineData(PostgresErrorCodes.SerializationFailure)]

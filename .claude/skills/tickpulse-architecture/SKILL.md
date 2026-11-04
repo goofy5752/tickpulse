@@ -82,7 +82,9 @@ Rules of thumb:
 5. **One WebSocket connection**, runtime `SUBSCRIBE`/`UNSUBSCRIBE` at ≤ 5 messages/s, rotation at
    ~23 h make-before-break, reconnect with jittered exponential backoff (cap 30 s), gap-fill via
    REST `aggTrades?fromId=last+1`. Every leadership session seeds the gap-fill watermarks from
-   the DB (max `agg_trade_id` per active symbol, last 24 h) before it subscribes, so the gap
+   the DB (the newest stored trade's `agg_trade_id` per active symbol within `IngestionWorker.SeedWindow`,
+   12 days: the replay window less a day of headroom for the fill; one ordered-ChunkAppend probe that
+   never decompresses older chunks) before it subscribes, so the gap
    after the last stored trade is filled after a restart or handover. `GapFillWatermarks` keeps,
    per symbol, the end of the contiguous prefix of accounted ids (`LastId`) and one rule: it
    moves up only across ids that were delivered by this process or stored by another instance.
@@ -91,17 +93,20 @@ Rules of thumb:
    live connection too. The seed raises an older in-memory watermark to the stored id only when
    nothing this process delivered lies above it (the highest id any ended connection delivered,
    including a discarded rotation link, or that a dropped batch or lead-in reported missing);
-   otherwise the max may be this process's own stream above the gap, and the fill walks up from
-   the watermark. The max cannot see holes *below* it: one that only a crashed or other process
+   otherwise the stored id may be this process's own stream above the gap, and the fill walks up from
+   the watermark. The stored id cannot see holes *below* it: one that only a crashed or other process
    knew about (its dropped batch, its capped fill) is not recovered by the seed. A gap still
    open on the live connection is filled again on every reconcile pass (one run per symbol at
-   a time). A symbol that starts
+   a time). A clean rotation hands the retired link's last ids to the new link: until the new link
+   delivers a symbol, a short REST page completes its fill only past them. A symbol that starts
    streaming with no watermark gets a lead-in from the start of its first minute
    (`aggTrades?startTime`), so that candle is not partial; a failed lead-in is retried on the
    next connection. Symmetrically, a removed symbol gets a one-shot tail-out after its UNSUBSCRIBE
-   ack: once its last minute is over, REST fills from the last delivered id + 1 up to that
-   minute's end (background, bounded, best-effort; it never delays the unsubscribe and never
-   writes past that minute).
+   ack: once its last minute is over, REST fills from the last delivered id + 1 (or the id handed
+   over by a rotation, if the link has delivered none yet) up to that minute's end (background,
+   bounded, best-effort; it never delays the unsubscribe and never writes past that minute). After
+   an outage longer than the seed window the trades of that stretch are not recovered; with backfill
+   enabled, every leadership session fills its candles from klines.
    Symbol changes signal ingestion in-process and are also reconciled against the DB every 30 s.
 6. **Bounded channel** with `FullMode=Wait` (backpressure, never drop). Batches flush at 500 ms or
    5,000 ticks.

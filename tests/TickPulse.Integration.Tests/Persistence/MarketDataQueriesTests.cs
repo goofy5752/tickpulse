@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Time.Testing;
 using Npgsql;
@@ -199,6 +200,7 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         // partial index wins by a wide margin. For the average both indexes give the same bounded range on
         // (symbol_id, bucket_start) and the choice is cost-only: either is fine, a sequential scan is not.
         firstStream.ShouldContain("ix_candles_1m_stream");
+        (await ExplainAsync(MarketDataQueries.LastStreamMinuteBeforeSql, Int(Btc), Ts(now))).ShouldContain("ix_candles_1m_stream");
         average.ShouldMatch(@"(Index|Index Only|Bitmap Index) Scan( Backward)? using (ix_candles_1m_stream|pk_candles_1m)");
         average.ShouldNotContain("Seq Scan on candles_1m");
     }
@@ -217,8 +219,11 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
 
         // The anchor is an InitPlan (evaluated once); the outer scan is a primary-key range scan bounded by it.
         plan.ShouldContain("InitPlan");
-        // A plain or a bitmap scan of the primary key are both a range scan bounded by the anchor.
-        plan.ShouldMatch(@"(Index|Index Only|Bitmap Index) Scan using pk_candles_1m on candles_1m\b[\s\S]*Index Cond: \(\(symbol_id = [^)]+\) AND \(bucket_start >= \(\(InitPlan \d+\)");
+        // A plain or a bitmap scan of the primary key are both a range scan bounded by the anchor. The first prints
+        // "Scan using <index> on <table>", the second "Bitmap Index Scan on <index>".
+        plan.ShouldMatch(
+            @"(?:(?:Index|Index Only) Scan using pk_candles_1m on candles_1m|Bitmap Index Scan on pk_candles_1m)\b[\s\S]*Index Cond: \(\(symbol_id = [^)]+\) AND \(bucket_start >= \(\(InitPlan \d+\)",
+            customMessage: plan);
         plan.ShouldNotContain("Seq Scan");
     }
 
@@ -560,6 +565,23 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task LastStreamMinuteBefore_IgnoresBackfill()
+    {
+        var queries = Queries();
+        (await queries.LastStreamMinuteBeforeAsync(Btc, Start.AddHours(1), Ct)).ShouldBeNull();
+
+        await Writer().WriteBatchAsync([NewTick(Btc, 1, 1m, 1m, Start.AddMinutes(5).AddSeconds(42)), NewTick(Eth, 1, 1m, 1m, Start.AddMinutes(40))], Ct);
+        await CandleWriter().InsertBackfillAsync(Btc, [Candle(Start.AddMinutes(9), close: 1m), Candle(Start.AddMinutes(50), close: 1m)], Ct);
+
+        var last = await queries.LastStreamMinuteBeforeAsync(Btc, Start.AddMinutes(50), Ct);
+        last.ShouldBe(Start.AddMinutes(5));
+        last!.Value.Kind.ShouldBe(DateTimeKind.Utc);
+        (await queries.LastStreamMinuteBeforeAsync(Btc, Start.AddMinutes(5), Ct)).ShouldBeNull(); // the bound is exclusive
+        (await queries.LastStreamMinuteBeforeAsync(Ada, Start.AddHours(1), Ct)).ShouldBeNull();
+        await Should.ThrowAsync<ArgumentException>(() => queries.LastStreamMinuteBeforeAsync(Btc, DateTime.SpecifyKind(Start, DateTimeKind.Unspecified), Ct));
+    }
+
+    [Fact]
     public async Task BackfillRangeBefore_IgnoresStreamOtherSymbolsAndLaterMinutes()
     {
         var queries = Queries();
@@ -587,7 +609,9 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         var queries = Queries();
         (await queries.GetLatestTradeIdsAsync(Start, Ct)).ShouldBeEmpty();
 
-        // Ids that do not grow with time inside a minute: the highest id counts, not the latest trade time.
+        // The id of the newest trade by trade time counts. Binance ids grow with trade time, so that is the highest id;
+        // where it is not (ids out of order inside a minute, as here), it is lower, which only makes the gap-fill read
+        // a few stored trades again.
         await Writer().WriteBatchAsync(
         [
             NewTick(Btc, 7, 1m, 1m, Start.AddHours(-2)),        // before the bound
@@ -601,44 +625,77 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
 
         var ids = await queries.GetLatestTradeIdsAsync(Start.AddHours(-1), Ct);
 
-        ids.ShouldBe(new Dictionary<string, long> { ["BTCUSDT"] = 12 });
+        ids.ShouldBe(new Dictionary<string, long> { ["BTCUSDT"] = 11 });
         ids.ContainsKey("btcusdt").ShouldBeTrue(); // names match case-insensitively
         (await queries.GetLatestTradeIdsAsync(Start.AddHours(-3), Ct))
-            .OrderBy(p => p.Key, StringComparer.Ordinal).ShouldBe([new("BTCUSDT", 12L), new("ETHUSDT", 500L)]);
+            .OrderBy(p => p.Key, StringComparer.Ordinal).ShouldBe([new("BTCUSDT", 11L), new("ETHUSDT", 500L)]);
         (await queries.GetLatestTradeIdsAsync(Start.AddMinutes(3), Ct)).ShouldBeEmpty(); // the bound is exclusive
         await Should.ThrowAsync<ArgumentException>(() => queries.GetLatestTradeIdsAsync(DateTime.SpecifyKind(Start, DateTimeKind.Unspecified), Ct));
     }
 
     [Fact]
-    public async Task LatestTradeIdsQuery_ProbesThePrimaryKey_OfRecentChunksOnly()
+    public async Task LatestTradeIdsQuery_ReadsOnlyTheNewestChunkWithTrades_EvenWhenOlderOnesAreCompressed()
     {
-        // Ticks in three daily chunks; the bound leaves only the newest one.
+        // Ticks in three daily chunks inside a 13-day bound; the two older chunks are compressed, as they are after a
+        // restart that follows an outage of days. The table is analyzed with a handful of rows, where a top-N sort over
+        // every chunk would look as cheap: the plan must not depend on that.
         await Writer().WriteBatchAsync(
         [
             NewTick(Btc, 1, 1m, 1m, Start.AddDays(-3)),
             NewTick(Btc, 2, 1m, 1m, Start.AddDays(-2)),
             NewTick(Btc, 3, 1m, 1m, Start.AddHours(1)),
         ], Ct);
-
-        var plan = await ExplainAsync(MarketDataQueries.LatestTradeIdsSql, Ts(Start));
-
-        // A backward probe of each remaining chunk's primary key, and the chunks entirely before the bound are not
-        // read at all (other tests may have left later, empty chunks behind; those are probed too).
-        plan.ShouldMatch(@"Index (Only )?Scan Backward using \S*pk_price_ticks\S* on _hyper_\d+_\d+_chunk");
-        plan.ShouldNotContain("Seq Scan on _hyper");
-        var older = new List<string>();
-        await using (var command = _dataSource.CreateCommand("SELECT show_chunks('price_ticks', older_than => $1)::text"))
+        await ExecuteAsync("UPDATE symbols SET is_active = false WHERE id <> 1"); // one loop, so "never executed" is exact
+        try
         {
-            command.Parameters.Add(Ts(Start.AddDays(-1)));
-            await using var reader = await command.ExecuteReaderAsync(Ct);
-            while (await reader.ReadAsync(Ct))
+            await ExecuteAsync(string.Create(
+                CultureInfo.InvariantCulture,
+                $"SELECT compress_chunk(c) FROM show_chunks('price_ticks', older_than => '{Start.AddDays(-1):O}'::timestamptz) AS c"));
+            await ExecuteAsync("ANALYZE price_ticks");
+            var compressed = new List<string>();
+            await using (var command = _dataSource.CreateCommand(
+                "SELECT chunk_name FROM timescaledb_information.chunks WHERE hypertable_name = 'price_ticks' AND is_compressed"))
+            await using (var reader = await command.ExecuteReaderAsync(Ct))
             {
-                older.Add(reader.GetString(0).Split('.')[^1]);
+                while (await reader.ReadAsync(Ct))
+                {
+                    compressed.Add(reader.GetString(0));
+                }
             }
-        }
 
-        older.Count.ShouldBeGreaterThanOrEqualTo(2);
-        older.ShouldAllBe(chunk => !Regex.IsMatch(plan, $@"\b{chunk}\b"));
+            compressed.Count.ShouldBeGreaterThanOrEqualTo(2);
+
+            var plan = await ExplainAsync(
+                MarketDataQueries.LatestTradeIdsSql, analyze: true, settings: MarketDataQueries.LatestTradeIdsSettingsSql, Ts(Start.AddDays(-13)));
+
+            // Chunks are read newest first and the scan stops at the first trade: one index probe of the newest chunk.
+            // The older, compressed chunks are never decompressed (no sort over their rows either).
+            plan.ShouldContain("ChunkAppend", customMessage: plan);
+            plan.ShouldContain("Order: price_ticks.trade_time DESC", customMessage: plan);
+            plan.ShouldNotContain("Sort Key", customMessage: plan);
+            plan.ShouldNotContain("Seq Scan on _hyper");
+            plan.ShouldMatch(@"Index (Only )?Scan using \S*ix_price_ticks_symbol_id_trade_time\S* on _hyper_\d+_\d+_chunk \(actual rows=1");
+            var lines = plan.Split('\n');
+            compressed.ShouldAllBe(chunk => lines.Where(l => Regex.IsMatch(l, $@"\b{chunk}\b")).All(l => l.Contains("never executed")));
+            (await Queries().GetLatestTradeIdsAsync(Start.AddDays(-13), Ct)).ShouldBe(new Dictionary<string, long> { ["BTCUSDT"] = 3 });
+
+            // After an outage of more than two days the newest chunk with trades is compressed too: the lookup reads
+            // the newest batch of it through the batch metadata, and the older chunks are still never executed.
+            await ExecuteAsync("SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('price_ticks') AS c");
+            await ExecuteAsync("ANALYZE price_ticks");
+            var newest = await ExplainAsync(
+                MarketDataQueries.LatestTradeIdsSql, analyze: true, settings: MarketDataQueries.LatestTradeIdsSettingsSql, Ts(Start.AddDays(-13)));
+            newest.ShouldContain("Order: price_ticks.trade_time DESC", customMessage: newest);
+            newest.ShouldNotContain("Sort Key", customMessage: newest);
+            newest.ShouldMatch(@"ColumnarScan\) on _hyper_\d+_\d+_chunk \(actual rows=1 loops=1\)", customMessage: newest);
+            var newestLines = newest.Split('\n');
+            compressed.ShouldAllBe(chunk => newestLines.Where(l => Regex.IsMatch(l, $@"\b{chunk}\b")).All(l => l.Contains("never executed")));
+            (await Queries().GetLatestTradeIdsAsync(Start.AddDays(-13), Ct)).ShouldBe(new Dictionary<string, long> { ["BTCUSDT"] = 3 });
+        }
+        finally
+        {
+            await ExecuteAsync("SELECT decompress_chunk(c, if_compressed => true) FROM show_chunks('price_ticks') AS c");
+        }
     }
 
     private static decimal RandomDecimal(Random rng, long maxUnitsExclusive) => rng.NextInt64(1, maxUnitsExclusive) / 100_000_000m;
@@ -688,7 +745,13 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
     /// The plan of <paramref name="sql"/> with sequential scans disabled, so the test data can stay small and the
     /// assertion pins which index a query is able to use rather than a data-size-dependent cost choice.
     /// </summary>
-    private async Task<string> ExplainAsync(string sql, params NpgsqlParameter[] parameters)
+    private Task<string> ExplainAsync(string sql, params NpgsqlParameter[] parameters) => ExplainAsync(sql, analyze: false, settings: null, parameters);
+
+    /// <summary>
+    /// As above; with <paramref name="analyze"/> the query runs, and the plan shows which nodes executed.
+    /// <paramref name="settings"/> (a SET LOCAL statement) runs first, as the production code runs it.
+    /// </summary>
+    private async Task<string> ExplainAsync(string sql, bool analyze, string? settings, params NpgsqlParameter[] parameters)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(Ct);
         await using var transaction = await connection.BeginTransactionAsync(Ct);
@@ -697,7 +760,14 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
             await off.ExecuteNonQueryAsync(Ct);
         }
 
-        await using var command = new NpgsqlCommand("EXPLAIN " + sql, connection, transaction);
+        if (settings is not null)
+        {
+            await using var set = new NpgsqlCommand(settings, connection, transaction);
+            await set.ExecuteNonQueryAsync(Ct);
+        }
+
+        var explain = analyze ? "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) " : "EXPLAIN ";
+        await using var command = new NpgsqlCommand(explain + sql, connection, transaction);
         command.Parameters.AddRange(parameters);
         var lines = new List<string>();
         await using (var reader = await command.ExecuteReaderAsync(Ct))
