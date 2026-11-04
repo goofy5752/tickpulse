@@ -328,7 +328,9 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
 
         // Exactly the minutes between the last stored one and this session's first: klines, in pages.
         var requests = _server.KlineRequests;
-        requests.Count.ShouldBe((gap + 999) / 1000);
+        // Every page of the stretch (a transport-level retry may repeat a request), walked once.
+        requests.Select(r => r["startTime"]).Distinct().Count().ShouldBe((gap + 999) / 1000);
+        _logs.Count("LogStarted").ShouldBe(1);
         requests[0]["startTime"].ShouldBe(UnixMs(outageStart));
         requests.ShouldAllBe(r => r["symbol"] == "BTCUSDT" && r["endTime"] == (long.Parse(UnixMs(End), CultureInfo.InvariantCulture) - 1).ToString(CultureInfo.InvariantCulture));
         var stats = await CandleStatsAsync(Btc);
@@ -432,7 +434,8 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
             "the new session's stretch");
 
         _server.KlineRequests[0]["startTime"].ShouldBe(UnixMs(lastStream));
-        _server.KlineRequests.Count.ShouldBe((gap + 999) / 1000);
+        _server.KlineRequests.Select(r => r["startTime"]).Distinct().Count().ShouldBe((gap + 999) / 1000);
+        _logs.Count("LogStarted").ShouldBe(1); // walked once
         (await CandleStatsAsync(Btc)).Count.ShouldBe(10 + gap + 1);
         _logs.Count("LogQueuedPending").ShouldBe(2);
     }
