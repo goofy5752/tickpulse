@@ -1,4 +1,5 @@
 using TickPulse.Integration.Tests.Fixtures;
+using YamlDotNet.RepresentationModel;
 
 namespace TickPulse.Integration.Tests.Telemetry;
 
@@ -20,6 +21,22 @@ public sealed class ObservabilityComposeTests
     {
         ComposeFile.Load(Observability).StopGracePeriod(service)
             .ShouldBe(Grace, $"{Observability}: {service} needs a stop_grace_period (Compose otherwise kills it after 1 s)");
+    }
+
+    [Fact]
+    public void Tempo_StopsWellInsideItsGracePeriod()
+    {
+        // On SIGTERM Tempo's backend worker waits finish_on_shutdown_timeout for its current job, even with none
+        // running. The default, 30 s, is the whole grace period: Compose then killed Tempo all the same.
+        using var reader = new StreamReader(Path.Combine(ComposeFile.Root, "deploy", "observability", "tempo", "tempo.yaml"));
+        var yaml = new YamlStream();
+        yaml.Load(reader);
+        var root = (YamlMappingNode)yaml.Documents.Single().RootNode;
+        var worker = (YamlMappingNode)root.Children[new YamlScalarNode("backend_worker")];
+        worker.Children.TryGetValue(new YamlScalarNode("finish_on_shutdown_timeout"), out var timeout)
+            .ShouldBeTrue("tempo.yaml: backend_worker.finish_on_shutdown_timeout is unset (default 30 s, the whole grace period)");
+
+        ComposeFile.ParseDuration(((YamlScalarNode)timeout!).Value!).ShouldBeLessThanOrEqualTo(Grace / 2);
     }
 
     [Theory]

@@ -42,7 +42,9 @@ Every image is pinned to an exact release. Go services also get a `GOMEMLIMIT` b
 limit, so the runtime collects garbage before the kernel kills the container. Every service has a
 `stop_grace_period` of 30 s (production inherits it through `extends`): without one Compose kills a
 container 1 s after SIGTERM, and Tempo, Loki and Prometheus would lose what they buffered or replay their
-WAL after every redeploy.
+WAL after every redeploy. Tempo's backend worker also waits up to
+`finish_on_shutdown_timeout` for its current job on SIGTERM, even with none running; it is 10 s here
+(the default, 30 s, would use up the whole grace period).
 
 ### Under load
 

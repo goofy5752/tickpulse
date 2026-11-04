@@ -38,6 +38,9 @@ backend_scheduler:
 backend_worker:
   compaction:
     block_retention: 336h
+  # On SIGTERM the worker waits this long for its current job, even when it has none (default 30 s, the whole
+  # stop_grace_period, so Compose killed Tempo). Compaction jobs are retried, so a shorter wait loses nothing.
+  finish_on_shutdown_timeout: 10s
 
 storage:
   trace:
