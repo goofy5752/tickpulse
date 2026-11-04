@@ -17,6 +17,13 @@ export function isValidSmaN(n: number): boolean {
   return Number.isInteger(n) && n >= 1 && n <= SMA_MAX_POINTS
 }
 
+// No query function reads TanStack's `signal`, on purpose. A query that reads it has its fetch
+// aborted whenever it loses its last observer: on every keystroke in the n field, every quick
+// period or symbol switch, every unmount. Browser extensions commonly wrap `window.fetch` and
+// watch the promise without a rejection handler, so each abort then shows up as an uncaught
+// `AbortError` in the console, even though this code handles it. Superseded reads are small; they
+// finish and land in the cache, ready if the user comes back to the same parameters.
+
 export const queryKeys = {
   symbols: () => ['symbols'] as const,
   average: (symbol: string) => ['average', symbol] as const,
@@ -75,7 +82,7 @@ export function useSymbols(options: { pollBackfill?: boolean } = {}) {
   const pollBackfill = options.pollBackfill ?? false
   return useQuery({
     queryKey: queryKeys.symbols(),
-    queryFn: ({ signal }) => getJson<SymbolResponse[]>(apiPaths.symbols(), { signal }),
+    queryFn: () => getJson<SymbolResponse[]>(apiPaths.symbols()),
     refetchInterval: (query) => symbolsRefetchInterval(query.state.data, pollBackfill),
   })
 }
@@ -85,7 +92,7 @@ export function useAverage(symbol: string | undefined) {
   const s = normalise(symbol)
   return useQuery({
     queryKey: queryKeys.average(s),
-    queryFn: ({ signal }) => getJson<AveragePriceResponse>(apiPaths.average(s), { signal }),
+    queryFn: () => getJson<AveragePriceResponse>(apiPaths.average(s)),
     enabled: s.length > 0,
     refetchInterval: 15_000,
   })
@@ -100,7 +107,7 @@ export function useSma(symbol: string | undefined, n: number, p: Period, s?: str
   const start = s?.trim() ?? ''
   return useQuery({
     queryKey: queryKeys.sma(sym, n, p, start || undefined),
-    queryFn: ({ signal }) => getJson<SmaResponse>(apiPaths.sma(sym, n, p, start || undefined), { signal }),
+    queryFn: () => getJson<SmaResponse>(apiPaths.sma(sym, n, p, start || undefined)),
     enabled: sym.length > 0 && isValidSmaN(n),
     placeholderData: keepPreviousForSymbol(sym),
     // A fixed start describes a closed window; only "up to now" moves.
@@ -113,7 +120,7 @@ export function useCandles(symbol: string | undefined, p: Period, limit: number 
   const s = normalise(symbol)
   return useQuery({
     queryKey: queryKeys.candles(s, p, limit),
-    queryFn: ({ signal }) => getJson<CandleResponse[]>(apiPaths.candles(s, p, limit), { signal }),
+    queryFn: () => getJson<CandleResponse[]>(apiPaths.candles(s, p, limit)),
     enabled: s.length > 0,
     placeholderData: keepPreviousForSymbol(s),
     refetchInterval: p === '1m' || p === '5m' ? 15_000 : 60_000,
@@ -127,7 +134,7 @@ export function useCandles(symbol: string | undefined, p: Period, limit: number 
 export function useStats(options: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: queryKeys.stats(),
-    queryFn: ({ signal }) => getJson<SystemStatsResponse>(apiPaths.stats(), { signal }),
+    queryFn: () => getJson<SystemStatsResponse>(apiPaths.stats()),
     enabled: options.enabled ?? false,
     refetchInterval: 10_000,
   })
