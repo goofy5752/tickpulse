@@ -3,6 +3,7 @@ using Scalar.AspNetCore;
 using TickPulse.Api.Auth;
 using TickPulse.Api.Health;
 using TickPulse.Api.Hosting;
+using TickPulse.Api.Hubs;
 using TickPulse.Api.Problems;
 using TickPulse.Api.Telemetry;
 using TickPulse.Application.Analytics;
@@ -48,6 +49,7 @@ services.AddSingleton<IProblemDetailsWriter, JsonProblemDetailsWriter>();
 services.AddTickPulseForwardedHeaders();
 services.AddTickPulseRateLimiting();
 services.AddTickPulseHealthChecks();
+services.AddTickPulseMarketHub();
 services.Configure<RouteOptions>(o => o.SetParameterPolicy<DashboardRouteConstraint>(DashboardRouteConstraint.Name));
 services.AddOpenApi(o => o.AddDocumentTransformer((document, _, _) =>
 {
@@ -74,6 +76,7 @@ app.UseAuthorization();
 
 app.MapControllers().RequireRateLimiting(ApiRateLimiting.PublicPolicy);
 app.MapTickPulseHealthChecks();
+app.MapTickPulseMarketHub(); // before the dashboard fallback
 app.MapOpenApi();
 app.MapScalarApiReference("/docs", o => o.WithTitle("TickPulse API"));
 app.MapFallbackToFile(DashboardRouteConstraint.FallbackPattern, "index.html");

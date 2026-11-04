@@ -36,6 +36,7 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
     public const string AdminApiKey = "test-key";
 
     private readonly Dictionary<string, string?> _settings = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<Action<IServiceCollection>> _services = [];
     private bool _workers;
     private bool _systemClock;
     private bool _configured;
@@ -81,6 +82,15 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
     {
         EnsureNotConfigured();
         _logs = provider;
+        return this;
+    }
+
+    /// <summary>Adjusts the app's services after every other registration (e.g. replaces one with a test double). Call before the host starts.</summary>
+    public ApiFactory WithServices(Action<IServiceCollection> configure)
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+        EnsureNotConfigured();
+        _services.Add(configure);
         return this;
     }
 
@@ -145,6 +155,11 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
             // writer, so the test host's writers would differ from production's.
             var parts = services.Single(d => d.ServiceType == typeof(ApplicationPartManager)).ImplementationInstance;
             ((ApplicationPartManager)parts!).ApplicationParts.Add(new AssemblyPart(typeof(ApiFactory).Assembly));
+
+            foreach (var configure in _services)
+            {
+                configure(services);
+            }
         });
     }
 
