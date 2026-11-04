@@ -1,13 +1,16 @@
 import { useMutation } from '@tanstack/react-query'
 import { Fragment, memo, useEffect, useId, useMemo, useRef, useState, type SyntheticEvent } from 'react'
 import { apiPaths, apiUrl, getRaw, type RawResponse } from '@/api/client'
-import { isPeriod, PERIODS, type Period } from '@/api/types'
+import type { Period } from '@/api/types'
 import { FieldLabel } from '@/components/FieldLabel'
 import { InfoTip } from '@/components/InfoTip'
 import { Segmented, type SegmentedOption } from '@/components/Segmented'
+import { Select } from '@/components/Select'
+import { SuggestInput } from '@/components/SuggestInput'
 import { highlightBody, type TokenKind } from '@/lib/highlight'
 import { SECTION_IDS } from '@/lib/links'
-import { control, primaryButton, sectionLead, sectionTitle, selectControl } from '@/lib/styles'
+import { PERIOD_OPTIONS } from '@/lib/periodOptions'
+import { control, primaryButton, sectionLead, sectionTitle } from '@/lib/styles'
 import { cn } from '@/lib/utils'
 
 type Endpoint = 'average' | 'sma' | 'symbols' | 'candles'
@@ -180,23 +183,16 @@ export const ApiPlayground = memo(function ApiPlayground({ symbol, symbols }: Ap
                 <FieldLabel htmlFor={`${ids}-symbol`}>
                   Symbol
                 </FieldLabel>
-                <input
+                <SuggestInput
                   id={`${ids}-symbol`}
-                  list={`${ids}-symbols`}
                   value={symbolText}
-                  onChange={(event) => {
-                    setTypedSymbol(event.target.value)
-                  }}
+                  onChange={setTypedSymbol}
+                  suggestions={symbols}
                   autoComplete="off"
                   spellCheck={false}
                   autoCapitalize="characters"
                   className={cn(control, 'font-mono text-[0.8125rem] uppercase')}
                 />
-                <datalist id={`${ids}-symbols`}>
-                  {symbols.map((name) => (
-                    <option key={name} value={name} />
-                  ))}
-                </datalist>
               </div>
             )}
             {endpoint === 'sma' && (
@@ -314,20 +310,7 @@ function PeriodField({
       <FieldLabel htmlFor={id}>
         {label}
       </FieldLabel>
-      <select
-        id={id}
-        value={value}
-        onChange={(event) => {
-          if (isPeriod(event.target.value)) onChange(event.target.value)
-        }}
-        className={cn(selectControl, 'font-mono text-[0.8125rem]')}
-      >
-        {PERIODS.map((period) => (
-          <option key={period} value={period}>
-            {period}
-          </option>
-        ))}
-      </select>
+      <Select id={id} value={value} options={PERIOD_OPTIONS} onChange={onChange} mono />
     </div>
   )
 }

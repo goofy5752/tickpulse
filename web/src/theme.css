@@ -237,14 +237,6 @@
   }
 }
 
-/* Native select with a chevron that reads in both themes. */
-@utility select-chevron {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%238d8aa6' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 0.75rem center;
-  background-size: 0.75rem;
-}
-
 /* Loading placeholder. */
 @utility skeleton {
   background: linear-gradient(
@@ -362,6 +354,49 @@
   .info-tip[data-side='bottom'] {
     transform-origin: var(--tip-origin-x, 50%) 0%;
     animation-name: tp-tip-in-below;
+  }
+
+  /* Select lists, the date picker and suggestions: the same glass card as the tooltips. */
+  .popover {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 60;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--color-tip-border);
+    border-radius: 0.75rem;
+    background-color: var(--color-tip);
+    box-shadow: var(--shadow-tip);
+    backdrop-filter: blur(22px) saturate(160%);
+    color: var(--color-ink);
+    transform-origin: 50% 0%;
+    animation: tp-tip-in-below 140ms var(--ease-glide);
+  }
+  .popover[data-side='top'] {
+    transform-origin: 50% 100%;
+    animation-name: tp-tip-in;
+  }
+  .popover-option {
+    display: flex;
+    height: 2rem;
+    cursor: pointer;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    border-radius: 0.5rem;
+    padding-inline: 0.625rem;
+    font-size: 0.8125rem;
+    color: var(--color-ink-muted);
+    transition: background-color 120ms, color 120ms;
+  }
+  .popover-option[data-active] {
+    background-color: var(--color-glass-strong);
+    color: var(--color-ink);
+  }
+  .popover-option[aria-selected='true'] {
+    color: var(--color-ink);
+    font-weight: 500;
   }
 
   .info-tip-body {

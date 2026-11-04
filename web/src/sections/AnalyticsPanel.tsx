@@ -1,15 +1,18 @@
 import { memo, useId, useState, type KeyboardEvent } from 'react'
 import { ApiError, apiPaths } from '@/api/client'
 import { isValidSmaN, SMA_MAX_POINTS, useAverage, useSma } from '@/api/queries'
-import { isPeriod, PERIODS, type AveragePriceResponse, type SmaResponse } from '@/api/types'
+import type { AveragePriceResponse, SmaResponse } from '@/api/types'
+import { DateTimePicker } from '@/components/DateTimePicker'
 import { FieldLabel } from '@/components/FieldLabel'
 import { InfoTip } from '@/components/InfoTip'
+import { Select } from '@/components/Select'
 import { Skeleton } from '@/components/Skeleton'
 import { TitleWithTip } from '@/components/TitleWithTip'
 import { formatCount, formatDuration, formatPrice, formatUtc } from '@/lib/format'
+import { PERIOD_OPTIONS } from '@/lib/periodOptions'
 import { PERIOD_SECONDS, toUnixSeconds } from '@/lib/sma'
 import { N_HINT, parseN, startToIso, type SmaParams } from '@/lib/smaParams'
-import { control, selectControl } from '@/lib/styles'
+import { control } from '@/lib/styles'
 import { cn } from '@/lib/utils'
 
 interface AnalyticsPanelProps {
@@ -191,37 +194,29 @@ function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
           <FieldLabel htmlFor={`${ids}-p`} help="smaP">
             Period (p)
           </FieldLabel>
-          <select
+          <Select
             id={`${ids}-p`}
             value={params.p}
-            onChange={(event) => {
-              const p = event.target.value
-              if (isPeriod(p)) onParamsChange({ ...params, p })
+            options={PERIOD_OPTIONS}
+            onChange={(p) => {
+              onParamsChange({ ...params, p })
             }}
-            className={selectControl}
-          >
-            {PERIODS.map((period) => (
-              <option key={period} value={period}>
-                {period}
-              </option>
-            ))}
-          </select>
+          />
         </div>
         <div className="col-span-2">
           <FieldLabel htmlFor={`${ids}-s`} help="smaS">
             Start (s), UTC
           </FieldLabel>
           <div className="flex items-center gap-2">
-            <input
+            <DateTimePicker
               id={`${ids}-s`}
-              type="datetime-local"
               value={params.s}
-              max={new Date().toISOString().slice(0, 16)}
-              onChange={(event) => {
-                onParamsChange({ ...params, s: event.target.value })
+              onChange={(s) => {
+                onParamsChange({ ...params, s })
               }}
+              placeholder="Up to now"
               aria-describedby={`${ids}-s-hint`}
-              className={cn(control, 'min-w-0 flex-1', params.s === '' && 'text-ink-faint')}
+              className="min-w-0 flex-1"
             />
             <button
               type="button"
