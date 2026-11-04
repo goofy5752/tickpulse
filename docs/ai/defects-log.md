@@ -84,7 +84,7 @@ if the final version differs.
 | [N9](#n9) | The host's own real-IP setting would have denied every visitor | First server setup | Critical | #30 |
 | [N10](#n10) | The Grafana vhost became the host's default server for unknown names | First server setup | Important | #30 |
 | [N11](#n11) | The first deploy was refused: the CD job never uploaded `mask-env.sh` | First deploy | Important | TBD |
-| [N12](#n12) | Grafana could not load its data source plugins on the live site | Owner, live site | Important | TBD |
+| [N12](#n12) | Grafana could not load its data source plugins on the live site | Owner, live site | Important | #33 |
 
 ---
 
@@ -893,7 +893,7 @@ The residual part of [F6](#f6): F6 completed the minute a symbol starts streamin
 
 ### N12
 
-**Grafana could not load its data source plugins on the live site** · Owner, live site · Important · PR TBD
+**Grafana could not load its data source plugins on the live site** · Owner, live site · Important · PR #33
 
 - **Symptom:** every Grafana dashboard on the live site showed "Prometheus plugin failed" (and Loki, Tempo)
   with "Could not load plugin", and every panel said No data.
