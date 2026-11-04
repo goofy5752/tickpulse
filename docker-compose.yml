@@ -1,0 +1,100 @@
+# TickPulse, local stack.
+#
+#   docker compose up                              db + api (dashboard on http://localhost:8080)
+#   docker compose --profile observability up      plus collector, Prometheus, Loki, Tempo, Grafana (:3000)
+#   docker compose run --rm cli avg BTCUSDT        the console client against the api container
+#
+# Every variable has a local default; copy .env.example to .env to change one.
+name: tickpulse
+
+# The observability services all carry profile "observability", so a plain `up` does not start them.
+include:
+  - deploy/observability/compose.observability.yml
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    # Must match TimescaleFixture.TimescaleImage (tests/TickPulse.Integration.Tests/Fixtures/TimescaleFixture.cs),
+    # so the stack runs on the exact image the integration tests use.
+    image: timescale/timescaledb:2.31.0-pg17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tickpulse}
+      POSTGRES_USER: ${POSTGRES_USER:-tickpulse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tickpulse}
+    volumes:
+      - tickpulse-db:/var/lib/postgresql/data
+    # No host port: 5432 is often taken by a local PostgreSQL. Use `docker compose exec db psql -U tickpulse`.
+    healthcheck:
+      # Over TCP: during first-time init the image runs a temporary server on the Unix socket only, which a
+      # socket check would already report as ready.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    logging: *logging
+    networks: [tickpulse]
+
+  api:
+    build:
+      context: .
+      target: api
+    image: tickpulse-api:local
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ConnectionStrings__TickPulse: "Host=db;Port=5432;Database=${POSTGRES_DB:-tickpulse};Username=${POSTGRES_USER:-tickpulse};Password=${POSTGRES_PASSWORD:-tickpulse}"
+      Database__RunMigrationsOnStartup: "true"
+      # Loads ~6 months of 1-minute candles per symbol from Binance REST on first start.
+      Backfill__Enabled: "true"
+      # Local default only (the API logs a warning for a short key); set ADMIN_API_KEY anywhere else.
+      Admin__ApiKey: ${ADMIN_API_KEY:-local-dev-key}
+      # Requests arriving through the network's gateway (published port, reverse proxy) may set CF-Connecting-IP,
+      # so rate limiting and logs see the real client. Keep it equal to the subnet of the tickpulse network below.
+      ForwardedHeaders__KnownNetworks: ${TICKPULSE_SUBNET:-172.30.0.0/24}
+      # The collector from the observability profile. Without that profile the name does not resolve and export
+      # just fails in the background; set OTEL_ENDPOINT= (empty) in .env to switch the exporters off.
+      Otel__Endpoint: ${OTEL_ENDPOINT-http://otel-collector:4317}
+      Otel__IpSalt: ${OTEL_IP_SALT:-}
+      # The dashboards expect 15 s metric exports (the SDK default is 60 s).
+      OTEL_METRIC_EXPORT_INTERVAL: "15000"
+    ports:
+      # Loopback by default; API_BIND=0.0.0.0 exposes it to the LAN.
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    restart: unless-stopped
+    logging: *logging
+    networks: [tickpulse]
+
+  cli:
+    build:
+      context: .
+      target: cli
+    image: tickpulse-cli:local
+    profiles: [cli]
+    environment:
+      TICKPULSE_API_URL: http://api:8080
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    networks: [tickpulse]
+
+# The tickpulse network (fixed subnet ${TICKPULSE_SUBNET:-172.30.0.0/24}) is defined in the included
+# deploy/observability/compose.observability.yml.
+
+volumes:
+  tickpulse-db: {}
