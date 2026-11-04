@@ -16,7 +16,7 @@ public sealed class SymbolRepository(NpgsqlDataSource dataSource, TimeProvider c
     public const long AddLockKey = 0x5450_5359_4D41_4444; // "TPSYMADD"
 
     private const string Columns =
-        "id, name, is_active, created_at, deactivated_at, backfill_status, backfilled_from";
+        "id, name, is_active, created_at, deactivated_at, backfill_status, backfilled_from, reactivated_at";
 
     /// <inheritdoc />
     public Task<IReadOnlyList<MonitoredSymbol>> ListAsync(CancellationToken ct) =>
@@ -82,7 +82,7 @@ public sealed class SymbolRepository(NpgsqlDataSource dataSource, TimeProvider c
               RETURNING {Columns}
               """
             : $"""
-              UPDATE symbols SET is_active = true, updated_at = $2
+              UPDATE symbols SET is_active = true, reactivated_at = $2, updated_at = $2
                WHERE name = $1
               RETURNING {Columns}
               """;
@@ -151,7 +151,8 @@ public sealed class SymbolRepository(NpgsqlDataSource dataSource, TimeProvider c
         reader.GetDateTime(3),
         reader.IsDBNull(4) ? null : reader.GetDateTime(4),
         (BackfillStatus)reader.GetInt16(5),
-        reader.IsDBNull(6) ? null : reader.GetDateTime(6));
+        reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+        reader.IsDBNull(7) ? null : reader.GetDateTime(7));
 
     private NpgsqlParameter<DateTime> NowParameter() =>
         new() { TypedValue = clock.GetUtcNow().UtcDateTime, NpgsqlDbType = NpgsqlDbType.TimestampTz };

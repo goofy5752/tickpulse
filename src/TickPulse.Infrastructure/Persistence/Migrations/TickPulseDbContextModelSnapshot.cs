@@ -57,6 +57,10 @@ namespace TickPulse.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(20)")
                         .HasColumnName("name");
 
+                    b.Property<DateTime?>("ReactivatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("reactivated_at");
+
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at");

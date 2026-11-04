@@ -9,6 +9,7 @@ using TickPulse.Application.Abstractions;
 using TickPulse.Application.Ingestion;
 using TickPulse.Domain;
 using TickPulse.Infrastructure.Binance;
+using TickPulse.Infrastructure.Ingestion;
 using TickPulse.Infrastructure.Telemetry;
 
 namespace TickPulse.Infrastructure.Backfill;
@@ -34,7 +35,7 @@ namespace TickPulse.Infrastructure.Backfill;
 /// completion <c>backfilled_from</c> records the earliest backfilled minute actually stored.</para>
 /// <para>A reactivated symbol (it streamed, was deactivated, and is active again) also gets the stretch it was inactive:
 /// from right after the latest minute stored before its new stream, up to the first minute streamed since its last
-/// deactivation (or the current minute). The admin use case marks such a symbol <see cref="BackfillStatus.Pending"/>
+/// reactivation (<c>reactivated_at</c>; or the current minute). The admin use case marks such a symbol <see cref="BackfillStatus.Pending"/>
 /// before queueing it, so this happens even when its earlier backfill had completed.</para>
 /// <para>Failures: a transient Binance error is retried up to <see cref="MaxTransientRetries"/> times with
 /// <see cref="RetryDelay"/>, unless leadership was lost (then the run pauses). A permanent Binance error, persisting
@@ -352,10 +353,15 @@ internal sealed partial class BackfillWorker(
     }
 
     // The minutes a reactivated symbol missed while inactive: from right after the latest minute stored before its new
-    // stream (or `from`, if that is earlier) up to the first minute streamed since its last deactivation, or the current
+    // stream (or `from`, if that is earlier) up to the first minute streamed since its last reactivation, or the current
     // minute when nothing was streamed yet. Null when the symbol never streamed before that deactivation (the walk up
     // to the first stream minute already covers it) or the stretch is empty. An interrupted fill resumes on its own:
     // the minutes it stored are the latest ones before the end.
+    // The end is searched from the reactivation, not from the deactivation: the old stream (and the tail-out of its
+    // last minute) can have stored a minute after deactivated_at when the UNSUBSCRIBE took effect late, and ending
+    // there would leave the whole stretch unfilled. The search starts LeadInClockSkew before the reactivation, where
+    // the new stream's lead-in starts at the earliest. A reactivation recorded before reactivated_at existed falls
+    // back to the deactivation.
     private async Task<(DateTime Start, DateTime End)?> InactiveStretchAsync(
         MonitoredSymbol symbol, DateTime? firstStream, DateTime from, DateTime current, CancellationToken ct)
     {
@@ -364,7 +370,10 @@ internal sealed partial class BackfillWorker(
             return null;
         }
 
-        var end = await queries.FirstStreamMinuteAtOrAfterAsync(symbol.Id, deactivated, ct).ConfigureAwait(false) ?? current;
+        var newStreamFrom = symbol.ReactivatedAtUtc is { } reactivated && reactivated > deactivated
+            ? Period.OneMinute.AlignDown(reactivated - StreamSupervisor.LeadInClockSkew)
+            : deactivated;
+        var end = await queries.FirstStreamMinuteAtOrAfterAsync(symbol.Id, newStreamFrom, ct).ConfigureAwait(false) ?? current;
         var last = await queries.LastMinuteBeforeAsync(symbol.Id, end, ct).ConfigureAwait(false);
         var start = last is { } minute && minute + Minute > from ? minute + Minute : from;
         return start < end ? (start, end) : null;

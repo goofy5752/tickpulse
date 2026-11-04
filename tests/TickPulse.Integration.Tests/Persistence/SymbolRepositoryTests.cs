@@ -60,6 +60,12 @@ public sealed class SymbolRepositoryTests(TimescaleFixture db) : IAsyncLifetime
         // The last deactivation is kept: the backfill uses it to find the inactive stretch to fill.
         symbol.DeactivatedAtUtc.ShouldBe(Now.UtcDateTime);
         symbol.CreatedAtUtc.ShouldBe(original.CreatedAtUtc);
+
+        // So is the reactivation: the stretch ends at the first minute streamed since then.
+        original.ReactivatedAtUtc.ShouldBeNull();
+        symbol.ReactivatedAtUtc.ShouldBe(Now.UtcDateTime.AddHours(1));
+        symbol.ReactivatedAtUtc!.Value.Kind.ShouldBe(DateTimeKind.Utc);
+        (await repository.FindAsync(Name("ADAUSDT"), Ct)).ShouldBe(symbol);
     }
 
     [Fact]

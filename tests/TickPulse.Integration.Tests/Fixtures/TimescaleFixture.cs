@@ -93,6 +93,7 @@ public sealed class TimescaleFixture : IAsyncLifetime
                        SET is_active = true,
                            updated_at = now(),
                            deactivated_at = NULL,
+                           reactivated_at = NULL,
                            backfill_status = 0,
                            backfilled_from = NULL
                      WHERE name = ANY($1)

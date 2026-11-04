@@ -289,6 +289,7 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
 
         // Reactivated as the admin use case does it, and streaming again from From+3000.
         (await run.Symbols.AddOrReactivateAsync(Symbol("BTCUSDT"), 20, Ct)).Status.ShouldBe(SymbolAddStatus.Reactivated);
+        await SetReactivatedAtAsync(Btc, From.AddMinutes(3000));
         await run.Symbols.SetBackfillStatusAsync(Btc, BackfillStatus.Pending, From, Ct);
         await WriteStreamAsync(run, From.AddMinutes(3000), 5, firstId: 60_000_000);
 
@@ -308,6 +309,44 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         (await CloseAtAsync(Btc, From.AddMinutes(2999))).ShouldBe(prices[2999]);
         (await CloseAtAsync(Btc, From.AddMinutes(999))).ShouldBe(1m); // the first activation's rows were left alone
         (await FindAsync(run, Btc)).BackfilledFromUtc.ShouldBe(From);
+    }
+
+    [Fact]
+    public async Task Reactivated_LateUnsubscribe_StillFillsTheInactiveStretch()
+    {
+        SeedTrades("BTCUSDT", From, DepthMinutes);
+        var run = CreateRun();
+        await MarkCompletedAsync(run, Ada, Eth);
+
+        // Backfilled [From, From+1000), streamed [From+1000, From+1010), deactivated 30 s into From+1009. The UNSUBSCRIBE
+        // took effect only in the next minute, so the old stream (and its tail-out) also stored From+1010.
+        Kline[] history = [.. Enumerable.Range(0, 1000).Select(i => new Kline(From.AddMinutes(i), 1m, 1m, 1m, 1m, 0m, 0m))];
+        (await run.Services.GetRequiredService<ICandleWriter>().InsertBackfillAsync(Btc, history, Ct)).ShouldBe(1000);
+        await WriteStreamAsync(run, From.AddMinutes(1000), 11, firstId: 50_000_000);
+        await run.Symbols.SetBackfillStatusAsync(Btc, BackfillStatus.Completed, From, Ct);
+        (await run.Symbols.DeactivateAsync(Symbol("BTCUSDT"), Ct)).ShouldBeTrue();
+        await SetDeactivatedAtAsync(Btc, From.AddMinutes(1009).AddSeconds(30));
+
+        // Reactivated at From+3000 and streaming again from then.
+        (await run.Symbols.AddOrReactivateAsync(Symbol("BTCUSDT"), 20, Ct)).Status.ShouldBe(SymbolAddStatus.Reactivated);
+        await SetReactivatedAtAsync(Btc, From.AddMinutes(3000).AddSeconds(2));
+        await run.Symbols.SetBackfillStatusAsync(Btc, BackfillStatus.Pending, From, Ct);
+        await WriteStreamAsync(run, From.AddMinutes(3000), 5, firstId: 60_000_000);
+
+        await run.StartAsync();
+        run.Worker.Enqueue(Btc);
+        await WaitForStatusAsync(run, Btc, BackfillStatus.Completed);
+
+        // The stretch ends at the new stream (From+3000), not at the old stream's late minute (From+1010).
+        var requests = _server.KlineRequests;
+        requests.Select(r => r["startTime"]).ShouldBe([UnixMs(From.AddMinutes(1011)), UnixMs(From.AddMinutes(2011))]);
+        requests.ShouldAllBe(r => r["endTime"] == (long.Parse(UnixMs(From.AddMinutes(3000)), CultureInfo.InvariantCulture) - 1).ToString(CultureInfo.InvariantCulture));
+        var stats = await CandleStatsAsync(Btc);
+        stats.Count.ShouldBe(1000 + 11 + 1989 + 5);
+        stats.Backfilled.ShouldBe(1000 + 1989);
+        (await CloseAtAsync(Btc, From.AddMinutes(2999))).ShouldBe(Price(2999));
+
+        static decimal Price(int minute) => 100m + (minute * 0.01m);
     }
 
     [Fact]
@@ -620,6 +659,17 @@ public sealed class BackfillWorkerTests(TimescaleFixture db) : IAsyncLifetime
         await using var connection = new NpgsqlConnection(db.ConnectionString);
         await connection.OpenAsync(Ct);
         await using var command = new NpgsqlCommand("UPDATE symbols SET deactivated_at = $2 WHERE id = $1", connection);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = symbolId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = utc, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
+        (await command.ExecuteNonQueryAsync(Ct)).ShouldBe(1);
+    }
+
+    // As AddOrReactivateAsync records it, at a time consistent with the stream rows a test writes (its clock is fixed).
+    private async Task SetReactivatedAtAsync(int symbolId, DateTime utc)
+    {
+        await using var connection = new NpgsqlConnection(db.ConnectionString);
+        await connection.OpenAsync(Ct);
+        await using var command = new NpgsqlCommand("UPDATE symbols SET reactivated_at = $2 WHERE id = $1", connection);
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = symbolId });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = utc, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz });
         (await command.ExecuteNonQueryAsync(Ct)).ShouldBe(1);
