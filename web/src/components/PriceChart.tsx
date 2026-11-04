@@ -19,6 +19,7 @@ import {
 } from 'lightweight-charts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CandleResponse, IsoDateTime, LivePrice, Period, SmaResponse } from '@/api/types'
+import { InfoTip } from '@/components/InfoTip'
 import { setSeriesData, type CandleRow } from '@/lib/chartSeries'
 import { fillGaps, windowIndexRange, type WindowRange } from '@/lib/chartData'
 import { mergeTrade, reconcileBar, type OhlcBar } from '@/lib/liveBar'
@@ -460,30 +461,33 @@ export function PriceChart({ candles, period, sma, highlight, live, symbol, fitK
 
   return (
     <figure className={cn('flex min-w-0 flex-col', className)}>
-      <div
-        aria-hidden="true"
-        className="num flex min-h-5 flex-wrap items-baseline gap-x-3.5 gap-y-1 text-[0.75rem] text-ink-muted"
-      >
-        {shown && (
-          <>
-            <span className="text-ink-faint">
-              {formatUtc(new Date(shown.time * 1000).toISOString(), period)}
-            </span>
-            <Ohlc label="O" value={shown.open} />
-            <Ohlc label="H" value={shown.high} />
-            <Ohlc label="L" value={shown.low} />
-            <Ohlc label="C" value={shown.close} />
-            {change !== undefined && (
-              <span className={cn(change > 0 && 'text-up', change < 0 && 'text-down')}>{formatPercent(change)}</span>
-            )}
-            {shownSma !== undefined && sma && (
-              <span>
-                <span className="text-sma">SMA {sma.requestedDataPoints}</span>{' '}
-                <span className="text-ink">{formatPrice(shownSma)}</span>
+      <div className="flex min-h-5 items-start gap-2">
+        <div
+          aria-hidden="true"
+          className="num flex min-w-0 flex-1 flex-wrap items-baseline gap-x-3.5 gap-y-1 text-[0.75rem] text-ink-muted"
+        >
+          {shown && (
+            <>
+              <span className="text-ink-faint">
+                {formatUtc(new Date(shown.time * 1000).toISOString(), period)}
               </span>
-            )}
-          </>
-        )}
+              <Ohlc label="O" value={shown.open} />
+              <Ohlc label="H" value={shown.high} />
+              <Ohlc label="L" value={shown.low} />
+              <Ohlc label="C" value={shown.close} />
+              {change !== undefined && (
+                <span className={cn(change > 0 && 'text-up', change < 0 && 'text-down')}>{formatPercent(change)}</span>
+              )}
+              {shownSma !== undefined && sma && (
+                <span>
+                  <span className="text-sma">SMA {sma.requestedDataPoints}</span>{' '}
+                  <span className="text-ink">{formatPrice(shownSma)}</span>
+                </span>
+              )}
+            </>
+          )}
+        </div>
+        {shown && <InfoTip topic="chartOhlc" className="mt-0.5" />}
       </div>
       <div ref={containerRef} className="relative mt-3 min-h-0 w-full flex-1 overflow-hidden" />
       <figcaption className="sr-only">

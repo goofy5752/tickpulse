@@ -64,6 +64,13 @@
   --shadow-glass:
     inset 0 1px 0 0 var(--color-glass-highlight), 0 24px 48px -24px rgb(0 0 0 / 0.55);
 
+  /* Tooltips: the same glass, denser, so text stays readable over whatever lies beneath. */
+  --color-tip: rgb(20 19 34 / 0.9);
+  --color-tip-border: rgb(255 255 255 / 0.13);
+  --color-tip-inset: rgb(255 255 255 / 0.045);
+  --shadow-tip:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.07), 0 20px 44px -14px rgb(0 0 0 / 0.7), 0 2px 6px rgb(0 0 0 / 0.3);
+
   --ease-glide: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -103,6 +110,12 @@
 
     --shadow-glass:
       inset 0 1px 0 0 var(--color-glass-highlight), 0 18px 40px -24px rgb(40 30 90 / 0.22);
+
+    --color-tip: rgb(255 255 255 / 0.93);
+    --color-tip-border: rgb(23 21 43 / 0.11);
+    --color-tip-inset: rgb(23 21 43 / 0.04);
+    --shadow-tip:
+      inset 0 1px 0 0 rgb(255 255 255 / 0.9), 0 18px 40px -14px rgb(40 30 90 / 0.3), 0 2px 6px rgb(40 30 90 / 0.08);
   }
 
   html {
@@ -296,7 +309,127 @@
   }
 }
 
+/*
+ * InfoTip: a glass card portalled to <body>, positioned in script (left/top/max-height). It grows
+ * from the trigger's side (--tip-origin-x) in 140 ms; reduced motion shows it at once.
+ */
+@layer components {
+  .info-tip {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    width: min(20rem, calc(100vw - 24px));
+    border: 1px solid var(--color-tip-border);
+    border-radius: 0.75rem;
+    background-color: var(--color-tip);
+    box-shadow: var(--shadow-tip);
+    backdrop-filter: blur(22px) saturate(160%);
+    color: var(--color-ink);
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    text-align: left;
+    white-space: normal;
+    transform-origin: var(--tip-origin-x, 50%) 100%;
+    animation: tp-tip-in 140ms var(--ease-glide);
+  }
+  .info-tip[data-side='bottom'] {
+    transform-origin: var(--tip-origin-x, 50%) 0%;
+    animation-name: tp-tip-in-below;
+  }
+
+  .info-tip-body {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0.75rem 0.875rem 0.8125rem;
+  }
+
+  .info-tip-title {
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .info-tip-summary {
+    margin-top: 0.125rem;
+    color: var(--color-ink);
+  }
+
+  .info-tip-detail {
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    line-height: 1.55;
+    color: var(--color-ink-muted);
+  }
+
+  .info-tip-items {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.3125rem 0.75rem;
+    margin-top: 0.625rem;
+    padding-top: 0.625rem;
+    border-top: 1px solid var(--color-tip-border);
+    font-size: 0.75rem;
+    line-height: 1.45;
+
+    & dt {
+      font-weight: 500;
+      white-space: nowrap;
+      color: var(--color-ink);
+    }
+    & dt.font-mono {
+      font-size: 0.6875rem;
+      line-height: 1.6;
+    }
+    & dd {
+      color: var(--color-ink-muted);
+    }
+  }
+
+  .info-tip-example {
+    margin-top: 0.625rem;
+    border-radius: 0.5rem;
+    background-color: var(--color-tip-inset);
+    box-shadow: inset 0 0 0 1px var(--color-tip-border);
+    padding: 0.4375rem 0.625rem 0.5rem;
+
+    & p {
+      font-size: 0.6875rem;
+      font-weight: 500;
+      color: var(--color-sma);
+    }
+    & pre {
+      margin-top: 0.125rem;
+      font-size: 0.6875rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: var(--color-ink);
+    }
+  }
+}
+
+@keyframes tp-tip-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.98);
+  }
+}
+@keyframes tp-tip-in-below {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.98);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .info-tip,
+  .info-tip[data-side='bottom'] {
+    animation: none;
+  }
+
   *,
   *::before,
   *::after {

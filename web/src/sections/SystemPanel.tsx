@@ -1,8 +1,11 @@
 import { memo, useId, useState, type ReactNode } from 'react'
 import type { SystemStatsResponse, WsStatus } from '@/api/types'
+import { InfoTip } from '@/components/InfoTip'
 import { Skeleton } from '@/components/Skeleton'
 import { Sparkline } from '@/components/Sparkline'
 import { SLOW_LAG_MS } from '@/components/StatusPill'
+import { TitleWithTip } from '@/components/TitleWithTip'
+import type { HelpKey } from '@/content/help'
 import type { HubStatus } from '@/hooks/useMarketHub'
 import { useNow } from '@/hooks/useNow'
 import { formatCompact, formatCount, formatDuration, formatLag } from '@/lib/format'
@@ -52,9 +55,11 @@ export const SystemPanel = memo(function SystemPanel({ stats, hubStatus }: Syste
     <section id={SECTION_IDS.system} aria-labelledby={`${ids}-title`} className="glass flex flex-col p-5 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
         <div>
-          <h2 id={`${ids}-title`} className={sectionTitle}>
-            System
-          </h2>
+          <TitleWithTip help="systemSection">
+            <h2 id={`${ids}-title`} className={sectionTitle}>
+              System
+            </h2>
+          </TitleWithTip>
           <p className={sectionLead}>How the ingestion pipeline is doing right now.</p>
         </div>
         {stats && (
@@ -72,7 +77,7 @@ export const SystemPanel = memo(function SystemPanel({ stats, hubStatus }: Syste
       {stats ? (
         <>
           <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-5">
-            <Metric label="Ticks per second">
+            <Metric label="Ticks per second" help="systemTicks">
               <span className="flex items-end gap-3">
                 <data value={stats.ticksPerSecond}>{stats.ticksPerSecond.toFixed(1)}</data>
                 <Sparkline
@@ -83,13 +88,13 @@ export const SystemPanel = memo(function SystemPanel({ stats, hubStatus }: Syste
                 />
               </span>
             </Metric>
-            <Metric label="Ingest lag">
+            <Metric label="Ingest lag" help="systemLag">
               <span className={cn(stats.ingestLagMs > SLOW_LAG_MS && 'text-down')}>{formatLag(stats.ingestLagMs)}</span>
             </Metric>
-            <Metric label="Ticks stored">
+            <Metric label="Ticks stored" help="systemStored">
               <span title={`About ${formatCount(stats.storedTicksApprox)} ticks`}>{formatCompact(stats.storedTicksApprox)}</span>
             </Metric>
-            <Metric label="Uptime">{formatDuration(stats.uptimeSeconds)}</Metric>
+            <Metric label="Uptime" help="systemUptime">{formatDuration(stats.uptimeSeconds)}</Metric>
           </dl>
 
           <Rotation stats={stats} now={now} />
@@ -115,10 +120,13 @@ export const SystemPanel = memo(function SystemPanel({ stats, hubStatus }: Syste
   )
 })
 
-function Metric({ label, children }: { label: string; children: ReactNode }) {
+function Metric({ label, help, children }: { label: string; help: HelpKey; children: ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[0.75rem] text-ink-faint">{label}</dt>
+      <dt className="flex items-center gap-1.5 text-[0.75rem] text-ink-faint">
+        {label}
+        <InfoTip topic={help} />
+      </dt>
       <dd className="num mt-1 text-[1.375rem] leading-none font-semibold tracking-[-0.02em] text-ink">{children}</dd>
     </div>
   )
@@ -136,7 +144,9 @@ function Rotation({ stats, now }: { stats: SystemStatsResponse; now: number }) {
   return (
     <div className="mt-6 rounded-(--radius-control) border border-glass-border bg-glass px-4 py-3.5">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <h3 className="text-[0.8125rem] font-medium text-ink">Binance connection</h3>
+        <TitleWithTip help="systemConnection">
+          <h3 className="text-[0.8125rem] font-medium text-ink">Binance connection</h3>
+        </TitleWithTip>
         {hasSchedule && <span className="text-[0.75rem] text-ink-faint">{`Renewed every ${hours} h, before Binance's 24 h cut-off`}</span>}
       </div>
 
@@ -156,7 +166,9 @@ function Rotation({ stats, now }: { stats: SystemStatsResponse; now: number }) {
 
       <dl className="mt-3 grid grid-cols-1 gap-2 text-[0.8125rem] sm:grid-cols-2">
         <div className="flex justify-between gap-3 sm:block">
-          <dt className="text-ink-faint">Last reconnect</dt>
+          <dt className="flex items-center gap-1.5 text-ink-faint">
+            Last reconnect <InfoTip topic="systemLastReconnect" />
+          </dt>
           <dd className="num text-ink">
             {Number.isFinite(reconnect) ? (
               <time dateTime={stats.lastReconnect ?? undefined} title={`${utcTime.format(reconnect)} UTC`}>
@@ -168,7 +180,9 @@ function Rotation({ stats, now }: { stats: SystemStatsResponse; now: number }) {
           </dd>
         </div>
         <div className="flex justify-between gap-3 sm:block">
-          <dt className="text-ink-faint">Next rotation</dt>
+          <dt className="flex items-center gap-1.5 text-ink-faint">
+            Next rotation <InfoTip topic="systemNextRotation" />
+          </dt>
           <dd className="num text-ink">
             {Number.isFinite(next) ? (
               <time dateTime={stats.nextRotation ?? undefined} title={`${utcTime.format(next)} UTC`}>

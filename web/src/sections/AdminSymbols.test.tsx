@@ -42,7 +42,7 @@ beforeEach(() => {
 })
 
 async function addSymbol(user: ReturnType<typeof userEvent.setup>, symbol: string) {
-  await user.type(screen.getByLabelText(/symbol to add/i), symbol)
+  await user.type(screen.getByLabelText(/^symbol to add$/i), symbol)
   await user.click(screen.getByRole('button', { name: /^add symbol$/i }))
   return screen.findByRole('alert')
 }
@@ -79,7 +79,7 @@ describe('AdminSymbols', () => {
     const user = userEvent.setup()
     renderAdmin()
 
-    await user.type(screen.getByLabelText(/symbol to add/i), 'fooUSDT')
+    await user.type(screen.getByLabelText(/^symbol to add$/i), 'fooUSDT')
     await user.click(screen.getByRole('button', { name: /^add symbol$/i }))
 
     const alert = await screen.findByRole('alert')
@@ -96,13 +96,13 @@ describe('AdminSymbols', () => {
     const user = userEvent.setup()
     const first = renderAdmin()
 
-    await user.type(screen.getByLabelText(/admin api key/i), 's3cret')
+    await user.type(screen.getByLabelText(/^admin api key$/i), 's3cret')
     expect(sessionStorage.getItem(ADMIN_KEY_STORAGE_KEY)).toBe('s3cret')
     expect(localStorage.getItem(ADMIN_KEY_STORAGE_KEY)).toBeNull()
 
     first.unmount()
     renderAdmin()
-    expect(screen.getByLabelText<HTMLInputElement>(/admin api key/i).value).toBe('s3cret')
+    expect(screen.getByLabelText<HTMLInputElement>(/^admin api key$/i).value).toBe('s3cret')
 
     await user.click(screen.getByRole('button', { name: /forget key/i }))
     expect(sessionStorage.getItem(ADMIN_KEY_STORAGE_KEY)).toBeNull()
@@ -112,12 +112,12 @@ describe('AdminSymbols', () => {
     const user = userEvent.setup()
     renderAdmin()
 
-    await user.type(screen.getByLabelText(/symbol to add/i), 'SOLUSDT')
+    await user.type(screen.getByLabelText(/^symbol to add$/i), 'SOLUSDT')
     await user.click(screen.getByRole('button', { name: /^add symbol$/i }))
 
     expect((await screen.findByRole('alert')).textContent).toMatch(/enter the admin api key first/i)
     expect(adminCalls('POST')).toHaveLength(0)
-    expect(document.activeElement).toBe(screen.getByLabelText(/admin api key/i))
+    expect(document.activeElement).toBe(screen.getByLabelText(/^admin api key$/i))
   })
 
   it('Admin_StorageUnavailable_StillUsable', async () => {
@@ -130,7 +130,7 @@ describe('AdminSymbols', () => {
     const user = userEvent.setup()
     renderAdmin()
 
-    const input = screen.getByLabelText<HTMLInputElement>(/admin api key/i)
+    const input = screen.getByLabelText<HTMLInputElement>(/^admin api key$/i)
     await user.type(input, 'abc')
     expect(input.value).toBe('abc')
   })
@@ -180,7 +180,7 @@ describe('AdminSymbols', () => {
     const alert = await addSymbol(user, 'SOLUSDT')
     expect(alert.textContent).toMatch(/the api key was not accepted/i)
     expect(alert.textContent).toContain('The API key is not valid.')
-    expect(document.activeElement).toBe(screen.getByLabelText(/admin api key/i))
+    expect(document.activeElement).toBe(screen.getByLabelText(/^admin api key$/i))
   })
 
   it('Admin_Add403_SaysAdminDisabled', async () => {
@@ -230,7 +230,7 @@ describe('AdminSymbols', () => {
     await user.click(screen.getByRole('button', { name: /^yes, remove$/i }))
 
     await waitFor(() => {
-      expect(document.activeElement).toBe(screen.getByLabelText(/symbol to add/i))
+      expect(document.activeElement).toBe(screen.getByLabelText(/^symbol to add$/i))
     })
   })
 
@@ -258,7 +258,7 @@ describe('AdminSymbols', () => {
     await user.click(screen.getByRole('button', { name: /^yes, remove$/i }))
 
     expect((await screen.findByRole('alert')).textContent).toMatch(/not accepted/i)
-    expect(document.activeElement).toBe(screen.getByLabelText(/admin api key/i))
+    expect(document.activeElement).toBe(screen.getByLabelText(/^admin api key$/i))
   })
 
   it('Admin_RemovePending_KeepsFocus_IgnoresRepeatAndEscape', async () => {
@@ -286,7 +286,7 @@ describe('AdminSymbols', () => {
 
     finish(new Response(null, { status: 204 }))
     await waitFor(() => {
-      expect(document.activeElement).toBe(screen.getByLabelText(/symbol to add/i))
+      expect(document.activeElement).toBe(screen.getByLabelText(/^symbol to add$/i))
     })
   })
 })

@@ -92,7 +92,7 @@ describe('AnalyticsPanel', () => {
     renderPanel()
     await screen.findByText('12 / 20 points')
 
-    const input = screen.getByLabelText(/points \(n\)/i)
+    const input = screen.getByRole('textbox', { name: 'Points (n)' })
     await user.clear(input)
     await user.type(input, '0')
 
@@ -119,7 +119,7 @@ describe('AnalyticsPanel', () => {
     renderPanel()
     await screen.findByText('12 / 20 points')
 
-    const input = screen.getByLabelText(/points \(n\)/i)
+    const input = screen.getByRole('textbox', { name: 'Points (n)' })
     await user.clear(input)
     await user.type(input, '30')
 

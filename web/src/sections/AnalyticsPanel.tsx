@@ -2,11 +2,14 @@ import { memo, useId, useState, type KeyboardEvent } from 'react'
 import { ApiError, apiPaths } from '@/api/client'
 import { isValidSmaN, SMA_MAX_POINTS, useAverage, useSma } from '@/api/queries'
 import { isPeriod, PERIODS, type AveragePriceResponse, type SmaResponse } from '@/api/types'
+import { FieldLabel } from '@/components/FieldLabel'
+import { InfoTip } from '@/components/InfoTip'
 import { Skeleton } from '@/components/Skeleton'
+import { TitleWithTip } from '@/components/TitleWithTip'
 import { formatCount, formatDuration, formatPrice, formatUtc } from '@/lib/format'
 import { PERIOD_SECONDS, toUnixSeconds } from '@/lib/sma'
 import { N_HINT, parseN, startToIso, type SmaParams } from '@/lib/smaParams'
-import { control, fieldLabel, selectControl } from '@/lib/styles'
+import { control, selectControl } from '@/lib/styles'
 import { cn } from '@/lib/utils'
 
 interface AnalyticsPanelProps {
@@ -52,7 +55,9 @@ function AverageCard({ symbol }: { symbol: string | undefined }) {
 
   return (
     <div>
-      <h3 className={cardTitle}>24h average price</h3>
+      <TitleWithTip help="avgPrice">
+        <h3 className={cardTitle}>24h average price</h3>
+      </TitleWithTip>
       {average.data ? (
         <AverageFigures data={average.data} />
       ) : average.isError ? (
@@ -81,11 +86,15 @@ function AverageFigures({ data }: { data: AveragePriceResponse }) {
       </p>
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-1 text-[0.8125rem]">
         <div>
-          <dt className="text-ink-faint">Coverage</dt>
+          <dt className="flex items-center gap-1.5 text-ink-faint">
+            Coverage <InfoTip topic="avgCoverage" />
+          </dt>
           <dd className="num text-ink">{`${formatDuration(data.coveredSeconds)} of ${data.windowHours}h`}</dd>
         </div>
         <div>
-          <dt className="text-ink-faint">Trades averaged</dt>
+          <dt className="flex items-center gap-1.5 text-ink-faint">
+            Trades averaged <InfoTip topic="avgTrades" />
+          </dt>
           <dd className="num text-ink">{formatCount(data.sampleCount)}</dd>
         </div>
       </dl>
@@ -153,13 +162,15 @@ function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
 
   return (
     <div>
-      <h3 className={cardTitle}>Simple moving average</h3>
+      <TitleWithTip help="smaSection">
+        <h3 className={cardTitle}>Simple moving average</h3>
+      </TitleWithTip>
 
       <div className="mt-3 grid grid-cols-2 gap-2.5">
         <div>
-          <label htmlFor={`${ids}-n`} className={fieldLabel}>
+          <FieldLabel htmlFor={`${ids}-n`} help="smaN">
             Points (n)
-          </label>
+          </FieldLabel>
           <input
             id={`${ids}-n`}
             type="text"
@@ -177,9 +188,9 @@ function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
           />
         </div>
         <div>
-          <label htmlFor={`${ids}-p`} className={fieldLabel}>
+          <FieldLabel htmlFor={`${ids}-p`} help="smaP">
             Period (p)
-          </label>
+          </FieldLabel>
           <select
             id={`${ids}-p`}
             value={params.p}
@@ -197,10 +208,10 @@ function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
           </select>
         </div>
         <div className="col-span-2">
-          <label htmlFor={`${ids}-s`} className={fieldLabel}>
+          <FieldLabel htmlFor={`${ids}-s`} help="smaS">
             Start (s), UTC
-          </label>
-          <div className="flex gap-2">
+          </FieldLabel>
+          <div className="flex items-center gap-2">
             <input
               id={`${ids}-s`}
               type="datetime-local"
@@ -222,6 +233,7 @@ function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
             >
               Now
             </button>
+            <InfoTip topic="smaNow" />
           </div>
           <p id={`${ids}-s-hint`} className="mt-1.5 text-[0.75rem] text-ink-faint">
             {params.s === '' ? 'Leave empty for the window that ends now.' : 'The window starts at this bucket.'}
@@ -253,11 +265,12 @@ function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
       </div>
 
       {symbol && nValid && (
-        <p className="mt-4 truncate text-[0.6875rem] text-ink-faint">
-          <code title="The request behind this figure">
-            GET {decodeURIComponent(apiPaths.sma(symbol, params.n, params.p, startIso))}
-          </code>
-        </p>
+        <div className="mt-4 flex items-center gap-1.5 text-[0.6875rem] text-ink-faint">
+          <p className="min-w-0 truncate">
+            <code>GET {decodeURIComponent(apiPaths.sma(symbol, params.n, params.p, startIso))}</code>
+          </p>
+          <InfoTip topic="smaRequest" />
+        </div>
       )}
     </div>
   )
@@ -278,18 +291,29 @@ function SmaFigures({ data, stale }: { data: SmaResponse; stale: boolean }) {
 
   return (
     <div className={cn('transition-opacity duration-300', stale && 'opacity-55')}>
-      <p className={cn(bigFigure, 'mt-0 text-sma')}>
-        <data value={data.value}>{formatPrice(data.value, data.symbol)}</data>
+      <div className="flex items-center gap-2">
+        <p className={cn(bigFigure, 'mt-0 text-sma')}>
+          <data value={data.value}>{formatPrice(data.value, data.symbol)}</data>
+        </p>
+        <InfoTip topic="smaValue" />
+      </div>
+      <div className="mt-4 flex items-center gap-2">
+        <PointsStrip data={data} bucketsInWindow={bucketsInWindow} />
+        <InfoTip topic="smaDots" />
+      </div>
+      <p className="num mt-2.5 flex items-center gap-1.5 text-[0.8125rem] text-ink">
+        {`${data.actualDataPoints} / ${data.requestedDataPoints} points`}
+        <InfoTip topic="smaPoints" />
       </p>
-      <PointsStrip data={data} bucketsInWindow={bucketsInWindow} />
-      <p className="num mt-2.5 text-[0.8125rem] text-ink">{`${data.actualDataPoints} / ${data.requestedDataPoints} points`}</p>
-      <p className="num text-[0.8125rem] text-ink-muted">
+      <p className="num flex flex-wrap items-center text-[0.8125rem] text-ink-muted">
         <time dateTime={data.windowStart}>{formatUtc(data.windowStart, data.period)}</time>
         <span aria-hidden="true" className="px-1.5 text-ink-faint">
           →
         </span>
         <span className="sr-only"> to </span>
-        <time dateTime={data.windowEnd}>{formatUtc(data.windowEnd, data.period)}</time> UTC
+        <time dateTime={data.windowEnd}>{formatUtc(data.windowEnd, data.period)}</time>
+        <span className="ml-1">UTC</span>
+        <InfoTip topic="smaWindow" className="ml-1.5" />
       </p>
       {note && <p className="mt-1.5 text-[0.75rem] text-ink-faint">{note}</p>}
     </div>
@@ -308,7 +332,7 @@ function PointsStrip({ data, bucketsInWindow }: { data: SmaResponse; bucketsInWi
   if (requested > MAX_SLOTS || data.dataPoints.length === 0) {
     const share = requested > 0 ? data.actualDataPoints / requested : 0
     return (
-      <div aria-hidden="true" className="mt-4 h-1.5 overflow-hidden rounded-full bg-glass-strong">
+      <div aria-hidden="true" className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-glass-strong">
         <span className="block h-full rounded-full bg-sma" style={{ width: `${Math.min(1, share) * 100}%` }} />
       </div>
     )
@@ -323,7 +347,7 @@ function PointsStrip({ data, bucketsInWindow }: { data: SmaResponse; bucketsInWi
   })
 
   return (
-    <div aria-hidden="true" className="mt-4 flex h-2.5 gap-[3px]">
+    <div aria-hidden="true" className="flex h-2.5 min-w-0 flex-1 gap-[3px]">
       {slots.map((slot, i) => (
         <span
           key={i}
