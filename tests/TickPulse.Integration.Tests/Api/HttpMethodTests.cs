@@ -85,6 +85,30 @@ public sealed class HttpMethodTests(ApiFactory api) : IClassFixture<ApiFactory>
         (await response.Content.ReadAsByteArrayAsync(Ct)).ShouldBeEmpty(path);
     }
 
+    [Theory]
+    [InlineData(null, HttpStatusCode.Unauthorized)]
+    [InlineData("wrong-key", HttpStatusCode.Unauthorized)]
+    [InlineData(ApiFactory.AdminApiKey, HttpStatusCode.OK)]
+    public async Task Head_OnAdminEndpoint_NeedsTheKey(string? key, HttpStatusCode expected)
+    {
+        using var client = api.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Head, new Uri("/api/admin/symbols", UriKind.Relative));
+        if (key is not null)
+        {
+            request.Headers.Add("X-Api-Key", key);
+        }
+
+        using var response = await client.SendAsync(request, Ct);
+
+        response.StatusCode.ShouldBe(expected);
+        if (expected == HttpStatusCode.Unauthorized)
+        {
+            response.Headers.WwwAuthenticate.ShouldHaveSingleItem().Scheme.ShouldBe("ApiKey");
+        }
+
+        (await response.Content.ReadAsByteArrayAsync(Ct)).ShouldBeEmpty();
+    }
+
     [Fact]
     public async Task Head_OnStaticFiles_Returns200WithoutBody()
     {

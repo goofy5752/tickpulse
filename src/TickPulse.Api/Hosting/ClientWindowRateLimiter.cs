@@ -13,8 +13,9 @@ namespace TickPulse.Api.Hosting;
 /// by the next request; until then the limiter reports itself idle, which lets the partitioned limiter drop it.</para>
 /// <para>The rate limiting middleware asks twice for a request it rejects: <c>AttemptAcquire</c> first, then
 /// <c>AcquireAsync</c> (which could queue), and hands the second lease to <c>OnRejected</c>. So only a failed
-/// <c>AcquireAsync</c> counts as a rejection; a failed <c>AttemptAcquire</c> reports the count that rejection would
-/// have.</para>
+/// <c>AcquireAsync</c> counts as a rejection, both in <see cref="RejectionsInWindow"/> and in
+/// <see cref="RateLimiterStatistics.TotalFailedLeases"/>; a failed <c>AttemptAcquire</c> reports the count that
+/// rejection would have and counts nothing.</para>
 /// </remarks>
 internal sealed class ClientWindowRateLimiter : RateLimiter
 {
@@ -113,9 +114,9 @@ internal sealed class ClientWindowRateLimiter : RateLimiter
             if (countRejection)
             {
                 _rejected++;
+                _failed++;
             }
 
-            _failed++;
             var retryAfter = _window - _clock.GetElapsedTime(_windowStart, now);
             return new Lease(acquired: false, retryAfter, countRejection ? _rejected : _rejected + 1);
         }

@@ -74,11 +74,15 @@ public sealed class ClientWindowRateLimiterTests
     }
 
     [Fact]
-    public void Statistics_CountLeasesAndFreePermits()
+    public async Task Statistics_CountLeasesAndFreePermits_OneFailurePerRejection()
     {
         using var limiter = new ClientWindowRateLimiter(3, Window, _clock);
         limiter.AttemptAcquire(2).IsAcquired.ShouldBeTrue();
+
+        // One rejected request, as the middleware asks for it: a probe, then AcquireAsync.
         limiter.AttemptAcquire(2).IsAcquired.ShouldBeFalse();
+        limiter.GetStatistics().ShouldNotBeNull().TotalFailedLeases.ShouldBe(0, "a probe alone counts nothing");
+        (await limiter.AcquireAsync(2, Ct)).IsAcquired.ShouldBeFalse();
 
         var stats = limiter.GetStatistics().ShouldNotBeNull();
         stats.CurrentAvailablePermits.ShouldBe(1);
