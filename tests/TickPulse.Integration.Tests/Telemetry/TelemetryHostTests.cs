@@ -12,6 +12,7 @@ using Serilog.Events;
 using Serilog.Formatting.Compact;
 using Serilog.Parsing;
 using TickPulse.Api.Telemetry;
+using TickPulse.Application.Ingestion;
 using TickPulse.Integration.Tests.Fixtures;
 using static TickPulse.Integration.Tests.Ingestion.IngestionTestHost;
 
@@ -73,6 +74,73 @@ public sealed class TelemetryHostTests(ApiFactory api) : IClassFixture<ApiFactor
         var hash = host.Services.GetRequiredService<ClientIpHasher>().Hash(ClientIp);
         sink.Events.Where(IsRequestLog).ShouldAllBe(e => e.Properties["client_ip_hash"].Equals(new ScalarValue(hash)));
         sink.Events.Count(e => e.MessageTemplate.Text.StartsWith("Admin authentication failed", StringComparison.Ordinal)).ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task RequestLog_Burst_LogsOrdinaryRequestsUpToTheBudget_AndEveryProblem()
+    {
+        var sink = new CapturingSink();
+        await using var host = LoggedHost(sink).WithSetting("Otel:SampledRequestsPerSecond", "3");
+        await host.InitializeAsync();
+        using var client = host.CreateClient();
+
+        // The host's clock is frozen, so the budget does not refill during the burst.
+        for (var i = 0; i < 20; i++)
+        {
+            (await client.GetAsync("/api/symbols", Ct)).StatusCode.ShouldBe(HttpStatusCode.OK);
+        }
+
+        (await client.GetAsync("/api/NOPEUSDT/24hAvgPrice", Ct)).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+
+        await RequestLogAsync(sink, "/api/NOPEUSDT/24hAvgPrice");
+        var logged = sink.Events.Where(IsRequestLog).ToList();
+        logged.Count(e => e.Properties["RequestPath"].Equals(new ScalarValue("/api/symbols"))).ShouldBe(3);
+        logged.ShouldAllBe(e => e.Level == LogEventLevel.Information);
+    }
+
+    [Fact]
+    public async Task Tracing_LoggedRequestsAndExportedTraces_AreTheSame()
+    {
+        var sink = new CapturingSink();
+        var traces = new RequestTraceRecorder();
+        await using var host = LoggedHost(sink)
+            .WithSetting("Otel:Endpoint", "http://127.0.0.1:9") // the trace pipeline exists; nothing receives
+            .WithSetting("Otel:SampledRequestsPerSecond", "2")
+            .WithServices(s => s.AddSingleton<IStartupFilter>(traces));
+        await host.InitializeAsync();
+        using var client = host.CreateClient();
+
+        for (var i = 0; i < 5; i++)
+        {
+            (await client.GetAsync("/api/symbols", Ct)).StatusCode.ShouldBe(HttpStatusCode.OK);
+        }
+
+        (await client.GetAsync("/api/NOPEUSDT/24hAvgPrice", Ct)).StatusCode.ShouldBe(HttpStatusCode.NotFound);
+
+        await RequestLogAsync(sink, "/api/NOPEUSDT/24hAvgPrice");
+        await WaitForAsync(() => traces.Requests.Count >= 6, "six requests");
+
+        // Two sampled by the budget, three only recorded; the 404 is beyond the budget but its trace is kept for its log line.
+        traces.Requests.Select(r => (r.Status, r.Sampled)).ShouldBe(
+            [(200, true), (200, true), (200, false), (200, false), (200, false), (404, true)]);
+        sink.Events.Where(IsRequestLog).Select(e => e.Properties["StatusCode"].ToString()).ShouldBe(["200", "200", "404"]);
+    }
+
+    [Fact]
+    public async Task NotReady_WhileIngestionConnects_LogsWarnings_NoErrors()
+    {
+        var sink = new CapturingSink();
+        await using var host = LoggedHost(sink);
+        await host.InitializeAsync();
+        using var client = host.CreateClient();
+        host.Services.GetRequiredService<IngestionState>().SetConnecting();
+
+        (await client.GetAsync("/health/ready", Ct)).StatusCode.ShouldBe(HttpStatusCode.ServiceUnavailable);
+
+        var entry = await RequestLogAsync(sink, "/health/ready");
+        entry.Level.ShouldBe(LogEventLevel.Warning);
+        sink.Events.ShouldContain(e => e.Level == LogEventLevel.Warning && e.RenderMessage().Contains("Ingestion is Connecting", StringComparison.Ordinal));
+        sink.Events.Where(e => e.Level >= LogEventLevel.Error).Select(e => e.RenderMessage()).ShouldBeEmpty();
     }
 
     [Fact]
