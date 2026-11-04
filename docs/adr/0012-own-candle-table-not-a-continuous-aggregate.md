@@ -35,9 +35,13 @@ PostgreSQL is one of them ([deployment.md](../deployment.md#managed-postgresql))
 
 ## Alternatives
 
-- **A continuous aggregate over `price_ticks`.** Rejected: the backfill cannot write into it, it would
-  lose the minutes once retention drops their ticks, already materialised buckets go stale until a
-  refresh runs (late and gap-filled ticks land in them), and it is a TSL feature.
+- **A continuous aggregate over `price_ticks`.** Rejected, for four reasons:
+  - The backfill cannot write into it.
+  - Materialised buckets survive the 14-day retention of their ticks only as long as no refresh covers
+    that range again. A refresh window wide enough to pick up late or gap-filled ticks would therefore
+    have to be kept clear of the retention horizon.
+  - Already materialised buckets go stale until a refresh runs.
+  - It is a TSL feature.
 - **Candles computed on read from raw ticks.** Rejected: too slow for 1d and 1w, and impossible beyond
   the 14-day retention.
 

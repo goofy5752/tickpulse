@@ -35,9 +35,9 @@ other hand, is defined as an average over *collected* trades
 
 ## Consequences
 
-- The live run fetched 262,080 klines per symbol in about 2 minutes (263 pages), well inside Binance's
-  request-weight limits. Symbols backfill one after another, so a fresh stack with 3 symbols needs a
-  few minutes before every long-period SMA is complete.
+- The end-to-end run on the local stack fetched 262,080 klines per symbol in about 2 minutes
+  (263 pages), well inside Binance's request-weight limits. Symbols backfill one after another, so on
+  a fresh stack the third seeded symbol has its long-period SMAs about 6 minutes after start.
 - The REST client honours Binance's weight headers, waits out `429` and treats `418` as a ban
   (`BinanceWeightGuard`). A ban marks only the current symbol `Failed` and requeues it after the wait.
 - The backfill runs only on the leader ([0011](0011-single-process-with-a-leader-lock.md)).

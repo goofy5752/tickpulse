@@ -31,7 +31,7 @@ before any number can be checked against another source.
 
 ## Consequences
 
-- Values can be checked against Binance. In the live end-to-end run, BTCUSDT `1d n=20` was
+- Values can be checked against Binance. In the end-to-end run against live Binance, BTCUSDT `1d n=20` was
   `80407.33600000` in TickPulse and over Binance's last 20 complete daily klines, with all 20 closes
   identical. `1w n=8`, `30m n=48` and the ETH, SOL and ADA periods matched too. A naive check with
   Binance `limit=20` differs, because Binance includes the open candle.

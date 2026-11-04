@@ -40,7 +40,8 @@ TickPulse serves JSON and XML through HTTP content negotiation (`Accept`). In AS
 
 - `NegotiationTests` and the endpoint tests run a matrix of `Accept` values over every endpoint and
   every error path (401, 403, 404, 406, 429, 500), in JSON and XML.
-- The live check found one gap the matrix did not cover: framework-generated 405 and 415 responses
-  bypassed the TickPulse problem types (defect F9, fixed in the HTTP polish fix).
+- The end-to-end check found one gap the matrix did not cover: framework-generated 405 and 415 responses
+  bypassed the TickPulse problem types (defect F9). PR #16 added the `method-not-allowed` and
+  `unsupported-media-type` problems, and `HEAD` on every GET endpoint, with `HttpMethodTests`.
 - Controllers add a little per-request overhead compared with minimal APIs; at the measured latencies
   (p95 12.7 ms for `24hAvgPrice` at 6.4k req/s) it does not matter.

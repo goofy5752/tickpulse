@@ -1,7 +1,11 @@
 # Deployment
 
-TickPulse runs at <https://tickpulse.dev>, and its Grafana at <https://grafana.tickpulse.dev>. Both
-run on a shared VPS behind Cloudflare. The whole deployment is code in this repository:
+TickPulse is designed to run at <https://tickpulse.dev>, with its Grafana at
+<https://grafana.tickpulse.dev>, both on a shared VPS behind Cloudflare. The deployment pipeline is
+ready. The first deploy waits on the owner's one-time steps in
+[First-time server setup](#first-time-server-setup) (domain, DNS, certificate, deploy user and
+secrets). The topology below is the target that pipeline deploys. The whole deployment is code in
+this repository:
 
 - the compose project (`deploy/docker-compose.prod.yml`)
 - the host nginx vhosts (`deploy/nginx/`)
@@ -11,7 +15,7 @@ run on a shared VPS behind Cloudflare. The whole deployment is code in this repo
 How TickPulse would run with more than one instance, on managed services, is in
 [Scale-out production design](#scale-out-production-design) at the end.
 
-## Live topology
+## Single-host topology
 
 ```mermaid
 flowchart LR
@@ -253,7 +257,7 @@ own files, and nginx is only ever reloaded gracefully after `nginx -t` passes.
 6. **nginx.** Copy the four files from `deploy/nginx/` to the server, then, as root:
 
    ```bash
-   # the host must already have an explicit default server on 80 and on 443 (see "Live topology"):
+   # the host must already have an explicit default server on 80 and on 443 (see "Single-host topology"):
    # expect a default_server line for each port
    nginx -T 2> /dev/null | grep -E 'listen .*(80|443).*default_server'
 
@@ -395,14 +399,18 @@ dc start api
 
 ## Scale-out production design
 
-The live deployment is one API container and one database on one host. This section describes how
-TickPulse would run when it has to survive the loss of a host, serve more traffic than one container
-handles, and be operated by more than one person. It targets Azure; the same shape works on any
-platform with managed containers and managed PostgreSQL.
+The single-host deployment above is one API container and one database on one host. This section
+describes how TickPulse would run when it has to survive the loss of a host, serve more traffic than
+one container handles, and be operated by more than one person. It targets Azure; the same shape works
+on any platform with managed containers and managed PostgreSQL.
 
-The image, the HTTP contract and the data model stay as they are. TickPulse was built for this from
-the start: any number of instances can serve the API, and a PostgreSQL advisory lock picks the single
-ingestion leader ([ADR 0011](adr/0011-single-process-with-a-leader-lock.md)).
+What holds today is narrow. Running several instances is safe, because a PostgreSQL advisory lock
+lets exactly one of them ingest at a time and the others stand by
+([ADR 0011](adr/0011-single-process-with-a-leader-lock.md)). Scaling out is **not** a configuration
+change, though. API-only replicas and live prices on every replica need the code changes listed in
+[Code changes this design needs](#code-changes-this-design-needs): a setting that skips the workers, a
+SignalR backplane, leader-only pushes, and the rest. The HTTP contract and the data model stay as
+they are.
 
 ```mermaid
 flowchart LR
@@ -434,10 +442,13 @@ flowchart LR
 Two apps from the same image, plus a job:
 
 - **`tickpulse-api`**: the API, the dashboard and the hub's server side. `minReplicas: 2` across
-  availability zones, an HTTP scale rule on concurrent requests, and the hosted workers switched off.
-  One API container on the local stack served `24hAvgPrice` at about 6,400 req/s with a p95 of
-  12.7 ms and peaked at 324 MiB of memory under load, so 0.5 vCPU and 1 GiB per replica is a
-  reasonable starting point, to be tuned from the metrics.
+  availability zones, an HTTP scale rule on concurrent requests, and the hosted workers switched off
+  (code change 1).
+  - For sizing: on the local stack, with telemetry off, one API container served `24hAvgPrice` at
+    about 6,400 req/s with a p95 of 12.7 ms, using 241 % CPU (about 2.4 cores) and 101 MiB.
+  - Its memory peaked at 324 MiB in the run with telemetry on.
+  - Start with 1 GiB per replica, and set the CPU and the scale rule from the production metrics
+    rather than from these numbers.
 - **`tickpulse-ingest`**: the same image with ingestion and backfill on and no public ingress,
   `minReplicas = maxReplicas = 1`. Ingestion gets its own CPU, so API load cannot raise ingest lag.
 - **`tickpulse-migrate`**: a Container Apps job that runs the migrations before a release. Both apps
@@ -449,9 +460,11 @@ lock holder ingests; the other stands by (`/health/ready` reports `Standby`, whi
 takes over within `Ingestion:LeaderRetryInterval` once the lock frees. The gap-fill then recovers the
 trades missed during the handover ([ADR 0022](adr/0022-gap-fill-watermarks-seeded-from-the-database.md)).
 
-The simpler variant, one app in which every replica runs the workers and the lock elects one, works
-today without code changes. It is a sound first step, but ingestion then shares CPU with whichever
-replica happens to hold the lock.
+The simpler variant, one app in which every replica runs the workers and the lock elects one, needs no
+code change to be *safe*: there is still exactly one writer. It is not a complete scale-out, though:
+- Without the backplane, only browsers connected to the leader's replica get live prices.
+- `/api/system/stats` on the other replicas reports `Standby`.
+- Ingestion shares CPU with whichever replica holds the lock.
 
 ### Live prices across replicas: Azure SignalR Service
 

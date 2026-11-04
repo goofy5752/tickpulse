@@ -6,7 +6,7 @@
 ## Context
 
 Every request produced an exported trace of about 3 spans and an Information log line of about 1 KB.
-In the live load test (about 5,000 req/s), the OpenTelemetry Collector sat at its memory limit and
+In a load test on the local stack (about 5,000 req/s), the OpenTelemetry Collector sat at its memory limit and
 refused every signal, Loki dropped logs, metrics arrived up to 75 s late, and the critical
 *WebSocket disconnected* alert fired while the stream was connected. Telemetry also cost 25–55 % of
 the API's throughput.
@@ -33,9 +33,9 @@ pipeline is under the most pressure.
 - Every request logged at Information or above keeps its trace, so every logged request can be
   opened as a trace.
 - `429` is a deliberate exception to "4xx is always logged". The `aspnetcore.rate_limiting.requests`
-  metric still counts every rejection. The rate limiter's own rejection Warning is still written for
-  every rejection; limiting it to one per client and window is in progress (defect F8 in the
-  [defects log](../ai/defects-log.md)).
+  metric still counts every rejection. The rate limiter writes its own Warning once per client and
+  window, and logs later rejections in that window at Debug (defect F8, PR #16, in the
+  [defects log](../ai/defects-log.md#f8)).
 - `Otel:FlushSampleRatio` (default `0.1`) keeps a share of the `ingest.flush` traces. Backfill pages
   and gap-fills are always traced.
 

@@ -7,7 +7,7 @@
 
 1d and 1w analytics originally aggregated `candles_1m` with `time_bucket` and `first/last` on every
 request: about 80,000 minute rows for an 8-week SMA, and about 262,000 for 300 daily candles. In the
-live load test (50 connections, 30 s), SMA `1w n=8` had a p95 of 83 ms against a 50 ms target, and a
+load test on the local stack (50 connections, 30 s), SMA `1w n=8` had a p95 of 83 ms against a 50 ms target, and a
 single `candles?p=1d` call took about 135 ms. Database CPU reached 2,100 %. Closed buckets almost
 never change, but they were recomputed every time.
 

@@ -39,12 +39,13 @@ same rows. Running none loses data. The API itself is stateless and can run any 
 
 ## Consequences
 
-- Scaling out is configuration only: every replica serves the API and one of them ingests. The
-  scale-out design in [deployment.md](../deployment.md#scale-out-production-design) relies on this.
+- Running more than one instance is safe today: whichever instance holds the lock ingests, and the
+  others stand by. That is all the current code guarantees. It does **not** make scale-out a
+  configuration change. API-only replicas need a setting that skips the hosted workers, and live
+  prices across replicas need a SignalR backplane, because only the leader has them. The other code
+  changes are listed in
+  [deployment.md](../deployment.md#code-changes-this-design-needs).
 - A leadership handover leaves a short gap in the stream. The new leader recovers the missed trades
   over REST ([0022](0022-gap-fill-watermarks-seeded-from-the-database.md)).
-- Splitting ingestion into its own process is a small change: a setting that skips registering the
-  two hosted workers on API-only replicas. Today every replica registers them and the lock picks one.
-  The lock already guarantees a single writer either way.
-- The ingestion workers share the API's memory and CPU. In the live run, ingest lag p95 was 803 ms
-  against a 1 s target, most of it the 500 ms batch delay.
+- The ingestion workers share the API's memory and CPU. In the end-to-end run on the local stack, ingest
+  lag p95 was 803 ms against a 1 s target, most of it the 500 ms batch delay.

@@ -75,23 +75,12 @@ npm --prefix web run dev | build | lint | typecheck
   `X-Api-Key`), `upstream-unavailable` (503: Binance cannot confirm a symbol being added right now),
   `method-not-allowed` (405, with `Allow`), `unsupported-media-type` (415: a request body that is
   neither JSON nor XML). `HEAD` works wherever `GET` does.
-- **Config keys** (env uses `__`): `ConnectionStrings:TickPulse`, `Admin:*`, `Binance:*`,
-  `Ingestion:*`, `Backfill:*`, `Database:RunMigrationsOnStartup`, `Otel:Endpoint`,
-  `Otel:FlushSampleRatio`.
-  Defaults are listed in the plan's Global Constraints, plus two leader-election keys:
-  `Ingestion:LeaderRetryInterval` (`00:00:10`, how often a standby instance tries the lock) and
-  `Ingestion:LeaderCheckInterval` (`00:00:05`, how often the leader probes it).
-  API host keys: `RateLimiting:PermitLimit` (`300`) and `RateLimiting:WindowSeconds` (`60`), a
-  fixed window per client (IPv4 address, IPv6 /64) on the API controllers;
-  `ForwardedHeaders:KnownProxies` (IPs) and `ForwardedHeaders:KnownNetworks` (CIDRs, e.g. the
-  Docker bridge `172.16.0.0/12`), each an array or comma-separated and added to loopback: the
-  proxies whose `CF-Connecting-IP` is trusted as the client IP (`X-Forwarded-For` is never read);
-  `Otel:IpSalt`, the salt of the logged client-IP hash (random per process when unset);
-  `Otel:SampledRequestsPerSecond` (`10`, see Telemetry).
-  Hub and stats keys: `MarketHub:ConnectPermitLimit` (`60`) and `MarketHub:ConnectWindowSeconds`
-  (`60`), hub connection attempts per client IP; `SystemStats:CacheTtl` (`00:00:02`) and
-  `SystemStats:ReadTimeout` (`00:00:01`), the cache and read timeout of the stored-row counts.
-  The README's configuration table lists every key with its default; keep it in step when adding one.
+- **Config keys** (env uses `__`): `ConnectionStrings:TickPulse`, `Database:*`, `Admin:*`,
+  `Binance:*`, `Ingestion:*`, `Backfill:*`, `RateLimiting:*`, `MarketHub:*`, `SystemStats:*`,
+  `ForwardedHeaders:*`, `Otel:*`, `Serilog:*`. Defaults: the README configuration table, which lists
+  every key; keep it in step when adding one. `ForwardedHeaders:KnownNetworks` takes CIDRs (the
+  compose network is `172.30.0.0/24`). Only peers in those ranges, in `KnownProxies`, or on loopback
+  may set `CF-Connecting-IP`, and `X-Forwarded-For` is never read.
 - **Telemetry**: the `TickPulse` meter and activity source live in
   `Infrastructure/Telemetry/TickPulseMetrics.cs`; their names, units and tags are a contract with
   the dashboards and alerts (`deploy/observability/README.md`). Record per batch, never per tick.

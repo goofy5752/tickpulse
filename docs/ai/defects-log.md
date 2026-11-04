@@ -10,10 +10,11 @@ being fixed. Style nits and refactors are not listed.
 - **Review:** every work item of the implementation plan (`Tn` below is item *n*) got a code review by
   a separate agent, then a re-review of the fixes. See
   [engineering-notes.md](../../engineering-notes.md#how-ai-generated-code-was-validated).
-- **Live E2E:** an end-to-end run of the full local stack against real Binance: every endpoint in
+- **E2E run:** an end-to-end run of the full local stack against real Binance: every endpoint in
   JSON and XML, the CLI, admin flows, restarts, the dashboard in Chrome, Grafana, and a load test.
   Its findings are `F1`–`F17`.
-- **Load test:** findings that showed up only under sustained load, after the E2E run (`F18`).
+- **Load test:** findings that showed up only under the heavier load that followed the E2E run (`F18`,
+  and `F19`, which F18's crashes had hidden). They count with the E2E findings: 19 in all, `F1`–`F19`.
 - **Security scan:** the automated security review of the CD pipeline.
 
 **Updating an entry.** Entries whose fix is still in review have `PR: TBD`. When the PR merges,
@@ -50,25 +51,25 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 | [RV-25](#rv-25) | Third-party GitHub Actions were not pinned | Review (T25), security scan | Important | #11 |
 | [RV-26](#rv-26) | `http2` on the vhosts would switch HTTP/2 on for every site on the host's port 443 | Review (T25) | Important | #11 |
 | [RV-27](#rv-27) | A rollback restored the image but not the deployed files | Review (T25) | Important | #11 |
-| [F1](#f1) | A load burst knocked out telemetry and fired the WebSocket alert falsely | Live E2E | Important | #14 |
-| [F2](#f2) | Trades lost on every API restart, redeploy or leadership handover | Live E2E | Important | TBD |
-| [F3](#f3) | `change24hPercent` wildly wrong while a backfill runs | Live E2E | Important | #15 |
-| [F4](#f4) | Long-period analytics aggregated minutes at query time (p95 83 ms) | Live E2E | Important | #12 |
-| [F5](#f5) | Uncaught `AbortError`s in the dashboard console | Live E2E | Important | #13 |
-| [F6](#f6) | The first streamed minute of a symbol kept a partial candle | Live E2E | Minor | TBD |
-| [F7](#f7) | No compression and no cache headers on static assets | Live E2E | Minor | TBD |
-| [F8](#f8) | `Retry-After` always the full window; a Warning per rejection | Live E2E | Minor | TBD |
-| [F9](#f9) | Framework 405/415 bypassed the TickPulse problem types; `HEAD` gave 404 | Live E2E | Minor | TBD |
-| [F10](#f10) | Expected states logged at Error | Live E2E | Minor | #14 |
-| [F11](#f11) | 10 s latency spikes from the SignalR hub on the API dashboard | Live E2E | Minor | #14 |
-| [F12](#f12) | Grafana trace links that anonymous viewers cannot open | Live E2E | Minor | #14 |
-| [F13](#f13) | "Candles backfilled" under-reported | Live E2E | Minor | #15 |
-| [F14](#f14) | A reactivated symbol still reported its old `deactivatedAt` | Live E2E | Minor | #15 |
-| [F15](#f15) | Admin add: no `Location`, and a blank symbol was a 422 | Live E2E | Minor | #15 |
-| [F16](#f16) | Dead or misleading dashboard links | Live E2E | Minor | #13 |
-| [F17](#f17) | Symbol lists logged as quoted JSON arrays | Live E2E | Minor | TBD |
+| [F1](#f1) | A load burst knocked out telemetry and fired the WebSocket alert falsely | E2E run | Important | #14 |
+| [F2](#f2) | Trades lost on every API restart, redeploy or leadership handover | E2E run | Important | TBD |
+| [F3](#f3) | `change24hPercent` wildly wrong while a backfill runs | E2E run | Important | #15 |
+| [F4](#f4) | Long-period analytics aggregated minutes at query time (p95 83 ms) | E2E run | Important | #12 |
+| [F5](#f5) | Uncaught `AbortError`s in the dashboard console | E2E run | Important | #13 |
+| [F6](#f6) | The first streamed minute of a symbol kept a partial candle | E2E run | Minor | TBD |
+| [F7](#f7) | No compression and no cache headers on static assets | E2E run | Minor | #16 |
+| [F8](#f8) | `Retry-After` always the full window; a Warning per rejection | E2E run | Minor | #16 |
+| [F9](#f9) | Framework 405/415 bypassed the TickPulse problem types; `HEAD` gave 404 | E2E run | Minor | #16 |
+| [F10](#f10) | Expected states logged at Error | E2E run | Minor | #14 |
+| [F11](#f11) | 10 s latency spikes from the SignalR hub on the API dashboard | E2E run | Minor | #14 |
+| [F12](#f12) | Grafana trace links that anonymous viewers cannot open | E2E run | Minor | #14 |
+| [F13](#f13) | "Candles backfilled" under-reported | E2E run | Minor | #15 |
+| [F14](#f14) | A reactivated symbol still reported its old `deactivatedAt` | E2E run | Minor | #15 |
+| [F15](#f15) | Admin add: no `Location`, and a blank symbol was a 422 | E2E run | Minor | #15 |
+| [F16](#f16) | Dead or misleading dashboard links | E2E run | Minor | #13 |
+| [F17](#f17) | Symbol lists logged as quoted JSON arrays | E2E run | Minor | #16 |
 | [F18](#f18) | The API segfaulted (exit 139) under load | Load test | Critical | TBD |
-| [O-01](#o-01) | Local compose pool can exceed the database's `max_connections` | Load test | Minor | open |
+| [F19](#f19) | The local connection pool exceeded `max_connections`: 20–35 % 500s under load | Load test | Important | TBD |
 
 ---
 
@@ -301,7 +302,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 - **Fix:** the rule measures the age of the last `Connected` sample, with a cold-start guard and a 30 s
   pending period, so it neither misses outages nor fires on every deploy.
-- **Test:** none automated (alert rules are configuration). Checked live on a fresh stack with synthetic
+- **Test:** none automated (alert rules are configuration). Checked on a fresh local stack with synthetic
   metrics: Alerting 100 s after the API stopped reporting, and quiet through the first 120 s of a cold
   start.
 
@@ -312,7 +313,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 - **Fix:** query limits on Prometheus, Loki and Tempo (samples, length, timeouts, result limits); the
   collector scrubs client addresses, user agents, query strings and headers from logs and traces;
   snapshots and public dashboards are off; production nginx rate-limits `/api/ds/query`.
-- **Test:** none automated. Checked live as an anonymous viewer: write and delete endpoints through the
+- **Test:** none automated. Checked on the local stack as an anonymous viewer: write and delete endpoints through the
   datasource proxy answer 403, over-limit Loki and Tempo queries are rejected, and a span carrying six
   sensitive attributes kept only `http.route`. The limits are documented in
   [deploy/observability/README.md](../../deploy/observability/README.md).
@@ -362,11 +363,11 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ---
 
-## Found by the live end-to-end run and load tests
+## Found by the end-to-end run and load tests
 
 ### F1
 
-**A load burst knocked out telemetry and fired the WebSocket alert falsely** · Live E2E · Important · PR #14
+**A load burst knocked out telemetry and fired the WebSocket alert falsely** · E2E run · Important · PR #14
 
 - **Symptom:** at about 5k req/s the collector sat at its memory limit and refused every signal, Loki
   dropped logs, metrics arrived up to 75 s late, and *WebSocket disconnected* went to Alerting while the
@@ -384,26 +385,39 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F2
 
-**Trades lost on every API restart, redeploy or leadership handover** · Live E2E · Important · PR TBD
+**Trades lost on every API restart, redeploy or leadership handover** · E2E run · Important · PR TBD
 
 - **Symptom:** after `docker restart` of the api, `agg_trade_id` gaps (13 BTC and 31 ETH trades in one
   restart) and restart-minute candles that differed from Binance.
 - **Root cause:** gap-fill watermarks lived in memory only, so a new process or a new leader had nothing
   to fill from.
-- **Fix:** watermarks are seeded from the database at every leadership session, with holes that a seed
-  never raises ([ADR 0022](../adr/0022-gap-fill-watermarks-seeded-from-the-database.md)). Reviews of
-  the fix found two Critical paths (a seed raising past an open gap; a discarded connection's stored
-  trades invisible to the seed) and a liveness issue; the first is fixed, the rest is in the current
-  review round.
-- **Test:** `IngestionWorkerTests.Restart_GapFillsTradesMissedWhileDown_ExactlyOnce`,
+- **Fix (in review as of 2026-11-04):** watermarks are seeded from the database at every leadership
+  session, with holes that a seed never raises
+  ([ADR 0022](../adr/0022-gap-fill-watermarks-seeded-from-the-database.md)).
+- **What the reviews of the fix found** (a first review and three re-reviews so far):
+  - First review: a stale in-memory entry beat the seed after a handover and back, and a fill on a
+    connection that broke mid-fill could close the gap.
+  - Re-review 1, **Critical:** the seed raised a watermark past an open gap. Fixed by the hole rule.
+  - Re-review 2, **Critical:** trades stored by a discarded rotation link were invisible to the seed,
+    so it could skip ids. Also **Important:** a hole on a busy symbol never closed. Both fixed with a
+    per-symbol "stored above" record that every connection end feeds, and fills re-armed on every
+    reconcile. Live re-check on the local stack: 0 gaps, 0 missing ids and 0 duplicates over three
+    restarts.
+  - Re-review 3, **Critical:** a completed fill could clear the "stored above" record past the live
+    maximum while the live link was stalled. Also **Important**, and older than the fix: a rotation that
+    replaced a stalled old link could lose that link's gap.
+  - The fourth round was escalated to a fresh implementer on a more capable model, and is in progress.
+- **Test (so far):** `IngestionWorkerTests.Restart_GapFillsTradesMissedWhileDown_ExactlyOnce`,
   `HandoverAndBack_FillsFromTheOtherLeadersLastStoredTrade`,
   `SeededFill_ConnectionBreaksDuringIt_TradesAfterTheDeadConnectionAreRecovered`,
-  `GapLeftOpen_ThenANewSessionInTheSameProcess_RecoversEveryTrade`, the `GapFillWatermarksTests.Seed_*`
-  rules, `MarketDataQueriesTests.LatestTradeIds*`.
+  `GapLeftOpen_ThenANewSessionInTheSameProcess_RecoversEveryTrade`,
+  `DiscardedRotationLink_StoredTradesAboveAGap_NextSessionStillFillsTheGap`,
+  `DroppedBatchOnALiveConnection_HoleClosesWithinTheSession`, the `GapFillWatermarksTests` rules
+  (`Seed_*`, `NoteStored_*`, `Filled_*`, `Merge_Gap_*`), `MarketDataQueriesTests.LatestTradeIds*`.
 
 ### F3
 
-**`change24hPercent` wildly wrong while a backfill runs** · Live E2E · Important · PR #15
+**`change24hPercent` wildly wrong while a backfill runs** · E2E run · Important · PR #15
 
 - **Symptom:** for the first minutes after a start or an add, ETHUSDT showed +42.00 % against Binance's
   −1.5 %.
@@ -420,7 +434,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F4
 
-**Long-period analytics aggregated minutes at query time** · Live E2E · Important · PR #12
+**Long-period analytics aggregated minutes at query time** · E2E run · Important · PR #12
 
 - **Symptom:** SMA `1w n=8` p95 83 ms at 50 connections (target 50 ms); `candles?p=1d` about 135 ms per
   call; database CPU 2,100 %.
@@ -432,7 +446,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F5
 
-**Uncaught `AbortError`s in the dashboard console** · Live E2E · Important · PR #13
+**Uncaught `AbortError`s in the dashboard console** · E2E run · Important · PR #13
 
 - **Symptom:** `AbortError: signal is aborted without reason` while typing a two-digit `n` or switching
   periods quickly.
@@ -446,7 +460,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F6
 
-**The first streamed minute of a symbol kept a partial candle** · Live E2E · Minor · PR TBD
+**The first streamed minute of a symbol kept a partial candle** · E2E run · Minor · PR TBD
 
 - **Symptom:** the start minute had the right close but wrong O/H/L/V (BTC volume 5.37 against
   Binance's 13.46).
@@ -459,43 +473,53 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F7
 
-**No compression and no cache headers on static assets** · Live E2E · Minor · PR TBD
+**No compression and no cache headers on static assets** · E2E run · Minor · PR #16
 
 - **Symptom:** the 411,490-byte main bundle and `index.html` went out uncompressed, with no
   `Cache-Control`.
-- **Fix (in review):** build-time precompressed static assets served by `MapStaticAssets`, immutable
-  caching for hashed assets and revalidation for `index.html`; API responses are compressed by nginx
-  and Cloudflare ([ADR 0017](../adr/0017-build-time-precompressed-static-assets.md)). The first,
-  runtime-compression version cost 10–25 % of loopback throughput and shared one strong ETag between
-  compressed and plain bodies, which its own live check caught.
-- **Test:** to be filled in when the fix merges.
+- **Fix:**
+  - The dashboard goes into `wwwroot` before `dotnet publish`, so the build writes Brotli and gzip
+    copies with a strong ETag per encoding, served by `MapStaticAssets`.
+  - Hashed `/assets/` files are `immutable` for a year, and `index.html` is `no-cache`.
+  - API responses are compressed by nginx and Cloudflare, not by the app
+    ([ADR 0017](../adr/0017-build-time-precompressed-static-assets.md)).
+  - The first version, with runtime compression, cost 10–25 % of loopback throughput and shared one
+    strong ETag between compressed and plain bodies; its own end-to-end check caught the ETag. Its
+    review rejected it for the throughput cost.
+  - A second round fixed the tests for a missing `wwwroot`.
+- **Test:** `DashboardAssetsTests.PrecompressedAsset_IsServedPerEncoding_Immutable`,
+  `PrecompressedAsset_ConditionalGet_Returns304WithTheSameETag`, `PrecompressedIndexHtml_IsRevalidated`,
+  `ApiResponses_AreNeverCompressedByTheHost`, `MissingAsset_IsNotCachedAsImmutable`,
+  `WithoutWwwroot_ApiAndHealthWork_AndTheDashboardIsA404Problem`.
 
 ### F8
 
-**`Retry-After` always the full window; a Warning per rejection** · Live E2E · Minor · PR TBD
+**`Retry-After` always the full window; a Warning per rejection** · E2E run · Minor · PR #16
 
 - **Symptom:** `Retry-After: 60` on every 429 although the window ended in under 30 s; 685 rejections
   wrote 685 Warnings in 23 s.
 - **Root cause:** `FixedWindowRateLimiter`'s failed lease reports the whole window, never the time left.
-- **Fix (in review):** a fixed-window limiter of our own whose rejection carries the time left in the
+- **Fix:** a fixed-window limiter of our own whose rejection carries the time left in the
   window, and one Warning per client and window (later rejections at Debug).
 - **Test:** `NegotiationTests.RateLimit_RetryAfter_IsTheTimeLeftInTheWindow`,
   `RateLimit_Rejections_LogOneWarningPerClientPerWindow`, `ClientWindowRateLimiterTests`.
 
 ### F9
 
-**Framework 405/415 bypassed the TickPulse problem types; `HEAD` gave 404** · Live E2E · Minor · PR TBD
+**Framework 405/415 bypassed the TickPulse problem types; `HEAD` gave 404** · E2E run · Minor · PR #16
 
 - **Symptom:** `POST /api/BTCUSDT/24hAvgPrice` gave a 405 with `about:blank`; a `text/plain` body gave a
   415 with an RFC link as its type; `HEAD /api/symbols` gave 404.
-- **Fix (in review):** slugs `method-not-allowed` and `unsupported-media-type`, MVC client-error mapping
+- **Fix:** slugs `method-not-allowed` and `unsupported-media-type`, MVC client-error mapping
   off so status code pages write them, and `HEAD` on every GET endpoint.
-- **Test:** `HttpMethodTests` (405 and 415 in JSON and XML, `HEAD` on endpoints and static files, no HEAD
+- **Test:** `HttpMethodTests.WrongMethod_Returns405ProblemWithAllow`, `UnsupportedBody_Returns415Problem`
+  (JSON and XML), `Head_OnGetEndpoint_Returns200WithoutBody`, `Head_OnAdminEndpoint_NeedsTheKey`,
+  `Head_OnStaticFiles_Returns200WithoutBody`, `OpenApiDocument_DoesNotListHeadOperations` (no HEAD
   operations in OpenAPI).
 
 ### F10
 
-**Expected states logged at Error** · Live E2E · Minor · PR #14
+**Expected states logged at Error** · E2E run · Minor · PR #14
 
 - **Symptom:** two EF Core Errors on every first boot, and an Error per readiness probe while ingestion
   connected.
@@ -507,7 +531,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F11
 
-**10 s latency spikes from the SignalR hub on the API dashboard** · Live E2E · Minor · PR #14
+**10 s latency spikes from the SignalR hub on the API dashboard** · E2E run · Minor · PR #14
 
 - **Root cause:** latency queries included `/hubs/market`, whose long-lived WebSocket request lands in the
   top histogram bucket.
@@ -517,7 +541,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F12
 
-**Grafana trace links that anonymous viewers cannot open** · Live E2E · Minor · PR #14
+**Grafana trace links that anonymous viewers cannot open** · E2E run · Minor · PR #14
 
 - **Root cause:** Grafana merges a field's `links` override with the datasource's own links.
 - **Fix:** the override first unsets the links, then adds *Open trace* to the TickPulse logs dashboard;
@@ -526,7 +550,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F13
 
-**"Candles backfilled" under-reported** · Live E2E · Minor · PR #15
+**"Candles backfilled" under-reported** · E2E run · Minor · PR #15
 
 - **Symptom:** the gauge showed 238 K for BTCUSDT while 262,080 klines were stored.
 - **Root cause:** `increase()` never sees the first jump of a cumulative series that starts without a zero
@@ -538,7 +562,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F14
 
-**A reactivated symbol still reported its old `deactivatedAt`** · Live E2E · Minor · PR #15
+**A reactivated symbol still reported its old `deactivatedAt`** · E2E run · Minor · PR #15
 
 - **Fix:** the admin contract shows `deactivatedAt` only while a symbol is inactive; the stored value,
   which the backfill needs ([RV-18](#rv-18)), is unchanged.
@@ -547,7 +571,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F15
 
-**Admin add: no `Location`, and a blank symbol was a 422** · Live E2E · Minor · PR #15
+**Admin add: no `Location`, and a blank symbol was a 422** · E2E run · Minor · PR #15
 
 - **Fix:** `GET /api/admin/symbols/{symbol}`; `201` carries `Location` to it; a missing or blank symbol
   is `400 validation` with `errors.symbol`.
@@ -556,7 +580,7 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F16
 
-**Dead or misleading dashboard links** · Live E2E · Minor · PR #13
+**Dead or misleading dashboard links** · E2E run · Minor · PR #13
 
 - **Symptom:** Grafana links pointed at production on the local stack; the README link used a fragment;
   there was no deployment link; the engineering notes and ADRs did not exist yet.
@@ -566,34 +590,63 @@ replace `TBD` with its number and adjust the fix and test lines if the final ver
 
 ### F17
 
-**Symbol lists logged as quoted JSON arrays** · Live E2E · Minor · PR TBD
+**Symbol lists logged as quoted JSON arrays** · E2E run · Minor · PR #16
 
 - **Symptom:** `Subscribed 3 symbol(s): "[\"ADAUSDT\",\"BTCUSDT\",\"ETHUSDT\"]"`.
 - **Root cause:** Serilog captures an `IReadOnlyList<string>` as a sequence.
-- **Fix (in review):** a non-enumerable `SymbolList` value rendered with `{Symbols:l}`.
+- **Fix:** a non-enumerable `SymbolList` value rendered with `{Symbols:l}`.
 - **Test:** `TelemetryHostTests.SubscribedLog_ListsSymbolsAsPlainText`.
 
 ### F18
 
 **The API segfaulted (exit 139) under load** · Load test · Critical · PR TBD
 
-- **Symptom:** under 3 × 100 connections the API container died with exit code 139, 16 times in two
-  one-minute rounds.
-- **Root cause:** Npgsql's default `GSS Encryption Mode=Prefer` calls native `gss_init_sec_context` (MIT
-  krb5) on every new physical connection. On the Alpine (musl) image that call segfaults when many
-  connections open at once (15 of 15 readable crash reports). TickPulse never uses Kerberos.
-- **Fix (in review):** `NpgsqlConnectionPolicy` forces `GssEncryptionMode=Disable` on every connection the
-  app builds (opt-in via `Database:AllowGssEncryption`), and `krb5-libs` leaves the runtime image.
-- **Test:** `GssEncryptionStartupTests`, `NpgsqlConnectionPolicyTests`, `DependencyInjectionTests`. Under
-  load: 8 + 8 crashes before, 0 in 5 rounds after.
+Found while load-testing the telemetry fix ([F1](#f1)). Fixed in the GSS-crash PR, which also carries
+[F19](#f19).
 
-### O-01
+- **Symptom:**
+  - Under parallel load (3 × `autocannon -c 100`), the API container died with exit code 139, and
+    Docker restarted it 16 times in two one-minute rounds.
+  - The first crash came about 6 s into the load.
+  - Between restarts the API served almost nothing, about 2,000 successful responses a minute.
+- **Root cause:**
+  - Npgsql's default `GSS Encryption Mode=Prefer` makes every new physical connection call native
+    `gss_init_sec_context` (MIT krb5) before TLS and authentication.
+  - On the `aspnet:10.0-alpine` (musl) image that call segfaults when many connections open at once.
+    All 15 readable crash reports show it (`NpgsqlConnector.GSSEncrypt` → `ld-musl`).
+  - Load opens physical connections constantly, at pool growth and after every restart, so one crash
+    leads to the next.
+  - TickPulse never uses Kerberos. `krb5-libs` had been installed only to silence the probe's
+    library-load error, which is what made the probe actually run.
+- **Fix (in review as of 2026-11-04):**
+  - `NpgsqlConnectionPolicy` forces `GssEncryptionMode=Disable` on every connection the app builds:
+    both data sources (and through them EF Core and the migrator), the leader lock, and the design-time
+    factory.
+  - An explicit mode in the connection string is honoured only with `Database:AllowGssEncryption=true`
+    (default `false`).
+  - `krb5-libs` leaves the runtime image.
+- **Test:** `GssEncryptionStartupTests` (the real host starts, leads and serves with `Prefer` and with
+  `Require` in the connection string, and every connection ends up at `Disable`),
+  `NpgsqlConnectionPolicyTests`, `DependencyInjectionTests`.
+  - Under load: 8 + 8 crashes on the old image, 0 in each of 5 rounds on the fixed one.
+  - A control run (old image, capped pool) still crashed twice.
 
-**Local compose pool can exceed the database's `max_connections`** · Load test · Minor · open
+### F19
 
-- **Symptom:** under heavy local load, `FATAL: sorry, too many clients already`, then
-  `SocketException 99` and 500s (20–35 % non-2xx in some rounds).
-- **Root cause:** the local connection string has no `Maximum Pool Size`, so the API can open 100 shared
-  + 4 writer + 1 lock connections against `max_connections = 100`. Production sets
+**The local connection pool exceeded `max_connections`: 20–35 % 500s under load** · Load test · Important · PR TBD
+
+Found once [F18](#f18) stopped the crashes, which had hidden it. Being fixed in the same PR as F18.
+
+- **Symptom:**
+  - Under heavy local load, PostgreSQL rejected connections with `FATAL: sorry, too many clients
+    already` (1,069 times in 3 minutes).
+  - About 10,000 sockets piled up in `TIME_WAIT` in the API container.
+  - Requests then failed with `SocketException 99: Address not available`, as 500s: 20–35 % of all
+    responses in three rounds. Throughput was capped at about 2,300 req/s.
+- **Root cause:** the local `ConnectionStrings__TickPulse` in `docker-compose.yml` sets no
+  `Maximum Pool Size`. The API can therefore hold 100 shared connections plus 4 for the tick writer and
+  1 for the leader lock, against PostgreSQL's default `max_connections = 100`. Production sets
   `Maximum Pool Size=20` and is not affected.
-- **Fix:** not yet; the change is `Maximum Pool Size=20` in `docker-compose.yml`, as in production.
+- **Fix (in review as of 2026-11-04):** cap the local pool as production does. With
+  `Maximum Pool Size=30` the same load gave 0 non-2xx at about 8,000–9,500 req/s.
+- **Test:** to be filled in when the fix merges.

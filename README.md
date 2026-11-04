@@ -5,6 +5,10 @@ PostgreSQL with TimescaleDB, and serves the 24-hour average price and simple mov
 JSON/XML HTTP API. Admins change the monitored symbols at runtime, a console client offers the same
 analytics, and a live dashboard and Grafana show prices and system health.
 
+TickPulse is designed to run at the addresses below. The deployment pipeline is ready; the first
+deploy waits on the owner's one-time steps in [docs/deployment.md](docs/deployment.md#first-time-server-setup).
+Until then, [the quick start](#quick-start) runs the same stack locally.
+
 - **App:** <https://tickpulse.dev>
 - **API reference (Scalar):** <https://tickpulse.dev/docs>
 - **Grafana:** <https://grafana.tickpulse.dev> (anonymous, read-only)
@@ -82,7 +86,8 @@ docker compose up
 
 This builds the images, starts TimescaleDB and the API, applies the migrations, seeds `BTCUSDT`,
 `ADAUSDT` and `ETHUSDT`, starts streaming trades from Binance, and backfills about six months of
-1-minute candles per symbol (about two minutes per symbol on first start).
+1-minute candles per symbol: about 2 minutes per symbol, one after another, so about 6 minutes for
+the three on first start.
 
 - Dashboard: <http://localhost:8080>
 - API reference: <http://localhost:8080/docs>
@@ -194,7 +199,8 @@ The interactive reference is at `/docs` (Scalar), the OpenAPI 3.1 document at `/
 | WebSocket | `/hubs/market` | SignalR: `Subscribe(symbol)`, then `price` messages; `stats` every 2 s |
 
 Symbols are case-insensitive (`btcusdt` works). Responses are JSON by default and XML when `Accept`
-prefers it; a request that accepts neither gets `406`. Admin routes need `X-Api-Key`.
+prefers it; a request that accepts neither gets `406`. Admin routes need `X-Api-Key`. `HEAD` works
+wherever `GET` does.
 
 ### 24h average
 
@@ -319,10 +325,12 @@ curl -s "localhost:8080/api/BTCUSDT/SimpleMovingAverage?n=0&p=1d"
 | 404 | `unknown-symbol` | the symbol is malformed or was never monitored |
 | 404 | `no-data` | the window holds no data |
 | 404 | `not-found` | no route matches the path |
+| 405 | `method-not-allowed` | the route exists but not for this method; `Allow` lists the methods |
 | 406 | `not-acceptable` | `Accept` allows neither JSON nor XML |
 | 409 | `symbol-limit` | adding one more would exceed `Admin:MaxActiveSymbols` |
+| 415 | `unsupported-media-type` | a request body that is neither JSON nor XML |
 | 422 | `invalid-symbol` | the symbol is not trading on Binance spot |
-| 429 | `rate-limited` | over the rate limit; `Retry-After` is set |
+| 429 | `rate-limited` | over the rate limit; `Retry-After` is the time left in the window |
 | 500 | `internal` | an unexpected error; a generic detail and the `traceId`, nothing from the exception |
 | 503 | `upstream-unavailable` | Binance could not confirm a symbol being added |
 
@@ -389,18 +397,19 @@ dotnet test tests/TickPulse.Domain.Tests      # fast, no Docker
 npm --prefix web ci && npm --prefix web test  # dashboard (Vitest)
 ```
 
-| Project | Tests | What |
-|---|---|---|
-| `TickPulse.Domain.Tests` | 56 | periods, Monday weeks, SMA windows, rounding (TDD) |
-| `TickPulse.Application.Tests` | 133 | use cases: analytics, admin, ingestion state |
-| `TickPulse.Integration.Tests` | 618 | real TimescaleDB (Testcontainers, the production image), the API through `WebApplicationFactory`, a fake Binance server (WebSocket and REST), telemetry |
-| `TickPulse.Cli.Tests` | 100 | every command against a stub HTTP handler, on a fake clock |
-| `TickPulse.Architecture.Tests` | 13 | layering rules |
-| `web/` | 148 | dashboard hooks, sections and formatting |
+| Project | What |
+|---|---|
+| `TickPulse.Domain.Tests` | periods, Monday weeks, SMA windows, rounding (TDD) |
+| `TickPulse.Application.Tests` | use cases: analytics, admin, ingestion state |
+| `TickPulse.Integration.Tests` | real TimescaleDB (Testcontainers, the production image), the API through `WebApplicationFactory`, a fake Binance server (WebSocket and REST), telemetry |
+| `TickPulse.Cli.Tests` | every command against a stub HTTP handler, on a fake clock |
+| `TickPulse.Architecture.Tests` | layering rules |
+| `web/` | dashboard hooks, sections and formatting (Vitest) |
 
-All 920 .NET tests and 148 web tests pass on `main`. CI runs them on every pull request, along with
-`dotnet format --verify-no-changes`, the web lint, typecheck and build, and a coverage gate (Domain
-≥ 95 % lines, overall ≥ 80 %; currently 100 % and 93.6 %). Coverage locally:
+Current test counts and coverage are in
+[engineering-notes.md](engineering-notes.md#by-the-numbers). CI runs every test on every pull request,
+along with `dotnet format --verify-no-changes`, the web lint, typecheck and build, and a coverage gate
+(Domain ≥ 95 % lines, overall ≥ 80 %). Coverage locally:
 
 ```bash
 dotnet tool restore
@@ -427,7 +436,7 @@ deploy/                      production compose, nginx vhosts, deploy and smoke 
 docs/
   adr/                       architecture decision records
   ai/                        defects log and prompt record
-  deployment.md              live topology, CD, runbook, scale-out design
+  deployment.md              single-host topology, CD, runbook, scale-out design
   superpowers/               design spec and implementation plan
 .claude/skills/              agent skills: architecture, testing, PR workflow
 CLAUDE.md                    agent context for this repository
@@ -440,7 +449,7 @@ docker-compose.yml           local stack
 - [engineering-notes.md](engineering-notes.md): approach, decisions, how the code was built and
   checked with AI agents, trade-offs and what's next
 - [docs/adr/](docs/adr/README.md): the architecture decision records
-- [docs/deployment.md](docs/deployment.md): the live deployment, CD and rollback, operations, and the
+- [docs/deployment.md](docs/deployment.md): the single-host deployment, CD and rollback, operations, and the
   scale-out production design
 - [docs/ai/defects-log.md](docs/ai/defects-log.md): the defects caught and what guards against them
 - [deploy/observability/README.md](deploy/observability/README.md): metrics, dashboards and alerts

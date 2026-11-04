@@ -1,12 +1,11 @@
 # 0017. Static assets are precompressed at build time; API responses are compressed at the edge
 
-- **Status:** Accepted. The implementation is in progress (defect F7 in the
-  [defects log](../ai/defects-log.md)).
-- **Date:** 2026-11-04
+- **Status:** Accepted
+- **Date:** 2026-11-04 (PR #16; defect F7 in the [defects log](../ai/defects-log.md#f7))
 
 ## Context
 
-The live check found that nothing was compressed and no static file had `Cache-Control`: the
+The end-to-end check found that nothing was compressed and no static file had `Cache-Control`: the
 dashboard's main bundle went out at 411,490 bytes, on every visit.
 
 A first fix added ASP.NET Core response compression for everything (Brotli, then gzip, at `Fastest`)
@@ -18,11 +17,15 @@ compress anyway, so runtime compression in the app bought nothing there.
 ## Decision
 
 - Precompress the dashboard's static assets **at build time** and serve them with ASP.NET Core
-  `MapStaticAssets`, which serves the precompressed variant that `Accept-Encoding` allows, with an
-  ETag of its own, and sets the caching headers.
+  `MapStaticAssets` (`DashboardAssets`). The Dockerfile copies `web/dist` into `wwwroot` *before*
+  `dotnet publish`, so the static web assets pipeline writes a Brotli and a gzip copy of every file, a
+  strong ETag per encoding, and the endpoint manifest. Each request gets the variant that
+  `Accept-Encoding` allows, with `Vary: Accept-Encoding`.
 - Leave API responses **uncompressed** in the app. The reverse proxy (nginx `gzip_proxied any`) and
   Cloudflare compress them on the way out.
-- Content-hashed assets under `/assets/` are cached as immutable; `index.html` is always revalidated.
+- Content-hashed assets under `/assets/` are cached for a year as `immutable`. The SDK cannot see
+  Vite's hash as a fingerprint, so a TickPulse rule overrides its `no-cache` for that path. Every other
+  file, above all `index.html`, stays `no-cache` and is revalidated by its ETag.
 
 ## Alternatives
 
@@ -36,5 +39,11 @@ compress anyway, so runtime compression in the app bought nothing there.
 - Compression of static files costs nothing per request; the work moves to the image build.
 - A deployment without a compressing proxy serves API JSON uncompressed. API bodies are small (an SMA
   response with 20 points is about 1.5 KB), so this is acceptable.
-- The Dockerfile has to produce the static-asset manifest, which means building the web assets before
-  or as part of `dotnet publish` rather than copying `web/dist` in afterwards.
+- The web build must run before `dotnet publish`, because the manifest is produced at publish time.
+  Without a `wwwroot` (as in CI's test runs), the API and health endpoints still work, and the dashboard
+  routes return a 404 problem.
+- `DashboardAssetsTests` guards it:
+  - `PrecompressedAsset_IsServedPerEncoding_Immutable` and
+    `PrecompressedAsset_ConditionalGet_Returns304WithTheSameETag`;
+  - `PrecompressedIndexHtml_IsRevalidated` and `ApiResponses_AreNeverCompressedByTheHost`;
+  - `WithoutWwwroot_ApiAndHealthWork_AndTheDashboardIsA404Problem`.

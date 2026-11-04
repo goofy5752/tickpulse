@@ -3,6 +3,10 @@
 How TickPulse was built, why it looks the way it does, how the AI-generated code was checked, and
 what is still open. Read the [README](README.md) first for what TickPulse does and how to run it.
 
+TickPulse is designed to run at <https://tickpulse.dev>. The deployment pipeline is ready, and the
+first deploy is pending the owner's steps in [docs/deployment.md](docs/deployment.md#first-time-server-setup).
+Every measurement below therefore comes from the local stack running against live Binance.
+
 ## Approach
 
 TickPulse had to be correct before it was clever: one ingestion path that never double-counts and
@@ -20,8 +24,8 @@ Four principles shaped it:
    rejected reading are written down as ADRs, and the API reports enough (`coveredSeconds`,
    `actualDataPoints`, `windowStart`) for a client to see which reading was applied.
 3. **Exactness over approximation.** `decimal` end to end, banker's rounding to 8 dp, idempotent
-   writes keyed on Binance's aggregate trade id, and a 24h average that is provably equal to a raw
-   `AVG(price)` while reading candles.
+   writes keyed on Binance's aggregate trade id, and a 24h average that reads candles and is tested
+   equal to a raw `AVG(price)`.
 4. **Test against real things.** Real TimescaleDB in every integration test, a fake Binance server that
    enforces Binance's rules, and finally the real Binance and a real browser.
 
@@ -35,11 +39,11 @@ The full list is in [docs/adr/](docs/adr/README.md). The ones that shape the cod
 | [Arithmetic mean of collected trades](docs/adr/0002-24h-average-is-the-arithmetic-mean.md), [with coverage](docs/adr/0003-partial-window-reports-its-coverage.md) | The 24h number is reproducible from stored data and honest about how much data it covers |
 | [Bucket close, Monday weeks](docs/adr/0004-sma-data-point-is-the-bucket-close.md), [`s` as start](docs/adr/0005-sma-start-parameter-anchors-the-window-start.md), [skip empty buckets](docs/adr/0006-sparse-buckets-are-skipped-not-filled.md) | SMA values match Binance's klines exactly |
 | [Switchable backfill, SMA only](docs/adr/0007-switchable-kline-backfill-for-sma-only.md) | Long periods work from day one without touching the 24h average |
-| [Single process with a leader lock](docs/adr/0011-single-process-with-a-leader-lock.md) | Scale-out is configuration; exactly one writer at any time |
+| [Single process with a leader lock](docs/adr/0011-single-process-with-a-leader-lock.md) | Exactly one writer at any time, so running several instances is safe today; API-only replicas and live prices on every replica still need [code changes](docs/deployment.md#code-changes-this-design-needs) |
 | [Own candle table](docs/adr/0012-own-candle-table-not-a-continuous-aggregate.md), [rollups by triggers](docs/adr/0015-candle-rollups-maintained-by-triggers.md) | Backfill can write candles; no query depends on a TimescaleDB TSL feature |
 | [MVC for XML](docs/adr/0013-mvc-controllers-for-xml-negotiation.md), [naming parity](docs/adr/0021-xml-element-names-match-json-property-names.md) | Every success and every error is negotiated, with one vocabulary |
 | [Workers never crash the host](docs/adr/0020-hosted-workers-never-crash-the-host.md) | A bug in a background worker cannot take the public API down |
-| [Watermarks seeded from the DB](docs/adr/0022-gap-fill-watermarks-seeded-from-the-database.md) | Restarts, redeploys and handovers recover the trades they missed |
+| [Watermarks seeded from the DB](docs/adr/0022-gap-fill-watermarks-seeded-from-the-database.md) | Restarts, redeploys and handovers recover the trades they missed (in review as of 2026-11-04) |
 
 ## How the work was done with AI agents
 
@@ -59,7 +63,7 @@ flowchart LR
     R -->|"findings"| F["Fix round<br/>(max 5)"]
     F -->|"scoped re-review"| R
     R -->|"clean"| M["PR, CI green,<br/>controller merges"]
-    M --> E["Live E2E + load test"]
+    M --> E["E2E run (live Binance)<br/>+ load test"]
     E -->|"findings"| X["fix/… PRs,<br/>same loop"]
 ```
 
@@ -82,7 +86,8 @@ flowchart LR
    worktree and branch, wrote the tests first, and returned a report with its RED and GREEN evidence.
 5. **Review by a separate agent.** A different agent reviewed each item against the spec and for code
    quality. Findings went back as a fix round; the **re-review was scoped to the fix diff**. Fix rounds
-   were capped at 5 per item.
+   were capped at 5 per item. A loop that kept finding new problems was escalated: the next round went
+   to a fresh implementer on a more capable model, instead of the same agent trying again.
 6. **A ledger of rulings.** Before execution, a pre-flight scan checked what each plan item produced
    against what later items consumed. It found gaps and conflicts (an interface nobody implemented, a
    test placed in a layer that could not reference the code, two items creating the same file), and
@@ -97,7 +102,7 @@ flowchart LR
    API, the CLI, containers and instrumentation side by side.
 9. **Controller-only merges.** Agents never merged. The controller opened each PR, waited for CI
    (`backend` and `web`) to pass and squash-merged it.
-10. **Live verification.** After the features merged, a separate run brought up the full stack against
+10. **End-to-end verification.** After the features merged, a separate run brought up the full stack against
     real Binance and checked everything a user would touch, then load-tested it. Each finding became a
     `fix/…` PR that went through the same implement, review and re-review loop.
 
@@ -135,19 +140,24 @@ evidence that could be re-run.
 
 | | |
 |---|---|
-| .NET tests on `main` | **920**, all passing: Domain 56, Application 133, Cli 100, Architecture 13, Integration 618 |
-| Web tests | **148** in 18 files (Vitest), all passing |
-| Line coverage | **93.6 %** overall; Domain 100 %, Application 98.2 %, Api 94.6 %, Infrastructure 93.3 %, Cli 91.6 % (gates: Domain ≥ 95 %, overall ≥ 80 %) |
-| Pull requests | **15 merged** (#1–#15) after the bootstrap commit; three fix PRs in review |
-| Reviews | **27** first reviews (21 for plan items, 6 for live-check fix PRs); **30** fix rounds, each followed by a scoped re-review |
-| Defects caught in review | **41 Important** findings in the plan-item reviews and re-reviews; **2 Critical and 6 Important** in the reviews of the fix PRs |
-| Live E2E | **55 checks**, 48 passed and 7 failed on the first run; **17 findings** (5 Important, 12 Minor), plus **1 Critical** under load |
+Figures marked *as of 2026-11-04* are still moving while the last fixes are in review.
+
+| | |
+|---|---|
+| .NET tests on `main` | **961**, all passing, as of 2026-11-04: Domain 56, Application 133, Cli 100, Architecture 13, Integration 659 |
+| Web tests | **148** in 18 files (Vitest), all passing, as of 2026-11-04 |
+| Line coverage | **93.8 %** overall, as of 2026-11-04; Domain 100 %, Application 98.2 %, Api 95.1 %, Infrastructure 93.3 %, Cli 91.6 % (gates: Domain ≥ 95 %, overall ≥ 80 %) |
+| Pull requests | **16 merged** (#1–#16) after the bootstrap commit, and two fix PRs in review, as of 2026-11-04 |
+| Reviews | **27** first reviews (21 for plan items, 6 for end-to-end fix PRs) and **33** completed fix rounds, each followed by a scoped re-review, as of 2026-11-04; one more fix round in progress |
+| Defects caught in review | **41 Important** findings in the plan-item reviews and re-reviews; **3 Critical and 7 Important** in the reviews of the fix PRs, as of 2026-11-04 |
+| End-to-end run | **55 checks**, 48 passed and 7 failed on the first run. **19 findings** (F1–F19): 1 Critical, 6 Important, 12 Minor. F18 and F19 showed up only under the heavier load that followed. |
 | Latency after fixes | p95 12.7 ms for `24hAvgPrice` at 6.4k req/s; 12–21 ms for 1d/1w SMA and candles (was up to 1,368 ms) |
 | Ingest lag | p95 803 ms, trade time to persisted, target < 1 s |
 | Dashboard | first contentful paint 48 ms on the local stack |
 
-The test and coverage numbers are from `main` at `0b421dc` (2026-11-04); the latency, lag and paint
-numbers are from the live run and the rollup fix's before/after measurement.
+The test and coverage numbers are from `main` at `ef670ad`. The latency, lag and paint numbers are
+from the end-to-end run (the local stack against live Binance) and the rollup fix's before/after
+measurement.
 
 ## Issues and defects caught
 
@@ -156,8 +166,8 @@ The full, curated list with root causes and guarding tests is the
 
 - **XML problems.** In ASP.NET Core only controller `Problem()` results are content-negotiated. The
   401 from the auth handler, the 429 from the rate limiter, unmatched routes, unhandled exceptions and
-  the 406 itself go through `IProblemDetailsService`, whose writer is JSON-only. The spec therefore
-  required a custom XML problem writer and a problem body for the 406, with tests for each path
+  the 406 itself go through `IProblemDetailsService`, whose writer is JSON-only. The design therefore
+  includes a custom XML problem writer and a problem body for the 406, with tests for each path
   ([ADR 0013](docs/adr/0013-mvc-controllers-for-xml-negotiation.md)).
 - **Duplicate ticks counted twice.** Reconnect overlaps, the 23 h make-before-break rotation and
   gap-fill all deliver some trades twice. The primary key `(symbol_id, agg_trade_id, trade_time)` with
@@ -185,30 +195,37 @@ Examples of what the reviews caught during implementation:
 - operations: a rollback that did not restore the deployed files ([RV-27](docs/ai/defects-log.md#rv-27)),
   `http2` on a shared port ([RV-26](docs/ai/defects-log.md#rv-26)).
 
-The live run found what unit and integration tests could not: telemetry collapsing under load
+The end-to-end run found what unit and integration tests could not: telemetry collapsing under load
 ([F1](docs/ai/defects-log.md#f1)), trades lost across process restarts
 ([F2](docs/ai/defects-log.md#f2)), a 24h change that was wrong during backfill
-([F3](docs/ai/defects-log.md#f3)), long-period queries over budget ([F4](docs/ai/defects-log.md#f4)), and,
-under heavier load, a native crash in the database driver's GSS probe
-([F18](docs/ai/defects-log.md#f18)).
+([F3](docs/ai/defects-log.md#f3)), long-period queries over budget ([F4](docs/ai/defects-log.md#f4)). Under
+heavier load it found two more: a native crash in the database driver's GSS probe
+([F18](docs/ai/defects-log.md#f18)), and, once that was fixed, a local connection pool larger than the
+database's `max_connections` ([F19](docs/ai/defects-log.md#f19)).
 
 Two lessons from this:
 
 - **Separate reviewers find real defects.** Every plan item's review led to at least one fix round, and
-  several fix rounds introduced a new problem that the re-review caught. The gap-fill fix went through
-  three review rounds, two of which found Critical loss paths in the fix itself.
+  several fix rounds introduced a new problem that the re-review caught. The restart gap-fill fix
+  ([F2](docs/ai/defects-log.md#f2)) is the clearest case. As of 2026-11-04 it has had a first review and
+  three re-reviews, and each re-review found a new Critical loss path in the fix itself. After the third,
+  the loop was escalated: a fresh implementer on a more capable model took over for the fourth round,
+  which is still in progress.
 - **Tests pass on what they model.** The fake Binance server never restarted the process, so no test
-  noticed that watermarks lived in memory. The live run, a real restart and a comparison of trade ids
+  noticed that watermarks lived in memory. The end-to-end run, a real restart and a comparison of trade ids
   with Binance did.
 
 ## Trade-offs
 
 - **One process.** API and ingestion share CPU and memory. That keeps deployment trivial, and the
-  leader lock keeps scale-out safe, at the cost of ingestion competing with API load on one host.
+  leader lock makes running several instances safe, at the cost of ingestion competing with API load on
+  one host. A real scale-out needs the code changes listed in the
+  [scale-out design](docs/deployment.md#code-changes-this-design-needs).
 - **Arithmetic mean, not VWAP.** Simple and reproducible, but different from Binance's own
   volume-weighted figures.
 - **Backfill on by default in compose and production.** Long-period SMAs work from day one, at the
-  cost of about 260 REST calls per symbol and a few minutes of `Running` status after a symbol is added.
+  cost of 263 REST calls per symbol and about 2 minutes of `Running` status per symbol (262,080
+  klines).
 - **Triggers for rollups.** Exact and writer-independent, at the cost of SQL that only works under a
   documented locking invariant.
 - **Sampled request telemetry.** The pipeline survives bursts, but individual successful requests
@@ -227,17 +244,17 @@ Two lessons from this:
   minute the end of the inactive stretch, so that stretch is not backfilled.
 - The status lag in `/api/system/stats` and `/health` can spike when a gap-fill batch is written, because
   recovered trades count as lag.
-- Symbols backfill one after another, so after a fresh start the last symbol's long periods are ready a
-  few minutes after the first.
+- Symbols backfill one after another, at about 2 minutes each, so after a fresh start the third seeded
+  symbol has its long-period SMAs about 6 minutes after start.
 - Admin calls share the public rate limit.
 - The local compose connection string has no pool cap and can exceed `max_connections` under heavy load
-  ([O-01](docs/ai/defects-log.md#o-01)).
+  ([F19](docs/ai/defects-log.md#f19); the fix is in review as of 2026-11-04).
 - On shutdown, the API can take longer than Docker's default 10 s stop timeout.
 
 ## What's next
 
-1. Merge the three fixes in review (restart gap-fill, HTTP polish, the GSS crash) and set the local
-   pool cap.
+1. Merge the two fixes in review as of 2026-11-04: the restart gap-fill, and the GSS crash together
+   with the local pool cap.
 2. Deploy to `tickpulse.dev` and run the rollback drill and the external uptime check from the
    [deployment guide](docs/deployment.md).
 3. Isolate poison ticks per row instead of per batch.
