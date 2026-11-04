@@ -137,6 +137,28 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
         problem.Detail.ShouldBe("No trades were collected for 'BTCUSDT' in the last 24 hours.");
     }
 
+    [Fact]
+    public async Task Avg_TickAtNow_IsIncluded_AndBackfillCandlesAreIgnored()
+    {
+        // Ticks at now − 1 h (10) and exactly at now (20), plus backfilled minutes inside the window, one of them in
+        // a minute that also holds a streamed tick (the stream row replaces it) and one in a minute with none.
+        await WriteCandlesAsync(Btc, Candle(At(10, 0), 1_000m), Candle(At(11, 34), 1_000m));
+        await WriteTicksAsync(Tick(Btc, 1, 10m, Now.AddHours(-1)), Tick(Btc, 2, 20m, Now));
+
+        using var response = await GetAsync("/api/BTCUSDT/24hAvgPrice");
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        using var json = await JsonAsync(response);
+        var root = json.RootElement;
+
+        // (10 + 20) / 2 = 15 over exactly two samples: the 1000-closes of the backfill candles never count.
+        root.GetProperty("averagePrice").GetDecimal().ShouldBe(15m);
+        root.GetProperty("sampleCount").GetInt64().ShouldBe(2);
+        root.GetProperty("from").GetString().ShouldBe("2026-10-07T11:34:56Z");
+        root.GetProperty("to").GetString().ShouldBe("2026-10-07T12:34:56Z");
+        root.GetProperty("coveredSeconds").GetInt64().ShouldBe(3_600);
+    }
+
     [Theory]
     [MemberData(nameof(NegotiationTests.SuccessMatrix), MemberType = typeof(NegotiationTests))]
     public async Task Avg_NegotiationMatrix(string? accept, HttpStatusCode status, string mediaType)
@@ -162,10 +184,10 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
             case "application/xml" or "text/xml":
                 var root = await XmlAsync(response);
                 root.Name.ShouldBe(Schema + "averagePrice");
-                root.Element(Schema + "Symbol")!.Value.ShouldBe("BTCUSDT");
-                root.Element(Schema + "AveragePrice")!.Value.ShouldBe("1234567890123.25000002");
-                root.Element(Schema + "From")!.Value.ShouldBe("2026-10-06T12:34:56Z");
-                root.Element(Schema + "CoveredSeconds")!.Value.ShouldBe("86370");
+                root.Element(Schema + "symbol")!.Value.ShouldBe("BTCUSDT");
+                root.Element(Schema + "averagePrice")!.Value.ShouldBe("1234567890123.25000002");
+                root.Element(Schema + "from")!.Value.ShouldBe("2026-10-06T12:34:56Z");
+                root.Element(Schema + "coveredSeconds")!.Value.ShouldBe("86370");
                 break;
             default:
                 var problem = await ReadAsync(response);
@@ -261,14 +283,29 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
         await ShouldBeTwoDaysFromOctoberFirstAsync(response);
     }
 
-    [Fact]
-    public async Task Sma_FutureS_Returns400()
+    [Theory]
+    [InlineData("2026-10-07T12:34:57Z", null)]
+    [InlineData("2026-10-07T12:34:57Z", "application/xml")]   // a problem raised by the service, negotiated as XML
+    [InlineData("9999-12-31T23:59:59-01:00", null)]           // UTC 10000-01-01T00:59:59: past DateTime.MaxValue, still "future"
+    public async Task Sma_FutureS_Returns400(string s, string? accept)
     {
         await SeedDailyCandlesAsync();
 
-        using var response = await GetAsync("/api/BTCUSDT/SimpleMovingAverage?n=2&p=1d&s=2026-10-07T12:34:57Z");
+        using var response = await GetAsync($"/api/BTCUSDT/SimpleMovingAverage?n=2&p=1d&s={Uri.EscapeDataString(s)}", accept);
 
-        await ShouldBeValidationAsync(response, "s must not be in the future.");
+        await ShouldBeValidationAsync(response, "s", "s must not be in the future.", accept);
+    }
+
+    [Theory]
+    [InlineData("yesterday")]
+    [InlineData("0001-01-01T00:00:00+03:00")]   // UTC would be before 0001-01-01T00:00:00
+    [InlineData("2026-10-01T00:00:00+0300")]
+    [InlineData("2026-10-01T00:00:00+15:00")]
+    public async Task Sma_UnparseableS_Returns400(string s)
+    {
+        using var response = await GetAsync($"/api/BTCUSDT/SimpleMovingAverage?n=2&p=1d&s={Uri.EscapeDataString(s)}");
+
+        await ShouldBeValidationAsync(response, "s", "s must be an ISO-8601 timestamp such as 2026-10-01T00:00:00Z.");
     }
 
     [Theory]
@@ -279,31 +316,50 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
     {
         using var response = await GetAsync($"/api/BTCUSDT/SimpleMovingAverage?n=2&p={p}");
 
-        await ShouldBeValidationAsync(response, "p must be one of 1w, 1d, 30m, 5m, 1m.");
+        await ShouldBeValidationAsync(response, "p", "p must be one of 1w, 1d, 30m, 5m, 1m.");
+    }
+
+    [Theory]
+    [InlineData("n=2")]
+    [InlineData("n=2&p=")]
+    public async Task Sma_MissingP_Returns400(string query)
+    {
+        using var response = await GetAsync($"/api/BTCUSDT/SimpleMovingAverage?{query}", "application/xml");
+
+        await ShouldBeValidationAsync(response, "p", "p is required.", "application/xml");
     }
 
     [Theory]
     [InlineData(0)]
     [InlineData(-3)]
     [InlineData(1001)]
-    [InlineData(null)]   // a missing n binds as 0
-    public async Task Sma_NZero_Returns400(int? n)
+    public async Task Sma_NZero_Returns400(int n)
     {
-        using var response = await GetAsync(n is null ? "/api/BTCUSDT/SimpleMovingAverage?p=1m" : $"/api/BTCUSDT/SimpleMovingAverage?n={n}&p=1m");
+        using var response = await GetAsync($"/api/BTCUSDT/SimpleMovingAverage?n={n}&p=1m");
 
-        await ShouldBeValidationAsync(response, "n must be between 1 and 1000.");
+        await ShouldBeValidationAsync(response, "n", "n must be between 1 and 1000.");
     }
 
     [Theory]
-    [InlineData("n=abc&p=1m", null, "n", "The value 'abc' is not valid.")]
-    [InlineData("n=abc&p=1m", "application/xml", "n", "The value 'abc' is not valid.")]
-    [InlineData("n=5", "application/xml", "p", "The p field is required.")]
-    [InlineData("n=5&p=1m&s=yesterday", null, "s", "s must be an ISO-8601 timestamp such as 2026-10-01T00:00:00Z.")]
-    [InlineData("n=5&p=1m&s=yesterday", "application/xml", "s", "s must be an ISO-8601 timestamp such as 2026-10-01T00:00:00Z.")]
-    public async Task Sma_UnbindableParameter_ReturnsValidationProblem(string query, string? accept, string parameter, string message)
+    [InlineData("p=1m")]
+    [InlineData("n=&p=1m")]
+    public async Task Sma_MissingN_Returns400(string query)
     {
-        using var response = await GetAsync($"/api/BTCUSDT/SimpleMovingAverage?{query}", accept);
+        using var response = await GetAsync($"/api/BTCUSDT/SimpleMovingAverage?{query}");
 
+        await ShouldBeValidationAsync(response, "n", "n is required.");
+    }
+
+    [Theory]
+    [InlineData("/api/BTCUSDT/SimpleMovingAverage?n=abc&p=1m", null, "n")]
+    [InlineData("/api/BTCUSDT/SimpleMovingAverage?n=abc&p=1m", "application/xml", "n")]
+    [InlineData("/api/BTCUSDT/candles?p=1m&limit=abc", null, "limit")]
+    [InlineData("/api/BTCUSDT/candles?p=1m&limit=abc", "application/xml", "limit")]
+    public async Task UnbindableParameter_ReturnsValidationProblem(string path, string? accept, string parameter)
+    {
+        using var response = await GetAsync(path, accept);
+
+        // Model binding fails before the action runs; the problem comes from InvalidModelStateResponseFactory.
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
         MediaType(response).ShouldBe(accept is null ? JsonMediaType : XmlMediaType);
         var problem = await ReadAsync(response);
@@ -312,9 +368,9 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
         problem.Status.ShouldBe(400);
         problem.Detail.ShouldBe("One or more request parameters are invalid.");
         problem.TraceId.ShouldNotBeNullOrWhiteSpace();
-        var errors = Errors(problem, accept is not null);
+        var errors = Errors(problem);
         errors.Keys.ShouldBe([parameter]);
-        errors[parameter].ShouldBe([message]);
+        errors[parameter].ShouldBe(["The value 'abc' is not valid."]);
     }
 
     [Fact]
@@ -340,6 +396,8 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
     [Theory]
     [InlineData("BTCUSDT", "n=5&p=1m")]                          // no candles at all
     [InlineData("BTCUSDT", "n=5&p=1d&s=2026-10-07T00:00:01Z")]   // no complete day starts at or after s yet
+    [InlineData("BTCUSDT", "n=5&p=1w&s=0001-01-01")]             // DateTime.MinValue (Npgsql: -infinity): an empty, valid window
+    [InlineData("BTCUSDT", "n=1000&p=1m&s=0001-01-01T00:00:00Z")]
     public async Task Sma_NoData_Returns404(string symbol, string query)
     {
         using var response = await GetAsync($"/api/{symbol}/SimpleMovingAverage?{query}");
@@ -371,7 +429,8 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
         using var json = await JsonAsync(jsonResponse);
         var xml = await XmlAsync(xmlResponse);
 
-        // The same members in the same order: camelCase in JSON, PascalCase elements in the schema namespace in XML.
+        // The same members in the same order and with the same names: JSON properties and XML elements (in the schema
+        // namespace) alike.
         string[] members =
         [
             "symbol", "period", "requestedDataPoints", "actualDataPoints", "value", "windowStart", "windowEnd",
@@ -380,26 +439,26 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
         Names(json.RootElement).ShouldBe(members);
         xml.Name.ShouldBe(Schema + "sma");
         xml.Elements().Select(e => e.Name.NamespaceName).Distinct().ShouldBe([Schema.NamespaceName]);
-        xml.Elements().Select(e => e.Name.LocalName).ShouldBe(members.Select(Pascal));
+        xml.Elements().Select(e => e.Name.LocalName).ShouldBe(members);
 
         // And the same values.
         foreach (var member in members.Where(m => m is not ("dataPoints" or "startParameter")))
         {
-            xml.Element(Schema + Pascal(member))!.Value.ShouldBe(Scalar(json.RootElement.GetProperty(member)), member);
+            xml.Element(Schema + member)!.Value.ShouldBe(Scalar(json.RootElement.GetProperty(member)), member);
         }
 
-        xml.Element(Schema + "StartParameter")!.Attribute(Xsi + "nil")!.Value.ShouldBe("true");
+        xml.Element(Schema + "startParameter")!.Attribute(Xsi + "nil")!.Value.ShouldBe("true");
 
-        var points = xml.Element(Schema + "DataPoints")!.Elements().ToList();
+        var points = xml.Element(Schema + "dataPoints")!.Elements().ToList();
         points.Select(p => p.Name).ShouldAllBe(n => n == Schema + "dataPoint");
         var jsonPoints = json.RootElement.GetProperty("dataPoints").EnumerateArray().ToList();
         points.Count.ShouldBe(jsonPoints.Count);
         for (var i = 0; i < points.Count; i++)
         {
             Names(jsonPoints[i]).ShouldBe(["bucketStart", "close"]);
-            points[i].Elements().Select(e => e.Name.LocalName).ShouldBe(["BucketStart", "Close"]);
-            points[i].Element(Schema + "BucketStart")!.Value.ShouldBe(jsonPoints[i].GetProperty("bucketStart").GetString());
-            points[i].Element(Schema + "Close")!.Value.ShouldBe(jsonPoints[i].GetProperty("close").GetRawText());
+            points[i].Elements().Select(e => e.Name.LocalName).ShouldBe(["bucketStart", "close"]);
+            points[i].Element(Schema + "bucketStart")!.Value.ShouldBe(jsonPoints[i].GetProperty("bucketStart").GetString());
+            points[i].Element(Schema + "close")!.Value.ShouldBe(jsonPoints[i].GetProperty("close").GetRawText());
         }
     }
 
@@ -440,6 +499,21 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
     }
 
     [Fact]
+    public async Task Symbols_StaleFallback_HasNullChange()
+    {
+        // ETHUSDT's only candle is 30 h old: it is both the latest price and the close a day ago, so there is no
+        // 24 h change to report (rather than a misleading 0.00 %).
+        await WriteCandlesAsync(SymbolId("ETHUSDT"), Candle(Day(6, 6, 0), 2_500m));
+
+        using var response = await GetAsync("/api/symbols");
+
+        using var json = await JsonAsync(response);
+        var eth = json.RootElement.EnumerateArray().Single(r => r.GetProperty("symbol").GetString() == "ETHUSDT");
+        eth.GetProperty("latestPrice").GetDecimal().ShouldBe(2_500m);
+        eth.GetProperty("change24hPercent").ValueKind.ShouldBe(JsonValueKind.Null);
+    }
+
+    [Fact]
     public async Task Symbols_Xml_IsAListOfSymbolElements()
     {
         using var response = await GetAsync("/api/symbols", "application/xml");
@@ -448,9 +522,9 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
         var root = await XmlAsync(response);
         root.Name.ShouldBe(Schema + "symbols");
         root.Elements().Select(e => e.Name).ShouldAllBe(n => n == Schema + "symbol");
-        root.Elements().Select(e => e.Element(Schema + "Symbol")!.Value).ShouldBe(["BTCUSDT", "ADAUSDT", "ETHUSDT"]);
+        root.Elements().Select(e => e.Element(Schema + "symbol")!.Value).ShouldBe(["BTCUSDT", "ADAUSDT", "ETHUSDT"]);
         root.Elements().First().Elements().Select(e => e.Name.LocalName)
-            .ShouldBe(["Symbol", "IsActive", "LatestPrice", "Change24hPercent", "BackfillStatus"]);
+            .ShouldBe(["symbol", "isActive", "latestPrice", "change24hPercent", "backfillStatus"]);
     }
 
     // ---- candles ----------------------------------------------------------------------------------------------
@@ -507,19 +581,20 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
         root.Name.ShouldBe(Schema + "candles");
         var candle = root.Elements().ShouldHaveSingleItem();
         candle.Name.ShouldBe(Schema + "candle");
-        candle.Elements().Select(e => e.Name.LocalName).ShouldBe(["BucketStart", "Open", "High", "Low", "Close", "Volume"]);
-        candle.Element(Schema + "Close")!.Value.ShouldBe("1.50000000");
+        candle.Elements().Select(e => e.Name.LocalName).ShouldBe(["bucketStart", "open", "high", "low", "close", "volume"]);
+        candle.Element(Schema + "close")!.Value.ShouldBe("1.50000000");
     }
 
     [Theory]
-    [InlineData("p=1m&limit=0", "limit must be between 1 and 1000.")]
-    [InlineData("p=1m&limit=1001", "limit must be between 1 and 1000.")]
-    [InlineData("p=2h", "p must be one of 1w, 1d, 30m, 5m, 1m.")]
-    public async Task Candles_InvalidParameters_Return400(string query, string detail)
+    [InlineData("p=1m&limit=0", "limit", "limit must be between 1 and 1000.")]
+    [InlineData("p=1m&limit=1001", "limit", "limit must be between 1 and 1000.")]
+    [InlineData("p=2h", "p", "p must be one of 1w, 1d, 30m, 5m, 1m.")]
+    [InlineData("limit=5", "p", "p is required.")]
+    public async Task Candles_InvalidParameters_Return400(string query, string parameter, string detail)
     {
         using var response = await GetAsync($"/api/BTCUSDT/candles?{query}");
 
-        await ShouldBeValidationAsync(response, detail);
+        await ShouldBeValidationAsync(response, parameter, detail);
     }
 
     [Fact]
@@ -587,24 +662,28 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
         DataPoints(root).ShouldBe([("2026-10-01T00:00:00Z", 90m), ("2026-10-02T00:00:00Z", 102m)]);
     }
 
-    private static async Task ShouldBeValidationAsync(HttpResponseMessage response, string detail)
+    /// <summary>A 400 <c>validation</c> problem about one parameter: its message is the detail and its only <c>errors</c> entry.</summary>
+    private static async Task ShouldBeValidationAsync(HttpResponseMessage response, string parameter, string detail, string? accept = null)
     {
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
-        MediaType(response).ShouldBe(JsonMediaType);
+        MediaType(response).ShouldBe(accept is null ? JsonMediaType : XmlMediaType);
         var problem = await ReadAsync(response);
         problem.Type.ShouldBe(TypeBase + "validation");
         problem.Status.ShouldBe(400);
         problem.Detail.ShouldBe(detail);
         problem.TraceId.ShouldNotBeNullOrWhiteSpace();
+        var errors = Errors(problem);
+        errors.Keys.ShouldBe([parameter]);
+        errors[parameter].ShouldBe([detail]);
     }
 
-    /// <summary>The <c>errors</c> member of a validation problem, from JSON or from MVC's XML wrapper.</summary>
-    private static Dictionary<string, string[]> Errors(Problem problem, bool xml)
+    /// <summary>The <c>errors</c> member of a validation problem, from JSON or XML (one element per message).</summary>
+    private static Dictionary<string, string[]> Errors(Problem problem)
     {
-        if (xml)
+        if (problem.Raw.TrimStart().StartsWith('<'))
         {
             XNamespace rfc7807 = "urn:ietf:rfc:7807";
-            return XDocument.Parse(problem.Raw).Root!.Element(rfc7807 + "MVC-Errors")!.Elements()
+            return XDocument.Parse(problem.Raw).Root!.Element(rfc7807 + "errors")!.Elements()
                 .GroupBy(e => e.Name.LocalName)
                 .ToDictionary(g => g.Key, g => g.Select(e => e.Value).ToArray());
         }
@@ -648,8 +727,6 @@ public sealed class AnalyticsEndpointTests(ApiFactory api) : IClassFixture<ApiFa
         XDocument.Parse(await response.Content.ReadAsStringAsync(Ct)).Root!;
 
     private static string[] Names(JsonElement element) => [.. element.EnumerateObject().Select(p => p.Name)];
-
-    private static string Pascal(string camel) => char.ToUpperInvariant(camel[0]) + camel[1..];
 
     private static string Scalar(JsonElement value) => value.ValueKind switch
     {

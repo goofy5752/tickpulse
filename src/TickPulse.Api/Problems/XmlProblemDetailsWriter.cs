@@ -21,7 +21,7 @@ public sealed class XmlProblemDetailsWriter(IOptions<ProblemDetailsOptions> opti
     public const string ContentType = "application/problem+xml; charset=utf-8";
 
     private static readonly DataContractSerializer ProblemSerializer = new(typeof(ProblemDetailsWrapper));
-    private static readonly DataContractSerializer ValidationSerializer = new(typeof(ValidationProblemDetailsWrapper));
+    private static readonly DataContractSerializer ValidationSerializer = new(typeof(ValidationProblemXmlWrapper));
 
     private static readonly XmlWriterSettings WriterSettings = new()
     {
@@ -98,10 +98,10 @@ public sealed class XmlProblemDetailsWriter(IOptions<ProblemDetailsOptions> opti
             switch (context.ProblemDetails)
             {
                 case ValidationProblemDetails validation:
-                    ValidationSerializer.WriteObject(writer, new ValidationProblemDetailsWrapper(validation));
+                    ValidationSerializer.WriteObject(writer, new ValidationProblemXmlWrapper(validation));
                     break;
                 case HttpValidationProblemDetails validation:
-                    ValidationSerializer.WriteObject(writer, new ValidationProblemDetailsWrapper(ToMvc(validation)));
+                    ValidationSerializer.WriteObject(writer, new ValidationProblemXmlWrapper(ToMvc(validation)));
                     break;
                 default:
                     ProblemSerializer.WriteObject(writer, new ProblemDetailsWrapper(context.ProblemDetails));

@@ -10,25 +10,25 @@ namespace TickPulse.Contracts;
 [DataContract(Name = "averagePrice", Namespace = Schema.Namespace)]
 public sealed class AveragePriceResponse
 {
-    [DataMember(Order = 1)]
+    [DataMember(Name = "symbol", Order = 1)]
     public string Symbol { get; init; } = string.Empty;
 
     /// <summary>Rounded to 8 decimal places (banker's rounding).</summary>
-    [DataMember(Order = 2)]
+    [DataMember(Name = "averagePrice", Order = 2)]
     public decimal AveragePrice { get; init; }
 
-    [DataMember(Order = 3)]
+    [DataMember(Name = "from", Order = 3)]
     public DateTime From { get; init; }
 
-    [DataMember(Order = 4)]
+    [DataMember(Name = "to", Order = 4)]
     public DateTime To { get; init; }
 
-    [DataMember(Order = 5)]
+    [DataMember(Name = "coveredSeconds", Order = 5)]
     public long CoveredSeconds { get; init; }
 
-    [DataMember(Order = 6)]
+    [DataMember(Name = "sampleCount", Order = 6)]
     public long SampleCount { get; init; }
 
-    [DataMember(Order = 7)]
+    [DataMember(Name = "windowHours", Order = 7)]
     public int WindowHours { get; init; }
 }

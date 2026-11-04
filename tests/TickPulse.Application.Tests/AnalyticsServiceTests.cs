@@ -170,6 +170,7 @@ public sealed class AnalyticsServiceTests
         var result = await _service.GetSmaAsync("BTCUSDT", n, "1m", null, Ct);
 
         result.Error.ShouldBe(AppError.Validation);
+        result.Parameter.ShouldBe("n");
         result.Detail.ShouldBe("n must be between 1 and 1000.");
     }
 
@@ -187,7 +188,6 @@ public sealed class AnalyticsServiceTests
     }
 
     [Theory]
-    [InlineData("")]
     [InlineData("1h")]
     [InlineData("1W")]
     [InlineData("5 m")]
@@ -197,7 +197,31 @@ public sealed class AnalyticsServiceTests
         var result = await _service.GetSmaAsync("BTCUSDT", 5, p, null, Ct);
 
         result.Error.ShouldBe(AppError.Validation);
+        result.Parameter.ShouldBe("p");
         result.Detail.ShouldBe("p must be one of 1w, 1d, 30m, 5m, 1m.");
+    }
+
+    [Fact]
+    public async Task Sma_MissingN_ReturnsValidation()
+    {
+        var result = await _service.GetSmaAsync("BTCUSDT", null, "1m", null, Ct);
+
+        result.Error.ShouldBe(AppError.Validation);
+        result.Parameter.ShouldBe("n");
+        result.Detail.ShouldBe("n is required.");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("  ")]
+    public async Task Sma_MissingP_ReturnsValidation(string? p)
+    {
+        var result = await _service.GetSmaAsync("BTCUSDT", 5, p, null, Ct);
+
+        result.Error.ShouldBe(AppError.Validation);
+        result.Parameter.ShouldBe("p");
+        result.Detail.ShouldBe("p is required.");
     }
 
     [Fact]
@@ -206,6 +230,7 @@ public sealed class AnalyticsServiceTests
         var result = await _service.GetSmaAsync("BTCUSDT", 5, "1m", Now.AddTicks(1), Ct);
 
         result.Error.ShouldBe(AppError.Validation);
+        result.Parameter.ShouldBe("s");
         result.Detail.ShouldBe("s must not be in the future.");
     }
 
@@ -273,21 +298,23 @@ public sealed class AnalyticsServiceTests
     {
         _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Btc]);
         _ingestion.RecordBatch(1, 0, [new LivePrice("BTCUSDT", 66_000m, Now.AddSeconds(-1))]);
-        _queries.GetCloseAtOrBeforeAsync(Btc.Id, Now.AddHours(-24), Arg.Any<CancellationToken>()).Returns(64_000m);
+        DayAgoCloses((Btc.Id, Now.AddHours(-24).AddMinutes(-4), 64_000m));
 
         var result = await _service.ListSymbolsAsync(Ct);
 
         // (66000 - 64000) / 64000 × 100 = 3.125 → 3.12 (banker's rounding to 2 dp).
         result.Value.ShouldNotBeNull().ShouldBe([new SymbolSummary("BTCUSDT", true, 66_000m, 3.12m, BackfillStatus.Completed)]);
-        await _queries.DidNotReceive().GetCloseAtOrBeforeAsync(Btc.Id, Now, Arg.Any<CancellationToken>());
+
+        // Every symbol has a live price, so no fallback query runs.
+        await _queries.DidNotReceive().GetClosesAtOrBeforeAsync(Arg.Any<IReadOnlyCollection<int>>(), Now, Arg.Any<CancellationToken>());
     }
 
     [Fact]
     public async Task ListSymbols_WithoutALivePrice_FallsBackToTheLastCandleClose()
     {
         _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Ada]);
-        _queries.GetCloseAtOrBeforeAsync(Ada.Id, Now, Arg.Any<CancellationToken>()).Returns(0.2475m);
-        _queries.GetCloseAtOrBeforeAsync(Ada.Id, Now.AddHours(-24), Arg.Any<CancellationToken>()).Returns(0.25m);
+        LatestCloses((Ada.Id, Now.AddHours(-2), 0.2475m));
+        DayAgoCloses((Ada.Id, Now.AddHours(-25), 0.25m));
 
         var result = await _service.ListSymbolsAsync(Ct);
 
@@ -296,10 +323,57 @@ public sealed class AnalyticsServiceTests
     }
 
     [Fact]
+    public async Task ListSymbols_StaleFallback_GivesNullChange()
+    {
+        // The last candle is 30 h old, so it is also "the close a day ago": comparing it with itself would claim 0 %.
+        _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Ada]);
+        LatestCloses((Ada.Id, Now.AddHours(-30), 0.3m));
+        DayAgoCloses((Ada.Id, Now.AddHours(-30), 0.3m));
+
+        var result = await _service.ListSymbolsAsync(Ct);
+
+        result.Value.ShouldNotBeNull().ShouldBe([new SymbolSummary("ADAUSDT", false, 0.3m, null, BackfillStatus.NotRequested)]);
+    }
+
+    [Fact]
+    public async Task ListSymbols_LivePriceOlderThanADay_GivesNullChange()
+    {
+        _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Btc]);
+        _ingestion.RecordBatch(1, 0, [new LivePrice("BTCUSDT", 66_000m, Now.AddHours(-24))]);
+        DayAgoCloses((Btc.Id, Now.AddHours(-24), 66_000m));
+
+        var result = await _service.ListSymbolsAsync(Ct);
+
+        result.Value.ShouldNotBeNull().Single().Change24hPercent.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task ListSymbols_BatchesTheCloseQueries()
+    {
+        _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Btc, Ada, Eth]);
+        _ingestion.RecordBatch(1, 0, [new LivePrice("BTCUSDT", 66_000m, Now)]);
+
+        await _service.ListSymbolsAsync(Ct);
+
+        // One query for the closes a day ago (every symbol), one for the fallback prices (symbols without a live one).
+        await _queries.Received(1).GetClosesAtOrBeforeAsync(
+            Arg.Is<IReadOnlyCollection<int>>(ids => ids.SequenceEqual(new[] { Btc.Id, Ada.Id, Eth.Id })),
+            Now.AddHours(-24),
+            Arg.Any<CancellationToken>());
+        await _queries.Received(1).GetClosesAtOrBeforeAsync(
+            Arg.Is<IReadOnlyCollection<int>>(ids => ids.SequenceEqual(new[] { Ada.Id, Eth.Id })),
+            Now,
+            Arg.Any<CancellationToken>());
+        _queries.ReceivedCalls().Count().ShouldBe(2);
+    }
+
+    [Fact]
     public async Task ListSymbols_MissingPrices_GiveNullValues()
     {
         _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Btc, Eth]);
         _ingestion.RecordBatch(1, 0, [new LivePrice("BTCUSDT", 66_000m, Now)]);
+        LatestCloses();
+        DayAgoCloses();
 
         var result = await _service.ListSymbolsAsync(Ct);
 
@@ -315,7 +389,7 @@ public sealed class AnalyticsServiceTests
     {
         _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([Btc]);
         _ingestion.RecordBatch(1, 0, [new LivePrice("BTCUSDT", 1m, Now)]);
-        _queries.GetCloseAtOrBeforeAsync(Btc.Id, Now.AddHours(-24), Arg.Any<CancellationToken>()).Returns(0m);
+        DayAgoCloses((Btc.Id, Now.AddHours(-25), 0m));
 
         var result = await _service.ListSymbolsAsync(Ct);
 
@@ -323,13 +397,14 @@ public sealed class AnalyticsServiceTests
     }
 
     [Fact]
-    public async Task ListSymbols_NoSymbols_ReturnsAnEmptyList()
+    public async Task ListSymbols_NoSymbols_ReturnsAnEmptyListWithoutQueries()
     {
         _symbols.ListAsync(Arg.Any<CancellationToken>()).Returns([]);
 
         var result = await _service.ListSymbolsAsync(Ct);
 
         result.Value.ShouldNotBeNull().ShouldBeEmpty();
+        _queries.ReceivedCalls().ShouldBeEmpty();
     }
 
     // ---- candles ----------------------------------------------------------------------------------------------
@@ -353,7 +428,20 @@ public sealed class AnalyticsServiceTests
         var result = await _service.GetCandlesAsync("BTCUSDT", "1m", limit, Ct);
 
         result.Error.ShouldBe(AppError.Validation);
+        result.Parameter.ShouldBe("limit");
         result.Detail.ShouldBe("limit must be between 1 and 1000.");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public async Task Candles_MissingP_ReturnsValidation(string? p)
+    {
+        var result = await _service.GetCandlesAsync("BTCUSDT", p, 10, Ct);
+
+        result.Error.ShouldBe(AppError.Validation);
+        result.Parameter.ShouldBe("p");
+        result.Detail.ShouldBe("p is required.");
     }
 
     [Fact]
@@ -362,6 +450,7 @@ public sealed class AnalyticsServiceTests
         var result = await _service.GetCandlesAsync("BTCUSDT", "2h", 10, Ct);
 
         result.Error.ShouldBe(AppError.Validation);
+        result.Parameter.ShouldBe("p");
         result.Detail.ShouldBe("p must be one of 1w, 1d, 30m, 5m, 1m.");
     }
 
@@ -383,6 +472,14 @@ public sealed class AnalyticsServiceTests
         result.Error.ShouldBe(AppError.NoData);
         result.Detail.ShouldBe("No candles are stored for 'BTCUSDT'.");
     }
+
+    private void LatestCloses(params (int Id, DateTime At, decimal Close)[] closes) => Closes(Now, closes);
+
+    private void DayAgoCloses(params (int Id, DateTime At, decimal Close)[] closes) => Closes(Now.AddHours(-24), closes);
+
+    private void Closes(DateTime utc, (int Id, DateTime At, decimal Close)[] closes) =>
+        _queries.GetClosesAtOrBeforeAsync(Arg.Any<IReadOnlyCollection<int>>(), utc, Arg.Any<CancellationToken>())
+            .Returns(closes.ToDictionary(c => c.Id, c => new PricePoint(c.At, c.Close)));
 
     private static DateTime At(int hour, int minute) => new(2026, 10, 7, hour, minute, 0, DateTimeKind.Utc);
 

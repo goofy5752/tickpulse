@@ -63,17 +63,31 @@ public static class ProblemFactory
     /// </summary>
     public static ValidationProblemDetails CreateValidation(HttpContext httpContext, ModelStateDictionary modelState)
     {
-        ArgumentNullException.ThrowIfNull(httpContext);
         ArgumentNullException.ThrowIfNull(modelState);
+        return Validation(httpContext, new ValidationProblemDetails(modelState), ValidationDetail);
+    }
 
-        return new ValidationProblemDetails(modelState)
-        {
-            Type = TypeFor(ProblemSlugs.Validation),
-            Title = TitleFor(ProblemSlugs.Validation),
-            Status = StatusCodes.Status400BadRequest,
-            Detail = ValidationDetail,
-            Extensions = { [TraceIdKey] = TraceId(httpContext) },
-        };
+    /// <summary>
+    /// A 400 <c>validation</c> problem about one request parameter: <paramref name="message"/> is both the <c>detail</c>
+    /// and the only entry of <c>errors[parameter]</c>.
+    /// </summary>
+    public static ValidationProblemDetails CreateValidation(HttpContext httpContext, string parameter, string message)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(parameter);
+        ArgumentException.ThrowIfNullOrWhiteSpace(message);
+        var errors = new Dictionary<string, string[]>(StringComparer.Ordinal) { [parameter] = [message] };
+        return Validation(httpContext, new ValidationProblemDetails(errors), message);
+    }
+
+    private static ValidationProblemDetails Validation(HttpContext httpContext, ValidationProblemDetails problem, string detail)
+    {
+        ArgumentNullException.ThrowIfNull(httpContext);
+        problem.Type = TypeFor(ProblemSlugs.Validation);
+        problem.Title = TitleFor(ProblemSlugs.Validation);
+        problem.Status = StatusCodes.Status400BadRequest;
+        problem.Detail = detail;
+        problem.Extensions[TraceIdKey] = TraceId(httpContext);
+        return problem;
     }
 
     /// <summary>The HTTP status of a use-case failure.</summary>

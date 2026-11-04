@@ -459,6 +459,42 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ClosesAtOrBefore_ReturnsTheLatestPerSymbolInOneQuery()
+    {
+        await CandleWriter().InsertBackfillAsync(Btc, [Candle(Start, close: 1m), Candle(Start.AddMinutes(10), close: 3m)], Ct);
+        await CandleWriter().InsertBackfillAsync(Eth, [Candle(Start.AddMinutes(6), close: 50m)], Ct);
+        await Writer().WriteBatchAsync([NewTick(Btc, 1, 2m, 1m, Start.AddMinutes(5).AddSeconds(30))], Ct);
+        var queries = Queries();
+
+        // ADA has no candle and 999 does not exist: both are absent. A repeated id is answered once.
+        var closes = await queries.GetClosesAtOrBeforeAsync([Btc, Ada, Eth, 999, Btc], Start.AddMinutes(9).AddSeconds(59), Ct);
+        closes.OrderBy(c => c.Key).Select(c => (c.Key, c.Value))
+            .ShouldBe([(Btc, new PricePoint(Start.AddMinutes(5), 2m)), (Eth, new PricePoint(Start.AddMinutes(6), 50m))]);
+        closes.Values.ShouldAllBe(p => p.BucketStart.Kind == DateTimeKind.Utc);
+
+        (await queries.GetClosesAtOrBeforeAsync([Btc, Eth], Start.AddMinutes(5), Ct))
+            .OrderBy(c => c.Key).Select(c => (c.Key, c.Value.Close)).ShouldBe([(Btc, 2m)]);
+        (await queries.GetClosesAtOrBeforeAsync([Btc, Eth], Start.AddMinutes(-1), Ct)).ShouldBeEmpty();
+        (await queries.GetClosesAtOrBeforeAsync([], Start.AddDays(1), Ct)).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task ClosesAtOrBeforeQuery_ProbesThePrimaryKeyPerSymbol()
+    {
+        await SeedMixedSourcesAsync();
+
+        var plan = await ExplainAsync(
+            MarketDataQueries.ClosesAtOrBeforeSql,
+            new NpgsqlParameter<int[]> { TypedValue = [Btc, Ada, Eth] },
+            Ts(Start.AddDays(1)));
+
+        // One backward index probe per symbol (LIMIT 1 inside the lateral join), never a scan of the whole table.
+        plan.ShouldContain("Limit");
+        plan.ShouldMatch(@"Index (Only )?Scan Backward using pk_candles_1m on candles_1m");
+        plan.ShouldNotContain("Seq Scan on candles_1m");
+    }
+
+    [Fact]
     public async Task ApproximateTickCount_AfterAnalyze_MatchesRows()
     {
         var queries = Queries();

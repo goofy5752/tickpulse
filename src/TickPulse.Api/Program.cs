@@ -29,7 +29,7 @@ services.AddControllers(o =>
         o.ReturnHttpNotAcceptable = true;
         o.RespectBrowserAcceptHeader = true;
     })
-    // Parameters that cannot be bound (n=abc, a missing p) get the same validation problem, negotiated, as every other error.
+    // Parameters that cannot be bound (n=abc, limit=abc) get the same validation problem, negotiated, as every other error.
     .ConfigureApiBehaviorOptions(o => o.InvalidModelStateResponseFactory = context =>
         new ProblemResult(ProblemFactory.CreateValidation(context.HttpContext, context.ModelState)))
     .AddXmlDataContractSerializerFormatters();

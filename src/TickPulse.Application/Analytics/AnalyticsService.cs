@@ -27,6 +27,9 @@ public sealed class AnalyticsService(
     public const int MaxCandleLimit = 1000;
 
     private static readonly TimeSpan AverageWindow = TimeSpan.FromHours(AverageWindowHours);
+    /// <summary>The detail of the validation failure for an <c>s</c> after the current time.</summary>
+    public const string FutureStartDetail = "s must not be in the future.";
+
     private static readonly string InvalidPeriodDetail = $"p must be one of {string.Join(", ", Period.All.Reverse().Select(p => p.Code))}.";
 
     /// <summary>The mean of the trades collected in <c>[now − 24 h, now]</c>.</summary>
@@ -63,27 +66,32 @@ public sealed class AnalyticsService(
     /// before now, or, with <paramref name="sUtc"/>, the first ones starting at or after it.
     /// </summary>
     /// <exception cref="ArgumentException"><paramref name="sUtc"/> is not <see cref="DateTimeKind.Utc"/>.</exception>
-    public async Task<AppResult<SmaResult>> GetSmaAsync(string symbol, int n, string p, DateTime? sUtc, CancellationToken ct)
+    public async Task<AppResult<SmaResult>> GetSmaAsync(string symbol, int? n, string? p, DateTime? sUtc, CancellationToken ct)
     {
         if (sUtc is { Kind: not DateTimeKind.Utc })
         {
             throw new ArgumentException("Timestamp must have Kind=Utc.", nameof(sUtc));
         }
 
-        if (n is < MinDataPoints or > MaxDataPoints)
+        if (n is not { } count)
         {
-            return Invalid<SmaResult>($"n must be between {MinDataPoints} and {MaxDataPoints}.");
+            return AppResult<SmaResult>.Invalid(nameof(n), "n is required.");
         }
 
-        if (!Period.TryParse(p, out var period))
+        if (count is < MinDataPoints or > MaxDataPoints)
         {
-            return Invalid<SmaResult>(InvalidPeriodDetail);
+            return AppResult<SmaResult>.Invalid(nameof(n), $"n must be between {MinDataPoints} and {MaxDataPoints}.");
+        }
+
+        if (ParsePeriod<SmaResult>(p, out var period) is { } invalidPeriod)
+        {
+            return invalidPeriod;
         }
 
         var now = Now();
         if (sUtc > now)
         {
-            return Invalid<SmaResult>("s must not be in the future.");
+            return AppResult<SmaResult>.Invalid("s", FutureStartDetail);
         }
 
         var found = await FindAsync(symbol, ct);
@@ -92,7 +100,7 @@ public sealed class AnalyticsService(
             return UnknownSymbol<SmaResult>(symbol);
         }
 
-        var window = SmaWindowCalculator.Compute(period, n, sUtc, now);
+        var window = SmaWindowCalculator.Compute(period, count, sUtc, now);
         IReadOnlyList<PricePoint> closes = window.IsEmpty ? [] : await queries.GetClosesAsync(found.Id, period, window, ct);
         if (SmaCalculator.Average(closes) is not { } value)
         {
@@ -101,41 +109,58 @@ public sealed class AnalyticsService(
                 $"No complete {period.Code} bucket of '{found.Name}' falls inside the requested window.");
         }
 
-        return AppResult<SmaResult>.Ok(new SmaResult(found.Name, period, n, value, window, now, sUtc, closes));
+        return AppResult<SmaResult>.Ok(new SmaResult(found.Name, period, count, value, window, now, sUtc, closes));
     }
 
     /// <summary>
     /// Every symbol TickPulse monitors or used to monitor. The latest price is the live one, or the last stored
-    /// close; the 24 h change compares it with the close at or before <c>now − 24 h</c>.
+    /// close; the 24 h change compares it with the close at or before <c>now − 24 h</c>, and is null when the latest
+    /// price is itself that old (it would be compared with itself). Three queries in all, whatever the number of
+    /// symbols.
     /// </summary>
     public async Task<AppResult<IReadOnlyList<SymbolSummary>>> ListSymbolsAsync(CancellationToken ct)
     {
-        var now = Now();
         var all = await symbols.ListAsync(ct);
+        if (all.Count == 0)
+        {
+            return AppResult<IReadOnlyList<SymbolSummary>>.Ok([]);
+        }
+
+        var now = Now();
+        var dayAgoUtc = now - AverageWindow;
+        var live = all.ToDictionary(
+            s => s.Id,
+            s => ingestion.Latest.TryGetValue(s.Name, out var price) ? new PricePoint(price.TradeTimeUtc, price.Price) : (PricePoint?)null);
+        int[] withoutLive = [.. all.Where(s => live[s.Id] is null).Select(s => s.Id)];
+
+        var dayAgo = await queries.GetClosesAtOrBeforeAsync([.. all.Select(s => s.Id)], dayAgoUtc, ct);
+        var fallback = withoutLive.Length == 0
+            ? new Dictionary<int, PricePoint>()
+            : await queries.GetClosesAtOrBeforeAsync(withoutLive, now, ct);
+
         var summaries = new List<SymbolSummary>(all.Count);
         foreach (var s in all)
         {
-            var latest = ingestion.Latest.TryGetValue(s.Name, out var live)
-                ? live.Price
-                : await queries.GetCloseAtOrBeforeAsync(s.Id, now, ct);
-            var dayAgo = await queries.GetCloseAtOrBeforeAsync(s.Id, now - AverageWindow, ct);
-            summaries.Add(new SymbolSummary(s.Name, s.IsActive, latest, ChangePercent(latest, dayAgo), s.BackfillStatus));
+            var latest = live[s.Id] ?? (fallback.TryGetValue(s.Id, out var close) ? close : null);
+            decimal? then = dayAgo.TryGetValue(s.Id, out var old) ? old.Close : null;
+            var change = latest is { } current && current.BucketStart > dayAgoUtc ? ChangePercent(current.Close, then) : null;
+            summaries.Add(new SymbolSummary(s.Name, s.IsActive, latest?.Close, change, s.BackfillStatus));
         }
 
         return AppResult<IReadOnlyList<SymbolSummary>>.Ok(summaries);
     }
 
     /// <summary>The OHLCV candles of the last <paramref name="limit"/> <paramref name="p"/> periods, oldest first.</summary>
-    public async Task<AppResult<IReadOnlyList<CandleRow>>> GetCandlesAsync(string symbol, string p, int limit, CancellationToken ct)
+    public async Task<AppResult<IReadOnlyList<CandleRow>>> GetCandlesAsync(string symbol, string? p, int limit, CancellationToken ct)
     {
-        if (!Period.TryParse(p, out var period))
+        if (ParsePeriod<IReadOnlyList<CandleRow>>(p, out var period) is { } invalidPeriod)
         {
-            return Invalid<IReadOnlyList<CandleRow>>(InvalidPeriodDetail);
+            return invalidPeriod;
         }
 
         if (limit is < MinCandleLimit or > MaxCandleLimit)
         {
-            return Invalid<IReadOnlyList<CandleRow>>($"limit must be between {MinCandleLimit} and {MaxCandleLimit}.");
+            return AppResult<IReadOnlyList<CandleRow>>.Invalid(nameof(limit), $"limit must be between {MinCandleLimit} and {MaxCandleLimit}.");
         }
 
         var found = await FindAsync(symbol, ct);
@@ -151,12 +176,22 @@ public sealed class AnalyticsService(
     }
 
     /// <summary><c>(latest − dayAgo) / dayAgo × 100</c> to 2 dp (banker's rounding), or null when it is undefined.</summary>
-    private static decimal? ChangePercent(decimal? latest, decimal? dayAgo) =>
-        latest is { } now && dayAgo is { } then && then != 0m
-            ? Math.Round((now - then) / then * 100m, 2, MidpointRounding.ToEven)
+    private static decimal? ChangePercent(decimal latest, decimal? dayAgo) =>
+        dayAgo is { } then && then != 0m
+            ? Math.Round((latest - then) / then * 100m, 2, MidpointRounding.ToEven)
             : null;
 
-    private static AppResult<T> Invalid<T>(string detail) => AppResult<T>.Fail(AppError.Validation, detail);
+    /// <summary>Parses <paramref name="p"/>; returns the validation failure, or null when it is a known period.</summary>
+    private static AppResult<T>? ParsePeriod<T>(string? p, out Period period)
+    {
+        period = default;
+        if (string.IsNullOrWhiteSpace(p))
+        {
+            return AppResult<T>.Invalid(nameof(p), "p is required.");
+        }
+
+        return Period.TryParse(p, out period) ? null : AppResult<T>.Invalid(nameof(p), InvalidPeriodDetail);
+    }
 
     private static AppResult<T> UnknownSymbol<T>(string? raw) =>
         AppResult<T>.Fail(

@@ -6,9 +6,9 @@ namespace TickPulse.Contracts;
 [DataContract(Name = "dataPoint", Namespace = Schema.Namespace)]
 public sealed class SmaDataPoint
 {
-    [DataMember(Order = 1)]
+    [DataMember(Name = "bucketStart", Order = 1)]
     public DateTime BucketStart { get; init; }
 
-    [DataMember(Order = 2)]
+    [DataMember(Name = "close", Order = 2)]
     public decimal Close { get; init; }
 }

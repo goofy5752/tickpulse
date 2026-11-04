@@ -78,9 +78,9 @@ public sealed class NegotiationTests(ApiFactory api) : IClassFixture<ApiFactory>
             case "application/xml" or "text/xml":
                 var root = XDocument.Parse(body).Root!;
                 root.Name.ShouldBe(Schema + "probe");
-                root.Element(Schema + "Symbol")!.Value.ShouldBe("BTCUSDT");
-                root.Element(Schema + "Price")!.Value.ShouldBe("64123.12345678");
-                root.Element(Schema + "At")!.Value.ShouldBe("2026-03-02T12:00:00Z");
+                root.Element(Schema + "symbol")!.Value.ShouldBe("BTCUSDT");
+                root.Element(Schema + "price")!.Value.ShouldBe("64123.12345678");
+                root.Element(Schema + "at")!.Value.ShouldBe("2026-03-02T12:00:00Z");
                 break;
             default:
                 var problem = await ReadAsync(response);

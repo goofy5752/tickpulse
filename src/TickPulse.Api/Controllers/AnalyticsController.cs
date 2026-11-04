@@ -30,8 +30,8 @@ public sealed class AnalyticsController(AnalyticsService analytics) : Controller
     [ProducesResponseType<ProblemResponse>(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetSmaAsync(
         string symbol,
-        [FromQuery] int n,
-        [FromQuery] string p,
+        [FromQuery] int? n,
+        [FromQuery] string? p,
         [FromQuery] string? s,
         CancellationToken ct)
     {
@@ -54,7 +54,7 @@ public sealed class AnalyticsController(AnalyticsService analytics) : Controller
     [ProducesResponseType<ProblemResponse>(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetCandlesAsync(
         string symbol,
-        [FromQuery] string p,
+        [FromQuery] string? p,
         [FromQuery] int limit = AnalyticsService.DefaultCandleLimit,
         CancellationToken ct = default) =>
         this.ToActionResult(await analytics.GetCandlesAsync(symbol, p, limit, ct), r => r.ToContract());

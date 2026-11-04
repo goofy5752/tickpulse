@@ -24,5 +24,17 @@ public sealed class AppResultTests
         result.Value.ShouldBeNull();
         result.Error.ShouldBe(AppError.UnknownSymbol);
         result.Detail.ShouldBe("Symbol 'FOOBAR' is not monitored.");
+        result.Parameter.ShouldBeNull();
+    }
+
+    [Fact]
+    public void Invalid_IsAValidationErrorNamingTheParameter()
+    {
+        var result = AppResult<int>.Invalid("n", "n must be between 1 and 1000.");
+
+        result.IsSuccess.ShouldBeFalse();
+        result.Error.ShouldBe(AppError.Validation);
+        result.Parameter.ShouldBe("n");
+        result.Detail.ShouldBe("n must be between 1 and 1000.");
     }
 }

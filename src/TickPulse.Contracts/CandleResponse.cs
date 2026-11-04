@@ -6,22 +6,22 @@ namespace TickPulse.Contracts;
 [DataContract(Name = "candle", Namespace = Schema.Namespace)]
 public sealed class CandleResponse
 {
-    [DataMember(Order = 1)]
+    [DataMember(Name = "bucketStart", Order = 1)]
     public DateTime BucketStart { get; init; }
 
-    [DataMember(Order = 2)]
+    [DataMember(Name = "open", Order = 2)]
     public decimal Open { get; init; }
 
-    [DataMember(Order = 3)]
+    [DataMember(Name = "high", Order = 3)]
     public decimal High { get; init; }
 
-    [DataMember(Order = 4)]
+    [DataMember(Name = "low", Order = 4)]
     public decimal Low { get; init; }
 
-    [DataMember(Order = 5)]
+    [DataMember(Name = "close", Order = 5)]
     public decimal Close { get; init; }
 
-    [DataMember(Order = 6)]
+    [DataMember(Name = "volume", Order = 6)]
     public decimal Volume { get; init; }
 }
 

@@ -11,13 +11,13 @@ namespace TickPulse.Integration.Tests.Api;
 [DataContract(Name = "probe", Namespace = "https://tickpulse.dev/schema/v1")]
 public sealed class ProbeResponse
 {
-    [DataMember(Order = 1)]
+    [DataMember(Name = "symbol", Order = 1)]
     public string Symbol { get; init; } = string.Empty;
 
-    [DataMember(Order = 2)]
+    [DataMember(Name = "price", Order = 2)]
     public decimal Price { get; init; }
 
-    [DataMember(Order = 3)]
+    [DataMember(Name = "at", Order = 3)]
     public DateTime At { get; init; }
 }
 
