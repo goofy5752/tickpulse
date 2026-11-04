@@ -44,7 +44,7 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     private TaskCompletionSource? _klinesHold;
     private (int Status, int Remaining, int? RetryAfterSeconds)? _klinesFailure;
     private (int Status, int Remaining)? _exchangeInfoFailure;
-    private (int Status, int Remaining)? _aggTradesFailure;
+    private (int Status, int Remaining, string? QueryContains)? _aggTradesFailure;
     private (int Code, string Msg)? _rejectNext;
     private bool _suppressNextAck;
     private int _rateLimitDisconnects;
@@ -329,15 +329,16 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     }
 
     /// <summary>
-    /// The next <paramref name="count"/> <c>aggTrades</c> requests answer <paramref name="status"/> with a Binance error
-    /// body, e.g. <c>400</c> (a permanent error). Later requests are served normally.
+    /// The next <paramref name="count"/> <c>aggTrades</c> requests (only those whose query contains
+    /// <paramref name="queryContains"/>, when set) answer <paramref name="status"/> with a Binance error body, e.g.
+    /// <c>400</c> (a permanent error). Later requests are served normally.
     /// </summary>
-    public void FailNextAggTrades(int status, int count = 1)
+    public void FailNextAggTrades(int status, int count = 1, string? queryContains = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
         lock (_gate)
         {
-            _aggTradesFailure = (status, count);
+            _aggTradesFailure = (status, count, queryContains);
         }
     }
 
@@ -896,11 +897,12 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     private async Task HandleAggTradesAsync(HttpContext context)
     {
         Task? hold;
-        (int Status, int Remaining)? failure = null;
+        (int Status, int Remaining, string? QueryContains)? failure = null;
         lock (_gate)
         {
             hold = _aggTradesHold?.Task;
-            if (_aggTradesFailure is { } next)
+            if (_aggTradesFailure is { } next
+                && (next.QueryContains is null || context.Request.QueryString.Value?.Contains(next.QueryContains, StringComparison.Ordinal) == true))
             {
                 failure = next;
                 _aggTradesFailure = next.Remaining > 1 ? next with { Remaining = next.Remaining - 1 } : null;

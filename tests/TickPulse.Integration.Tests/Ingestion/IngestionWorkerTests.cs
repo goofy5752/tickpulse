@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using TickPulse.Application.Abstractions;
@@ -454,6 +455,81 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(20); // 1..5 were stored without candles
     }
 
+    [Theory]
+    [InlineData(false)] // the reconnect's gap-fill fails
+    [InlineData(true)]  // the reconnect's gap-fill stops at the page cap (one page here)
+    public async Task GapLeftOpen_ThenANewSessionInTheSameProcess_RecoversEveryTrade(bool capped)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var t0 = Now.AddMinutes(-5);
+        await ExecuteSqlAsync(db, "UPDATE symbols SET is_active = false WHERE name <> 'BTCUSDT'");
+        var logs = new LogCapture();
+        Action<IServiceCollection>? onePage = s => s.AddSingleton(sp => new GapFiller(
+            sp.GetRequiredService<IAggTradeSource>(), TimeProvider.System, NullLogger<GapFiller>.Instance, sp.GetRequiredService<TickPulseMetrics>(), maxPages: 1));
+        await using var services = IngestionServices(logs, capped ? onePage : null);
+        var state = services.GetRequiredService<IngestionState>();
+        var leaderLock = new YieldingLeaderLock(new PostgresLeaderLock(db.ConnectionString));
+        using var worker = NewWorker(services, leaderLock);
+        await worker.StartAsync(ct);
+        async Task WaitConnectedAsync()
+        {
+            await _server.WaitUntilAsync(s => s.ActiveConnections == 1 && s.SubscribedStreams.SetEquals([Stream("BTCUSDT")]), WaitTimeout, ct);
+            await WaitForAsync(() => state.IsLeader && state.Status == WsState.Connected, "connected");
+        }
+
+        try
+        {
+            await WaitConnectedAsync();
+            for (var i = 1; i <= 5; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 5);
+
+            // A reconnect gap after 5. Its fill fails, or recovers only one page (6..1005) of 6..1010.
+            var missedLast = capped ? 1010 : 10;
+            if (!capped)
+            {
+                _server.FailNextAggTrades(400, queryContains: "fromId=6&");
+            }
+
+            for (var i = 6; i <= missedLast; i++)
+            {
+                _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await _server.DropAllConnectionsAsync();
+            await _server.WaitUntilAsync(s => s.ReceivedRequests.Contains("/api/v3/aggTrades?symbol=BTCUSDT&fromId=6&limit=1000"), WaitTimeout, ct);
+            await WaitConnectedAsync();
+            for (var i = missedLast + 1; i <= missedLast + 5; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i)); // stored above the open gap
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", capped ? 1010 : 10);
+
+            // The session ends in this same process and a new one starts: the stored maximum is this process's own
+            // stream, above the open gap, so the seed must not start the fill from there.
+            leaderLock.Yield = true;
+            await WaitForAsync(() => logs.Count("LogSessionEnded") >= 1, "the session ended");
+            leaderLock.Yield = false;
+            await WaitConnectedAsync();
+            for (var i = missedLast + 6; i <= missedLast + 10; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", missedLast + 10);
+            (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, missedLast + 10).Select(i => (long)i));
+            (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(missedLast + 10);
+        }
+        finally
+        {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
     [Fact]
     public async Task LeadInFailed_IsRetriedOnTheNextConnection()
     {
@@ -483,25 +559,29 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         await WaitForSeededSubscriptionAsync(host);
         var t0 = Now.AddMinutes(-10); // before the lead-in window
 
-        // A concurrent pusher streams trades as fast as the server sends them, across at least two rotations, so trades
-        // really arrive while both connections are subscribed.
+        // A concurrent pusher streams trades as fast as the server sends them, across at least two rotations and until
+        // at least one trade arrived while both connections were subscribed (the overlap window is short; under load a
+        // single rotation can pass without a push landing in it, so further rotations every 2 s give it more chances).
         using var stop = new CancellationTokenSource();
+        var sentToBoth = 0;
         var pusher = Task.Run(async () =>
         {
             long id = 0;
-            var toBoth = 0;
             while (!stop.IsCancellationRequested)
             {
                 id++;
                 if (await _server.PushTradeAsync("BTCUSDT", id, id, t0.AddMilliseconds(id)) == 2)
                 {
-                    toBoth++;
+                    Interlocked.Increment(ref sentToBoth);
                 }
             }
 
-            return (Count: id, ToBoth: toBoth);
+            return (Count: id, ToBoth: Volatile.Read(ref sentToBoth));
         });
-        await WaitForAsync(() => host.Logs.Count("LogRotated") >= 2 || pusher.IsCompleted, "two rotations", TimeSpan.FromSeconds(30));
+        await WaitForAsync(
+            () => (host.Logs.Count("LogRotated") >= 2 && Volatile.Read(ref sentToBoth) > 0) || pusher.IsCompleted,
+            "two rotations, one with a trade sent to both connections",
+            TimeSpan.FromSeconds(30));
         await stop.CancelAsync();
         var (count, toBoth) = await pusher;
 
@@ -697,7 +777,7 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         long.Parse(Regex.Match(request, @"startTime=(\d+)").Groups[1].Value, CultureInfo.InvariantCulture);
 
     // One process's ingestion services, as the API registers them (its own symbol cache, watermarks and state).
-    private ServiceProvider IngestionServices(LogCapture logs)
+    private ServiceProvider IngestionServices(LogCapture logs, Action<IServiceCollection>? configure = null)
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -712,6 +792,7 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
             .Build();
         var services = new ServiceCollection();
         services.AddLogging(logging => logging.AddProvider(logs).SetMinimumLevel(LogLevel.Debug));
+        configure?.Invoke(services); // first, so the TryAdd registrations below keep it
         services.AddTickPulseInfrastructure(configuration);
         services.AddTickPulseIngestion(configuration);
         return services.BuildServiceProvider();

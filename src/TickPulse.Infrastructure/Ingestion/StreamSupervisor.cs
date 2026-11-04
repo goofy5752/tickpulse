@@ -477,20 +477,36 @@ internal sealed partial class StreamSupervisor(
                 if (result.Complete && !link.EndedBroken)
                 {
                     watermarks.Filled(symbol, version);
+                    continue;
                 }
-                else if (result.LastEmittedId is { } recovered)
+
+                if (result.LastEmittedId is { } recovered)
                 {
                     watermarks.Advance(symbol, recovered, version);
                 }
+
+                GiveUp(link, symbol);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                GiveUp(link, symbol);
                 return; // the session is ending; the gap stays open
             }
             catch (Exception ex)
             {
+                GiveUp(link, symbol);
                 LogGapFillFailed(ex, symbol);
             }
+        }
+    }
+
+    // The gap stays open. If this link streamed the symbol past it, those trades are stored above the gap, which makes
+    // it a hole that a later seed must not raise past.
+    private void GiveUp(StreamLink link, string symbol)
+    {
+        if (link.LastId(symbol) is { } streamed)
+        {
+            watermarks.MarkStoredAbove(symbol, streamed);
         }
     }
 

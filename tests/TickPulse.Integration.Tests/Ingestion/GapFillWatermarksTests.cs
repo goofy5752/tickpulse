@@ -160,6 +160,58 @@ public sealed class GapFillWatermarksTests
         Start("BTCUSDT", pendingOnly: true).ShouldBe(150);
     }
 
+    [Theory]
+    [InlineData(true)]  // the next connection broke too, or the session ended
+    [InlineData(false)] // a rotation replaced it
+    public void Seed_PendingWithStreamDataStoredAbove_IsNotRaised(bool gap)
+    {
+        _marks.Merge([new("BTCUSDT", 5)], gap: true);       // a reconnect: trades from 6 on are missing
+        _marks.Merge([new("BTCUSDT", 1000)], gap: gap);     // the next connection streamed 11..1000; its fill never closed the gap
+
+        _marks.Seed([new("BTCUSDT", 1000)]);                // 1000 is this process's own stream, above the gap
+
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(5);
+    }
+
+    [Fact]
+    public void Seed_AfterAFillStoppedAtThePageCap_IsNotRaised()
+    {
+        _marks.Merge([new("BTCUSDT", 5)], gap: true);
+        _marks.TryGetStart("BTCUSDT", pendingOnly: true, out _, out var version).ShouldBeTrue();
+        _marks.Advance("BTCUSDT", 50_005, version);         // 50 pages recovered, more trades above
+
+        _marks.Seed([new("BTCUSDT", 90_000)]);
+
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(50_005);
+    }
+
+    [Fact]
+    public void MarkStoredAbove_MakesAGivenUpGapAHole_OnlyWhenTheStreamWentPastIt()
+    {
+        _marks.Merge([new("BTCUSDT", 5), new("ETHUSDT", 50)], gap: true);
+
+        _marks.MarkStoredAbove("BTCUSDT", 1000); // the fill failed while the stream had delivered up to 1000
+        _marks.MarkStoredAbove("ETHUSDT", 50);   // nothing streamed past the gap
+
+        _marks.Seed([new("BTCUSDT", 1000), new("ETHUSDT", 80)]);
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(5);
+        Start("ETHUSDT", pendingOnly: true).ShouldBe(80); // stored by another instance since: raised (I1)
+    }
+
+    [Fact]
+    public void Seed_AfterTheHoleWasFilled_RaisesAgain()
+    {
+        _marks.Merge([new("BTCUSDT", 5)], gap: true);
+        _marks.Merge([new("BTCUSDT", 1000)], gap: true);     // a hole
+        _marks.TryGetStart("BTCUSDT", pendingOnly: true, out _, out var version).ShouldBeTrue();
+        _marks.Filled("BTCUSDT", version);                   // the next connection closed it
+        _marks.Merge([new("BTCUSDT", 1500)], gap: true);     // then the session ended cleanly at 1500
+
+        _marks.Seed([new("BTCUSDT", 2000)]);                 // another instance stored up to 2000 since
+
+        Start("BTCUSDT", pendingOnly: true).ShouldBe(2000);
+    }
+
     [Fact]
     public void Filled_ClearsTheHole_SoALaterSeedRaisesAgain()
     {

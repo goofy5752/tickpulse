@@ -84,9 +84,12 @@ Rules of thumb:
    REST `aggTrades?fromId=last+1`. Every leadership session seeds the gap-fill watermarks from
    the DB (max `agg_trade_id` per active symbol, last 24 h) before it subscribes, so the gap
    after the last stored trade is filled after a restart or handover. The seed raises an older
-   in-memory watermark to the stored id unless that watermark marks a known hole (a dropped
-   batch, a lead-in). The max cannot see holes *below* it: one that only a crashed or other
-   process knew about (its dropped batch, its capped fill) is not recovered by the seed. A gap
+   in-memory watermark to the stored id unless that watermark marks a known hole: any open gap
+   with trades stored above it (a dropped batch, a lead-in, a gap the stream went past, a fill
+   that failed, was cancelled or hit the page cap). Never raise such a gap to the max: the max
+   may be this process's own stream above it. The max cannot see holes *below* it: one that
+   only a crashed or other process knew about (its dropped batch, its capped fill) is not
+   recovered by the seed. A gap
    closes only when the fill finished on a connection that is still up. A symbol that starts
    streaming with no watermark gets a lead-in from the start of its first minute
    (`aggTrades?startTime`), so that candle is not partial; a failed lead-in is retried on the

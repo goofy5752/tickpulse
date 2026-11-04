@@ -63,6 +63,9 @@ internal sealed class StreamLink(BinanceWebSocketConnection connection) : IAsync
     /// <summary>Records how the link's life ended, before it is disposed. Control loop only.</summary>
     public void MarkEnded(LinkEnd end) => Volatile.Write(ref _end, (int)end);
 
+    /// <summary>The last trade id this link delivered for the symbol, if any yet.</summary>
+    public long? LastId(string symbol) => _lastIds.TryGetValue(symbol, out var id) ? id : null;
+
     /// <summary>The first trade id this link delivered for the symbol, if any yet.</summary>
     public long? FirstId(string symbol) => _firstIds.TryGetValue(symbol, out var id) ? id : null;
 
