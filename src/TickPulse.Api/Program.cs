@@ -72,7 +72,7 @@ var app = builder.Build();
 app.UseForwardedHeaders();
 app.UseTickPulseTelemetry(); // request log and API metrics: after the forwarded headers, before everything else
 app.UseHeadWithoutBody();
-app.UseResponseCompression(); // everything below may write a body: problems, static files, the dashboard
+app.UseTickPulseCompression(); // everything below may write a body: problems, static files, the dashboard
 app.UseSecurityHeaders();
 app.UseVaryByAcceptOnApi();
 app.UseAcceptHeaderNormalization();

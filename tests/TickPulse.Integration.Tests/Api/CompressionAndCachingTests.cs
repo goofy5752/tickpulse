@@ -3,6 +3,8 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
+using Microsoft.Extensions.Primitives;
+using TickPulse.Api.Hosting;
 using TickPulse.Integration.Tests.Fixtures;
 using static TickPulse.Integration.Tests.Api.ProblemReader;
 
@@ -118,6 +120,42 @@ public sealed class CompressionAndCachingTests(ApiFactory api) : IClassFixture<A
             (await DecodeAsync(response)).ShouldContain("tickpulse-cache-test", Case.Sensitive, path);
         }
     }
+
+    [Fact]
+    public async Task CompressedAsset_HasWeakETag_AndStillRevalidates()
+    {
+        const string path = "/assets/etag-Q1w2e3R4.js";
+        await WriteAsync(path, Filler(path));
+        using var client = api.CreateClient();
+        using var plainRequest = Request(path, acceptEncoding: null);
+        using var compressedRequest = Request(path, "gzip");
+
+        using var plain = await client.SendAsync(plainRequest, Ct);
+        using var compressed = await client.SendAsync(compressedRequest, Ct);
+
+        // A compressed body is another representation, so it must not share the plain file's strong validator.
+        var strong = plain.Headers.ETag.ShouldNotBeNull();
+        strong.IsWeak.ShouldBeFalse();
+        var weak = compressed.Headers.ETag.ShouldNotBeNull();
+        weak.IsWeak.ShouldBeTrue();
+        weak.Tag.ShouldBe(strong.Tag);
+
+        using var revalidate = Request(path, "gzip");
+        revalidate.Headers.TryAddWithoutValidation("If-None-Match", weak.ToString());
+        using var notModified = await client.SendAsync(revalidate, Ct);
+        notModified.StatusCode.ShouldBe(HttpStatusCode.NotModified);
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("\"abc\"", null)]
+    [InlineData("*", null)]
+    [InlineData("not an etag", null)]
+    [InlineData("W/\"abc\"", "\"abc\"")]
+    [InlineData("\"abc\", W/\"def\"", "\"abc\", \"def\"")]
+    public void WeakIfNoneMatch_IsComparedAsStrong(string? ifNoneMatch, string? expected) =>
+        CompressionAndCaching.WeakIfNoneMatchAsStrong(ifNoneMatch is null ? StringValues.Empty : new StringValues(ifNoneMatch))
+            .ShouldBe(expected);
 
     [Fact]
     public async Task MissingAsset_IsNotCachedAsImmutable()

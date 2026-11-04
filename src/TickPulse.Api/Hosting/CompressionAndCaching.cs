@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.AspNetCore.StaticFiles;
+using Microsoft.Extensions.Primitives;
 using Microsoft.Net.Http.Headers;
 
 namespace TickPulse.Api.Hosting;
@@ -22,7 +23,7 @@ namespace TickPulse.Api.Hosting;
 /// <para><b>Caching.</b> Everything under <c>/assets/</c> is Vite build output whose file names carry a content hash,
 /// so it is cached for a year as <c>immutable</c>; a new build has new names. Every other static file, above all
 /// <c>index.html</c> (which names the current assets), is <c>no-cache</c>: stored, but revalidated with its ETag on
-/// every use.</para>
+/// every use. A compressed response gets a weak <c>ETag</c> (<see cref="UseTickPulseCompression"/>).</para>
 /// </remarks>
 internal static class CompressionAndCaching
 {
@@ -59,6 +60,51 @@ internal static class CompressionAndCaching
         // UseStaticFiles() and the dashboard fallback (MapFallbackToFile) both read these options.
         services.Configure<StaticFileOptions>(o => o.OnPrepareResponse = SetCacheControl);
         return services;
+    }
+
+    /// <summary>
+    /// Response compression, plus a weak <c>ETag</c> on every compressed response: the compressed body is a different
+    /// representation, which must not carry the plain file's strong validator (RFC 9110 §8.8.1). nginx and Cloudflare do
+    /// the same when they compress. <c>If-None-Match</c> must compare weakly (RFC 9110 §13.1.2), but the static file
+    /// middleware compares strongly, so the request's tags are made strong first; a revalidated compressed file still
+    /// gets its 304.
+    /// </summary>
+    public static IApplicationBuilder UseTickPulseCompression(this IApplicationBuilder app) =>
+        app.Use((context, next) =>
+            {
+                if (WeakIfNoneMatchAsStrong(context.Request.Headers.IfNoneMatch) is { } strong)
+                {
+                    context.Request.Headers.IfNoneMatch = strong;
+                }
+
+                context.Response.OnStarting(
+                    static state =>
+                    {
+                        var headers = ((HttpResponse)state).Headers;
+                        var etag = headers.ETag.ToString();
+                        if (headers.ContentEncoding.Count > 0 && etag.StartsWith('"'))
+                        {
+                            headers.ETag = "W/" + etag;
+                        }
+
+                        return Task.CompletedTask;
+                    },
+                    context.Response);
+                return next(context);
+            })
+            .UseResponseCompression();
+
+    /// <summary>The <c>If-None-Match</c> tags with every <c>W/</c> dropped, or <see langword="null"/> when none is weak.</summary>
+    public static string? WeakIfNoneMatchAsStrong(StringValues ifNoneMatch)
+    {
+        if (StringValues.IsNullOrEmpty(ifNoneMatch)
+            || !EntityTagHeaderValue.TryParseList(ifNoneMatch, out var tags)
+            || !tags.Any(t => t.IsWeak))
+        {
+            return null;
+        }
+
+        return string.Join(", ", tags.Select(t => t.IsWeak ? new EntityTagHeaderValue(t.Tag).ToString() : t.ToString()));
     }
 
     private static void SetCacheControl(StaticFileResponseContext context) =>
