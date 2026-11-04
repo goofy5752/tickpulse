@@ -34,7 +34,9 @@ public sealed class TelemetryShutdownTests
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?> { [TelemetrySetup.EndpointKey] = endpoint.ToString() })
             .Build();
-        var export = new OtlpExport(configuration, new HostingEnvironment { EnvironmentName = "Production" });
+        // Built as AddTickPulseTelemetry builds it: the request sample budget from Otel:SampledRequestsPerSecond.
+        var requests = new RequestSampleBudget(RequestSampleBudget.PerSecond(configuration), TimeProvider.System);
+        var export = new OtlpExport(configuration, new HostingEnvironment { EnvironmentName = "Production" }, requests);
         var logger = TelemetrySetup.WriteToOtlp(new LoggerConfiguration(), endpoint, "test", "production").CreateLogger();
 
         using (var source = new ActivitySource(TickPulseMetrics.ActivitySourceName))
