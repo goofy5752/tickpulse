@@ -32,7 +32,7 @@ public readonly record struct IdSpan(long First, long Last);
 /// emitted id. A fill that stopped early (<see cref="Advance"/>) raises it the same way and leaves the gap open.</item>
 /// <item>The highest id any ended connection delivered, or that <see cref="Lower"/> reported missing, is kept per symbol
 /// (<c>Above</c>, never lowered, dropped only by <see cref="Forget"/>). <see cref="Seed"/> raises an entry to the stored
-/// maximum only when <c>Above &lt;= LastId</c>: then nothing this process delivered lies above the prefix, so whatever is
+/// id only when <c>Above &lt;= LastId</c>: then nothing this process delivered lies above the prefix, so whatever is
 /// stored above was stored by another instance that led meanwhile. Otherwise the fill walks up from <c>LastId + 1</c>
 /// through what is stored (one page per thousand ids, repeated every reconcile pass) until it reaches the stream.</item>
 /// <item>Only active symbols are tracked; <see cref="Forget"/> drops a removed one entirely.</item>
@@ -138,19 +138,20 @@ public sealed class GapFillWatermarks(SymbolIdCache symbols) : IGapFillWatermark
     }
 
     /// <summary>
-    /// Opens a gap after the last trade id the database holds for each symbol, at the start of a leadership session:
-    /// no stream reached this process while it did not lead (a restart, a redeploy, a handover), so gap-fill has to
-    /// recover the trades after that id.
+    /// Opens a gap after the id of the newest trade the database holds for each symbol, at the start of a leadership
+    /// session: no stream reached this process while it did not lead (a restart, a redeploy, a handover), so gap-fill
+    /// has to recover the trades after that id.
     /// </summary>
     /// <remarks>
     /// <para>An entry this process already has is raised to the stored id when that is higher, but only if nothing this
     /// process delivered lies above its start: then whatever is stored above was stored by another instance that led
     /// since, and filling from the old id would only walk through it before the real gap. Otherwise the entry is kept
-    /// where it is, whatever the stored maximum: the maximum may well be this process's own trades above the gap.</para>
+    /// where it is, whatever the stored id: it may well be this process's own trades above the gap.</para>
     /// <para>A symbol without an entry starts at the stored id. Nothing this process delivered for it can be missing:
     /// a dropped batch would have created the entry through <see cref="Lower"/>.</para>
-    /// <para>The highest stored id says nothing about holes below it. A hole that only the process which had it knew
-    /// about (a dropped batch before a crash, a capped fill in another instance) is not seen here.</para>
+    /// <para>The stored id (that of the newest stored trade) says nothing about holes below it. A hole that only the
+    /// process which had it knew about (a dropped batch before a crash, a capped fill in another instance) is not seen
+    /// here.</para>
     /// </remarks>
     /// <param name="lastStoredIds">Last stored trade id per symbol; the caller passes only active symbols.</param>
     public void Seed(IEnumerable<KeyValuePair<string, long>> lastStoredIds)

@@ -61,16 +61,24 @@ internal sealed partial class IngestionWorker(
     /// <summary>Upper bound of the wait before the leadership loop starts over after an unexpected error.</summary>
     public static readonly TimeSpan MaxRestartDelay = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Time left for the gap-fill of an outage that nearly spans the seed window, before its first trades fall out of
+    /// <see cref="TickWriter.ReplayWindow"/> and could no longer be inserted. A fill reads up to 50,000 trades per
+    /// reconcile pass, so a day covers far more than the busiest symbol trades in the window.
+    /// </summary>
+    /// <remarks>Declared before <see cref="SeedWindow"/>, which static initialization computes from it.</remarks>
+    public static readonly TimeSpan SeedFillHeadroom = TimeSpan.FromDays(1);
+
     /// <summary>How far back the start of a session looks for each symbol's last stored trade.</summary>
     /// <remarks>
-    /// <para>The whole of <see cref="TickWriter.ReplayWindow"/>: REST <c>fromId</c> has no time limit, so an outage of
-    /// days is recovered trade by trade as long as the trades after the last stored one are still insertable. The
-    /// lookup reads only the newest chunk that holds a trade of the symbol, compressed or not (see
-    /// <see cref="MarketDataQueries.GetLatestTradeIdsAsync"/>).</para>
+    /// <para><see cref="TickWriter.ReplayWindow"/> less <see cref="SeedFillHeadroom"/>: REST <c>fromId</c> has no time
+    /// limit, so an outage of days is recovered trade by trade, as long as the trades after the last stored one are still
+    /// insertable when the fill reaches them. The lookup reads only the newest chunk that holds a trade of the symbol,
+    /// compressed or not (see <see cref="MarketDataQueries.GetLatestTradeIdsAsync"/>).</para>
     /// <para>A symbol that stored nothing for longer starts like a new one (a lead-in for its first minute); the
     /// backfill worker fills that stretch of candles from klines, when backfill is enabled.</para>
     /// </remarks>
-    public static readonly TimeSpan SeedWindow = TickWriter.ReplayWindow;
+    public static readonly TimeSpan SeedWindow = TickWriter.ReplayWindow - SeedFillHeadroom;
 
     private readonly ILogger _logger = loggerFactory.CreateLogger<IngestionWorker>();
 

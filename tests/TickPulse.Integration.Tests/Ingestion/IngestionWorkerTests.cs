@@ -1113,6 +1113,15 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public void SeedWindow_LeavesTheFillADayInsideTheReplayWindow()
+    {
+        // Every trade a seeded fill recovers is still insertable a day after the session started.
+        (IngestionWorker.SeedWindow + IngestionWorker.SeedFillHeadroom).ShouldBe(TickWriter.ReplayWindow);
+        IngestionWorker.SeedFillHeadroom.ShouldBe(TimeSpan.FromDays(1));
+        IngestionWorker.SeedWindow.ShouldBeGreaterThan(TimeSpan.FromDays(1)); // an outage of days is recovered from trades
+    }
+
     [Theory]
     [InlineData(10, 1, 10)]
     [InlineData(10, 2, 20)]
