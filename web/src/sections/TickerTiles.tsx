@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useCandles } from '@/api/queries'
 import type { LivePrice, SymbolResponse } from '@/api/types'
 import { InfoTip } from '@/components/InfoTip'
@@ -12,6 +12,11 @@ import { toUnixSeconds } from '@/lib/sma'
 import { cn } from '@/lib/utils'
 
 const SPARK_POINTS = 60
+/** How long the digits hold the direction's colour before easing back. */
+const TINT_HOLD_MS = 280
+/** The tile's glow: a quick swell, then a long fade. */
+const GLOW_MS = 1200
+const GLOW_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)'
 
 interface TickerTilesProps {
   symbols: SymbolResponse[] | undefined
@@ -120,14 +125,41 @@ const Tile = memo(function Tile({ symbol, live, selected, onSelect }: TileProps)
   const reducedMotion = usePrefersReducedMotion()
 
   // Flash on every price change (state derived during render, React's pattern for "on change").
+  // The price element is never remounted: the digits take the direction's colour at once and ease
+  // back by CSS transition, and the glow is a separate layer that animates opacity only, so a tick
+  // never repaints the frosted backdrop (that repaint showed as a lighter band across the tile).
   const [previous, setPrevious] = useState(price)
   const [flash, setFlash] = useState<Flash>(null)
+  const [tinted, setTinted] = useState(false)
   if (price !== previous) {
     setPrevious(price)
-    if (price !== null && previous !== null) {
+    if (price !== null && previous !== null && !reducedMotion) {
       setFlash({ direction: price > previous ? 'up' : 'down', id: (flash?.id ?? 0) + 1 })
+      setTinted(true)
     }
   }
+
+  const glowRef = useRef<HTMLSpanElement>(null)
+  const flashId = flash?.id
+  useEffect(() => {
+    if (flashId === undefined) return
+    const hold = setTimeout(() => {
+      setTinted(false)
+    }, TINT_HOLD_MS)
+    // Restart the glow from wherever it is now, so quick ticks swell it again instead of snapping.
+    const glow = glowRef.current
+    if (glow && typeof glow.animate === 'function') {
+      const from = Number.parseFloat(getComputedStyle(glow).opacity) || 0
+      for (const running of glow.getAnimations()) running.cancel()
+      glow.animate([{ opacity: from }, { opacity: 1, offset: 0.14 }, { opacity: 0 }], {
+        duration: GLOW_MS,
+        easing: GLOW_EASING,
+      })
+    }
+    return () => {
+      clearTimeout(hold)
+    }
+  }, [flashId])
 
   const { values, spanSeconds } = useMemo(() => {
     const candles = spark.data ?? []
@@ -161,10 +193,11 @@ const Tile = memo(function Tile({ symbol, live, selected, onSelect }: TileProps)
       }}
       aria-pressed={selected}
       className={cn(
-        'glass group flex w-full flex-col p-4 text-left transition-[background-color,border-color] duration-200 hover:bg-glass-strong',
+        'glass group relative isolate flex w-full flex-col p-4 text-left transition-[background-color,border-color] duration-200 hover:bg-glass-strong',
         selected && 'tile-selected',
       )}
     >
+      <span ref={glowRef} aria-hidden="true" data-direction={flash?.direction} className="tile-flash" />
       <span className="flex items-center justify-between gap-2">
         <span className="text-[0.8125rem] font-semibold tracking-tight">
           {base}
@@ -191,7 +224,7 @@ const Tile = memo(function Tile({ symbol, live, selected, onSelect }: TileProps)
         {price === null ? (
           <span className="text-ink-faint">Waiting</span>
         ) : (
-          <span key={flash?.id} className={cn('inline-block', flash && !reducedMotion && `price-flash-${flash.direction}`)}>
+          <span className={cn('price-tint inline-block', tinted && flash && `price-flash-${flash.direction}`)}>
             {formatPrice(price, symbol.symbol)}
           </span>
         )}
