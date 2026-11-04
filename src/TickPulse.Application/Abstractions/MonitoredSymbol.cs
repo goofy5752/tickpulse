@@ -1,6 +1,9 @@
 namespace TickPulse.Application.Abstractions;
 
-/// <summary>A symbol TickPulse monitors (or used to monitor, when inactive).</summary>
+/// <summary>
+/// A symbol TickPulse monitors (or used to monitor, when inactive). <c>DeactivatedAtUtc</c> is when it was last
+/// deactivated, or <see langword="null"/> if it never was; reactivating keeps it.
+/// </summary>
 public sealed record MonitoredSymbol(
     int Id,
     string Name,

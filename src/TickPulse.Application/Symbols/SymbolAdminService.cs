@@ -105,7 +105,7 @@ public sealed class SymbolAdminService
                 return AppResult<SymbolAddResult>.Ok(new SymbolAddResult(existing, Created: false));
             case { Status: SymbolAddStatus.Created or SymbolAddStatus.Reactivated, Symbol: { } stored }:
                 _changes.Notify();
-                return AppResult<SymbolAddResult>.Ok(new SymbolAddResult(await QueueBackfillAsync(stored, ct), Created: true));
+                return AppResult<SymbolAddResult>.Ok(new SymbolAddResult(await QueueBackfillAsync(stored), Created: true));
             default:
                 throw new InvalidOperationException($"The repository returned {outcome.Status} without a symbol.");
         }
@@ -129,15 +129,18 @@ public sealed class SymbolAdminService
         return AppResult<string>.Ok(name.Value);
     }
 
-    // Pending is stored before the worker sees the id, so the list never shows NotRequested for a queued symbol.
-    private async Task<MonitoredSymbol> QueueBackfillAsync(MonitoredSymbol symbol, CancellationToken ct)
+    // Runs after the add committed, so it ignores the request token: a client that goes away now must not leave an
+    // active symbol that is never backfilled. Pending is stored before the worker sees the id, so the list never shows
+    // NotRequested for a queued symbol. A reactivated symbol is queued too, even when it was Completed: the worker then
+    // fills the stretch it was inactive.
+    private async Task<MonitoredSymbol> QueueBackfillAsync(MonitoredSymbol symbol)
     {
         if (!_settings.BackfillEnabled)
         {
             return symbol;
         }
 
-        await _symbols.SetBackfillStatusAsync(symbol.Id, BackfillStatus.Pending, symbol.BackfilledFromUtc, ct);
+        await _symbols.SetBackfillStatusAsync(symbol.Id, BackfillStatus.Pending, symbol.BackfilledFromUtc, CancellationToken.None);
         _backfill.Enqueue(symbol.Id);
         return symbol with { BackfillStatus = BackfillStatus.Pending };
     }

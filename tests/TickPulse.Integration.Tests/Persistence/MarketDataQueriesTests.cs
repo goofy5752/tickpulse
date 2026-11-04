@@ -528,6 +528,47 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task FirstStreamMinuteAtOrAfter_IgnoresBackfillAndEarlierMinutes()
+    {
+        var queries = Queries();
+        await CandleWriter().InsertBackfillAsync(Btc, [Candle(Start.AddMinutes(20), close: 1m)], Ct);
+        await Writer().WriteBatchAsync(
+        [
+            NewTick(Btc, 1, 1m, 1m, Start.AddMinutes(5).AddSeconds(42)),
+            NewTick(Btc, 2, 1m, 1m, Start.AddMinutes(30).AddSeconds(1)),
+            NewTick(Eth, 1, 1m, 1m, Start.AddMinutes(10)),
+        ], Ct);
+
+        // The minute containing the bound starts before it, so it does not count.
+        (await queries.FirstStreamMinuteAtOrAfterAsync(Btc, Start.AddMinutes(5).AddSeconds(1), Ct)).ShouldBe(Start.AddMinutes(30));
+        (await queries.FirstStreamMinuteAtOrAfterAsync(Btc, Start.AddMinutes(5), Ct)).ShouldBe(Start.AddMinutes(5));
+        var first = await queries.FirstStreamMinuteAtOrAfterAsync(Btc, Start.AddMinutes(6), Ct);
+        first.ShouldBe(Start.AddMinutes(30));
+        first!.Value.Kind.ShouldBe(DateTimeKind.Utc);
+        (await queries.FirstStreamMinuteAtOrAfterAsync(Btc, Start.AddMinutes(31), Ct)).ShouldBeNull();
+        (await queries.FirstStreamMinuteAtOrAfterAsync(Ada, Start, Ct)).ShouldBeNull();
+        await Should.ThrowAsync<ArgumentException>(() => queries.FirstStreamMinuteAtOrAfterAsync(Btc, DateTime.SpecifyKind(Start, DateTimeKind.Unspecified), Ct));
+    }
+
+    [Fact]
+    public async Task LastMinuteBefore_CountsEverySource()
+    {
+        var queries = Queries();
+        (await queries.LastMinuteBeforeAsync(Btc, Start.AddHours(1), Ct)).ShouldBeNull();
+
+        await Writer().WriteBatchAsync([NewTick(Btc, 1, 1m, 1m, Start.AddMinutes(5).AddSeconds(42)), NewTick(Eth, 1, 1m, 1m, Start.AddMinutes(40))], Ct);
+        await CandleWriter().InsertBackfillAsync(Btc, [Candle(Start.AddMinutes(9), close: 1m), Candle(Start.AddMinutes(50), close: 1m)], Ct);
+
+        (await queries.LastMinuteBeforeAsync(Btc, Start.AddMinutes(9), Ct)).ShouldBe(Start.AddMinutes(5));
+        var last = await queries.LastMinuteBeforeAsync(Btc, Start.AddMinutes(50), Ct);
+        last.ShouldBe(Start.AddMinutes(9));
+        last!.Value.Kind.ShouldBe(DateTimeKind.Utc);
+        (await queries.LastMinuteBeforeAsync(Btc, Start.AddMinutes(5), Ct)).ShouldBeNull();
+        (await queries.LastMinuteBeforeAsync(Ada, Start.AddHours(1), Ct)).ShouldBeNull();
+        await Should.ThrowAsync<ArgumentException>(() => queries.LastMinuteBeforeAsync(Btc, DateTime.SpecifyKind(Start, DateTimeKind.Unspecified), Ct));
+    }
+
+    [Fact]
     public async Task BackfillRangeBefore_IgnoresStreamOtherSymbolsAndLaterMinutes()
     {
         var queries = Queries();

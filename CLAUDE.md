@@ -69,8 +69,8 @@ npm --prefix web run dev | build | lint | typecheck
 - **Errors** are RFC 9457 ProblemDetails, negotiated as JSON or XML on every path. Type URIs are
   `https://tickpulse.dev/problems/{slug}` with slugs `unknown-symbol`, `no-data`,
   `invalid-symbol`, `symbol-limit`, `admin-disabled`, `validation`, `not-acceptable`,
-  `rate-limited`, `internal`, `not-found` (unmatched routes), `upstream-unavailable` (503: Binance
-  cannot confirm a symbol being added right now).
+  `rate-limited`, `internal`, `not-found` (unmatched routes), `unauthorized` (401: missing or wrong
+  `X-Api-Key`), `upstream-unavailable` (503: Binance cannot confirm a symbol being added right now).
 - **Config keys** (env uses `__`): `ConnectionStrings:TickPulse`, `Admin:*`, `Binance:*`,
   `Ingestion:*`, `Backfill:*`, `Database:RunMigrationsOnStartup`, `Otel:Endpoint`.
   Defaults are listed in the plan's Global Constraints, plus two leader-election keys:

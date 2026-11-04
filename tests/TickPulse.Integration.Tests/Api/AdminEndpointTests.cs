@@ -3,10 +3,15 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using TickPulse.Application.Abstractions;
 using TickPulse.Domain;
 using TickPulse.Integration.Tests.Fixtures;
+using TickPulse.Integration.Tests.Ingestion;
 using static TickPulse.Integration.Tests.Api.ProblemReader;
 
 namespace TickPulse.Integration.Tests.Api;
@@ -42,6 +47,7 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         response.Headers.WwwAuthenticate.ShouldHaveSingleItem().Scheme.ShouldBe("ApiKey");
         MediaType(response).ShouldBe(JsonMediaType);
         var problem = await ReadAsync(response);
+        problem.Type.ShouldBe(TypeBase + "unauthorized");
         problem.Status.ShouldBe(401);
         problem.Title.ShouldBe("Unauthorized");
         problem.Detail.ShouldNotBeNull().ShouldContain(ApiKeyHeader);
@@ -64,6 +70,7 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
         response.Headers.WwwAuthenticate.ShouldHaveSingleItem().Scheme.ShouldBe("ApiKey");
         var problem = await ReadAsync(response);
+        problem.Type.ShouldBe(TypeBase + "unauthorized");
         problem.Status.ShouldBe(401);
         problem.Raw.ShouldNotContain(key);
         (await FindAsync(api, "BTCUSDT")).ShouldNotBeNull().IsActive.ShouldBeTrue();
@@ -79,6 +86,122 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         using var response = await client.SendAsync(request, Ct);
 
         response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task LowercaseHeaderName_IsAccepted()
+    {
+        using var client = api.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Path, UriKind.Relative));
+        request.Headers.TryAddWithoutValidation("x-api-key", ApiFactory.AdminApiKey);
+
+        using var response = await client.SendAsync(request, Ct);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+    }
+
+    [Fact]
+    public async Task KeyInQueryString_Returns401()
+    {
+        using var response = await SendAsync(api, HttpMethod.Get, Path + "?X-Api-Key=" + ApiFactory.AdminApiKey, key: null);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        (await ReadAsync(response)).Type.ShouldBe(TypeBase + "unauthorized");
+    }
+
+    [Fact]
+    public async Task KeyInCookie_Returns401()
+    {
+        using var client = api.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Path, UriKind.Relative));
+        request.Headers.Add("Cookie", "X-Api-Key=" + ApiFactory.AdminApiKey);
+
+        using var response = await client.SendAsync(request, Ct);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        (await ReadAsync(response)).Type.ShouldBe(TypeBase + "unauthorized");
+    }
+
+    [Fact]
+    public void AdminRoutes_AllRequireTheAdminPolicy_AndNoneAllowAnonymous()
+    {
+        var endpoints = api.Services.GetRequiredService<EndpointDataSource>().Endpoints
+            .OfType<RouteEndpoint>()
+            .Where(e => e.RoutePattern.RawText?.StartsWith("api/admin", StringComparison.OrdinalIgnoreCase) == true)
+            .ToList();
+
+        endpoints.Select(e => e.DisplayName).ShouldNotBeEmpty();
+        endpoints.Count.ShouldBe(3, "GET and POST api/admin/symbols, DELETE api/admin/symbols/{symbol}");
+        foreach (var endpoint in endpoints)
+        {
+            endpoint.Metadata.GetOrderedMetadata<IAuthorizeData>().ShouldContain(a => a.Policy == "Admin", endpoint.DisplayName);
+            endpoint.Metadata.GetMetadata<IAllowAnonymous>().ShouldBeNull(endpoint.DisplayName);
+        }
+    }
+
+    [Fact]
+    public async Task FailedAuth_LogsWarningWithHashedClient_NeverTheKey()
+    {
+        var logs = new IngestionTestHost.LogCapture();
+        await using var logged = new ApiFactory(api.Database).WithLogging(logs);
+        await logged.InitializeAsync();
+
+        (await SendAsync(logged, HttpMethod.Get, Path, key: "guess-secret-123")).Dispose();
+        (await SendAsync(logged, HttpMethod.Get, Path, key: null)).Dispose();
+
+        var failures = logs.Entries.Where(e => e.EventName == "LogAuthenticationFailed").ToList();
+        failures.Count.ShouldBe(2);
+        failures.ShouldAllBe(e => e.Level == LogLevel.Warning);
+        failures[0].Message.ShouldContain("wrong key");
+        failures[1].Message.ShouldContain("missing key");
+        failures.ShouldAllBe(e => e.Message.Contains("client ", StringComparison.Ordinal));
+        logs.Entries.ShouldNotContain(e => e.Message.Contains("guess-secret-123", StringComparison.Ordinal));
+        logs.Entries.ShouldNotContain(e => e.Message.Contains(ApiFactory.AdminApiKey, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("test-key", 1)]
+    [InlineData("0123456789abcdef0123456789abcdef", 0)]
+    public async Task ShortKey_LogsWarningAtStartup(string key, int warnings)
+    {
+        var logs = new IngestionTestHost.LogCapture();
+        await using var host = new ApiFactory(api.Database).WithSetting("Admin:ApiKey", key).WithLogging(logs);
+        await host.InitializeAsync();
+
+        _ = host.Services; // starts the host
+
+        var entries = logs.Entries.Where(e => e.EventName == "LogShortApiKey").ToList();
+        entries.Count.ShouldBe(warnings);
+        entries.ShouldAllBe(e => e.Level == LogLevel.Warning && !e.Message.Contains(key, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(" padded-key")]
+    [InlineData("padded-key\t")]
+    public async Task KeyWithSurroundingWhitespace_FailsStartup(string key)
+    {
+        await using var host = new ApiFactory(api.Database).WithSetting("Admin:ApiKey", key);
+        await host.InitializeAsync();
+
+        var ex = Should.Throw<Exception>(() => host.Services);
+
+        Messages(ex).ShouldContain(m => m.Contains("Admin:ApiKey", StringComparison.Ordinal) && m.Contains("whitespace", StringComparison.Ordinal));
+        Messages(ex).ShouldNotContain(m => m.Contains("padded-key", StringComparison.Ordinal));
+
+        static IEnumerable<string> Messages(Exception? e)
+        {
+            for (; e is not null; e = e.InnerException)
+            {
+                yield return e.Message;
+                if (e is AggregateException aggregate)
+                {
+                    foreach (var inner in aggregate.InnerExceptions.SelectMany(Messages))
+                    {
+                        yield return inner;
+                    }
+                }
+            }
+        }
     }
 
     [Theory]
@@ -169,7 +292,7 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         response.StatusCode.ShouldBe(HttpStatusCode.Created);
         using var json = await JsonAsync(response);
         json.RootElement.GetProperty("isActive").GetBoolean().ShouldBeTrue();
-        json.RootElement.GetProperty("deactivatedAt").ValueKind.ShouldBe(JsonValueKind.Null);
+        json.RootElement.GetProperty("deactivatedAt").GetString().ShouldNotBeNull().ShouldEndWith("Z"); // the last deactivation is kept
         (await FindAsync(api, "ADAUSDT")).ShouldNotBeNull().IsActive.ShouldBeTrue();
     }
 
@@ -385,7 +508,7 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         {
             unauthorized.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
             MediaType(unauthorized).ShouldBe(XmlMediaType);
-            (await ReadAsync(unauthorized)).Status.ShouldBe(401);
+            (await ReadAsync(unauthorized)).Type.ShouldBe(TypeBase + "unauthorized");
         }
 
         using (var invalid = await SendAsync(api, HttpMethod.Post, Path, ApiFactory.AdminApiKey, body: "BTC-USDT", accept: "application/xml"))

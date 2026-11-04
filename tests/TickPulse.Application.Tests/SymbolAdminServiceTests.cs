@@ -180,6 +180,33 @@ public sealed class SymbolAdminServiceTests
         });
     }
 
+    [Fact]
+    public async Task Add_RequestCancelledAfterCommit_StillMarksPendingAndEnqueues()
+    {
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+        _symbols.AddOrReactivateAsync(Name("BNBUSDT"), Limit, Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                // The client goes away right after the symbol was committed.
+                request.Cancel();
+                return new SymbolAddOutcome(Bnb, SymbolAddStatus.Created);
+            });
+        _symbols.SetBackfillStatusAsync(Arg.Any<int>(), Arg.Any<BackfillStatus>(), Arg.Any<DateTime?>(), Arg.Any<CancellationToken>())
+            .Returns(call =>
+            {
+                call.Arg<CancellationToken>().ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            });
+
+        var result = await Service(backfillEnabled: true).AddAsync("BNBUSDT", request.Token);
+
+        result.Value.ShouldNotBeNull().Created.ShouldBeTrue();
+        _changes.Received(1).Notify();
+        await _symbols.Received(1).SetBackfillStatusAsync(
+            Bnb.Id, BackfillStatus.Pending, null, Arg.Is<CancellationToken>(t => !t.CanBeCanceled));
+        _backfill.Received(1).Enqueue(Bnb.Id);
+    }
+
     // ---- remove -----------------------------------------------------------------------------------------------
 
     [Theory]

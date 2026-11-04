@@ -68,7 +68,9 @@ public static class BinanceServiceCollectionExtensions
         });
         client.AddHttpMessageHandler(sp => new BinanceAttemptHandler(sp.GetRequiredService<BinanceWeightGuard>()));
 
-        services.TryAddTransient<IExchangeMetadata>(sp => new BinanceExchangeMetadata(sp.GetRequiredService<BinanceRestClient>()));
+        services.TryAddTransient<IExchangeMetadata>(sp => new BinanceExchangeMetadata(
+            sp.GetRequiredService<BinanceRestClient>(),
+            sp.GetRequiredService<TimeProvider>()));
         services.TryAddTransient<IKlineSource>(sp => sp.GetRequiredService<BinanceRestClient>());
         services.TryAddTransient<IAggTradeSource>(sp => sp.GetRequiredService<BinanceRestClient>());
         return services;

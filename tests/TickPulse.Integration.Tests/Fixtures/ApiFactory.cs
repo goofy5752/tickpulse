@@ -40,6 +40,7 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
     private bool _systemClock;
     private bool _configured;
     private string? _environment;
+    private ILoggerProvider? _logs;
 
     /// <summary>The app's clock, starting at the current time (millisecond precision); frozen until a test moves it.</summary>
     public FakeTimeProvider Clock { get; } = new(StartTime());
@@ -72,6 +73,14 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
     {
         EnsureNotConfigured();
         _environment = environment;
+        return this;
+    }
+
+    /// <summary>Also sends the host's logs to <paramref name="provider"/>. Call before the host starts.</summary>
+    public ApiFactory WithLogging(ILoggerProvider provider)
+    {
+        EnsureNotConfigured();
+        _logs = provider;
         return this;
     }
 
@@ -108,6 +117,11 @@ public sealed class ApiFactory(TimescaleFixture db) : WebApplicationFactory<Prog
         }
 
         builder.UseWebRoot(WebRoot);
+        if (_logs is not null)
+        {
+            builder.ConfigureLogging(logging => logging.AddProvider(_logs));
+        }
+
         builder.ConfigureAppConfiguration(config => config.AddInMemoryCollection(Settings()));
         builder.ConfigureTestServices(services =>
         {

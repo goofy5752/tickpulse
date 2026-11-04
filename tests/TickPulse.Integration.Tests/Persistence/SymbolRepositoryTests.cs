@@ -56,7 +56,9 @@ public sealed class SymbolRepositoryTests(TimescaleFixture db) : IAsyncLifetime
         var symbol = outcome.Symbol.ShouldNotBeNull();
         symbol.Id.ShouldBe(original.Id);
         symbol.IsActive.ShouldBeTrue();
-        symbol.DeactivatedAtUtc.ShouldBeNull();
+
+        // The last deactivation is kept: the backfill uses it to find the inactive stretch to fill.
+        symbol.DeactivatedAtUtc.ShouldBe(Now.UtcDateTime);
         symbol.CreatedAtUtc.ShouldBe(original.CreatedAtUtc);
     }
 

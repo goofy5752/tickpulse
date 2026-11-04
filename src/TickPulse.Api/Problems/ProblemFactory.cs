@@ -25,6 +25,7 @@ public static class ProblemFactory
         [ProblemSlugs.InvalidSymbol] = "Invalid symbol",
         [ProblemSlugs.SymbolLimit] = "Symbol limit reached",
         [ProblemSlugs.AdminDisabled] = "Admin API disabled",
+        [ProblemSlugs.Unauthorized] = "Unauthorized",
         [ProblemSlugs.Validation] = "Validation failed",
         [ProblemSlugs.NotAcceptable] = "Not acceptable",
         [ProblemSlugs.RateLimited] = "Too many requests",
@@ -140,6 +141,7 @@ public static class ProblemSlugs
     public const string InvalidSymbol = "invalid-symbol";
     public const string SymbolLimit = "symbol-limit";
     public const string AdminDisabled = "admin-disabled";
+    public const string Unauthorized = "unauthorized";
     public const string Validation = "validation";
     public const string NotAcceptable = "not-acceptable";
     public const string RateLimited = "rate-limited";

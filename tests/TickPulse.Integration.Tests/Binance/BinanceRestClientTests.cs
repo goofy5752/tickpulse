@@ -118,6 +118,43 @@ public sealed class BinanceRestClientTests
     }
 
     [Fact]
+    public async Task ExchangeMetadata_GuardPausedPastTimeout_ThrowsExchangeUnavailable()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var clock = new FakeTimeProvider(Noon);
+        var stub = new StubHandler();
+        stub.Enqueue((HttpStatusCode)429, TooManyRequests, retryAfterSeconds: 60);
+        using var client = NewClient(stub, clock, out var rest);
+
+        // The 429 pauses the weight guard for a minute; the admin call gives up after its own timeout instead.
+        var call = new BinanceExchangeMetadata(rest, clock).IsTradingSymbolAsync(Btc, ct);
+        call.IsCompleted.ShouldBeFalse();
+        clock.Advance(BinanceExchangeMetadata.Timeout - TimeSpan.FromMilliseconds(1));
+        call.IsCompleted.ShouldBeFalse();
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+
+        var ex = await Should.ThrowAsync<ExchangeUnavailableException>(() => call.WaitAsync(Timeout, ct));
+        ex.InnerException.ShouldBeAssignableTo<OperationCanceledException>();
+        stub.Requests.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task ExchangeMetadata_CallerCancels_ThrowsOperationCanceled()
+    {
+        var clock = new FakeTimeProvider(Noon);
+        var stub = new StubHandler();
+        stub.Enqueue((HttpStatusCode)429, TooManyRequests, retryAfterSeconds: 60);
+        using var client = NewClient(stub, clock, out var rest);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+
+        var call = new BinanceExchangeMetadata(rest, clock).IsTradingSymbolAsync(Btc, cts.Token);
+        await cts.CancelAsync();
+
+        var ex = await CatchAsync(() => call.WaitAsync(Timeout, TestContext.Current.CancellationToken));
+        ex.ShouldBeAssignableTo<OperationCanceledException>();
+    }
+
+    [Fact]
     public async Task ExchangeMetadata_PermanentFailure_Propagates()
     {
         var stub = new StubHandler();
