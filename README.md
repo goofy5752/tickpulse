@@ -11,7 +11,9 @@ Until then, [the quick start](#quick-start) runs the same stack locally.
 
 - **App:** <https://tickpulse.dev>
 - **API reference (Scalar):** <https://tickpulse.dev/docs>
-- **Grafana:** <https://grafana.tickpulse.dev> (anonymous, read-only)
+- **Grafana:** <https://grafana.tickpulse.dev> (anonymous, read-only). Anyone can read the raw log
+  lines, exception messages included. The collector scrubs addresses and headers, and the logs never
+  contain secrets ([data exposure](deploy/observability/README.md#query-cost-and-data-exposure)).
 
 ![The TickPulse dashboard: live ticker tiles, a 1d candle chart with a 20-day SMA and its calculation window, and the 24h average and SMA panel](docs/images/dashboard.png)
 
