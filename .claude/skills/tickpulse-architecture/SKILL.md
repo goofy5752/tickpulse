@@ -98,7 +98,10 @@ Rules of thumb:
    a time). A symbol that starts
    streaming with no watermark gets a lead-in from the start of its first minute
    (`aggTrades?startTime`), so that candle is not partial; a failed lead-in is retried on the
-   next connection.
+   next connection. Symmetrically, a removed symbol gets a one-shot tail-out after its UNSUBSCRIBE
+   ack: once its last minute is over, REST fills from the last delivered id + 1 up to that
+   minute's end (background, bounded, best-effort; it never delays the unsubscribe and never
+   writes past that minute).
    Symbol changes signal ingestion in-process and are also reconciled against the DB every 30 s.
 6. **Bounded channel** with `FullMode=Wait` (backpressure, never drop). Batches flush at 500 ms or
    5,000 ticks.

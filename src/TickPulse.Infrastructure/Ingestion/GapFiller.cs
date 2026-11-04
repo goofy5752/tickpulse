@@ -159,6 +159,97 @@ public sealed partial class GapFiller(
     }
 
     /// <summary>
+    /// Completes the minute in which a symbol stopped streaming (it was removed): emits the trades after
+    /// <paramref name="lastDeliveredId"/> that traded before <paramref name="untilUtc"/>, the end of that minute. Without
+    /// it the minute's candle would keep only the trades streamed before the UNSUBSCRIBE, with a wrong close.
+    /// </summary>
+    /// <remarks>
+    /// One pass, the mirror of the lead-in: it pages forward from <c>lastDeliveredId + 1</c> until a trade at or after
+    /// <paramref name="untilUtc"/>, a short page (nothing more on REST; the caller waits until the minute is over), the
+    /// page cap or a failure. Writes are idempotent, so overlap with trades the stream still delivered is harmless.
+    /// </remarks>
+    /// <returns><c>Complete</c> is <see langword="false"/> after the page cap or a REST failure.</returns>
+    public async Task<GapFillResult> TailOutAsync(
+        int symbolId,
+        string symbol,
+        long lastDeliveredId,
+        DateTime untilUtc,
+        ChannelWriter<Tick> output,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+        if (!SymbolName.TryCreate(symbol, out var name))
+        {
+            throw new ArgumentException($"'{symbol}' is not a valid symbol.", nameof(symbol));
+        }
+
+        using var activity = TickPulseMetrics.ActivitySource.StartActivity(TickPulseMetrics.GapFillSpan);
+        activity?.SetTag("tickpulse.symbol", name.Value);
+        activity?.SetTag("tickpulse.gapfill.from_id", lastDeliveredId + 1);
+        activity?.SetTag("tickpulse.gapfill.until", untilUtc.ToString("O", CultureInfo.InvariantCulture));
+        var emitted = 0;
+        long? lastEmitted = null;
+        var next = lastDeliveredId + 1;
+        try
+        {
+            for (var page = 1; page <= MaxPages; page++)
+            {
+                var pageStart = emitted;
+                try
+                {
+                    var trades = await GetPageAsync(name, next, ct).ConfigureAwait(false);
+                    if (trades is null)
+                    {
+                        return Tagged(new GapFillResult(emitted, lastEmitted, Complete: false));
+                    }
+
+                    var receivedAt = clock.GetUtcNow().UtcDateTime;
+                    foreach (var (id, price, quantity, timeUtc) in trades)
+                    {
+                        if (timeUtc >= untilUtc)
+                        {
+                            return Tagged(Done(name, emitted, lastEmitted, page));
+                        }
+
+                        await output.WriteAsync(new Tick(symbolId, id, price, quantity, timeUtc, receivedAt), ct).ConfigureAwait(false);
+                        emitted++;
+                        lastEmitted = id;
+                    }
+
+                    if (trades.Count < PageSize)
+                    {
+                        return Tagged(Done(name, emitted, lastEmitted, page));
+                    }
+
+                    next = trades[^1].Id + 1;
+                }
+                finally
+                {
+                    if (emitted > pageStart)
+                    {
+                        metrics.GapFillTrades(name.Value, emitted - pageStart);
+                    }
+                }
+            }
+
+            LogCapReached(name.Value, MaxPages, emitted);
+            return Tagged(new GapFillResult(emitted, lastEmitted, Complete: false));
+        }
+        catch (Exception ex) when (activity is not null)
+        {
+            activity.SetStatus(ActivityStatusCode.Error, ex.GetType().Name);
+            throw;
+        }
+
+        GapFillResult Tagged(GapFillResult result)
+        {
+            activity?.SetTag("tickpulse.gapfill.emitted", result.Emitted);
+            activity?.SetTag("tickpulse.gapfill.complete", result.Complete);
+            return result;
+        }
+    }
+
+    /// <summary>
     /// The id of the first trade of <paramref name="symbol"/> at or after <paramref name="fromUtc"/> (and within the
     /// hour after it), from REST <c>aggTrades?startTime</c>. A symbol that starts streaming fills from there to its first
     /// streamed trade, so the minute it started in is complete.

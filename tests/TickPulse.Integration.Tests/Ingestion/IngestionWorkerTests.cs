@@ -339,6 +339,58 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RemovedSymbol_LastStreamedMinuteIsCompletedFromRest()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var clock = new ShiftedClock();
+        await using var host = await StartAsync(db, _server, configureServices: s => s.AddSingleton<TimeProvider>(clock));
+        await WaitForSeededSubscriptionAsync(host);
+        await _server.WaitUntilAsync(s => s.ReceivedRequests.Count(r => r.Contains("&startTime=", StringComparison.Ordinal)) == Seeded.Length, WaitTimeout, ct);
+
+        // Two seconds before the end of a minute, so the tail-out (a few seconds after that end) comes soon.
+        var now = clock.GetUtcNow().UtcDateTime;
+        var minute = Period.OneMinute.AlignDown(now).AddMinutes(1);
+        clock.Offset = minute.AddSeconds(58) - now;
+
+        for (var i = 1; i <= 3; i++)
+        {
+            await _server.PushTradeAsync("ETHUSDT", i, 3000m + i, minute.AddSeconds(10).AddMilliseconds(i), quantity: 2m);
+        }
+
+        await WaitForTradeCountAsync(db, "ETHUSDT", 3);
+
+        // The rest of the minute trades after the UNSUBSCRIBE: only REST has it. Trade 6 belongs to the next minute.
+        _server.AddTrade("ETHUSDT", 4, 3010m, minute.AddSeconds(58.5), quantity: 2m);
+        _server.AddTrade("ETHUSDT", 5, 2990m, minute.AddSeconds(59.9), quantity: 2m);
+        _server.AddTrade("ETHUSDT", 6, 3020m, minute.AddSeconds(60.1), quantity: 2m);
+        (await host.Symbols.DeactivateAsync(Symbol("ETHUSDT"), ct)).ShouldBeTrue();
+        host.Signal.Notify();
+        await _server.WaitUntilAsync(s => !s.SubscribedStreams.Contains(Stream("ETHUSDT")), WaitTimeout, ct);
+
+        await WaitForAsync(() => host.Logs.Count("LogTailedOut") == 1, "the removal minute's tail-out");
+        await WaitForTradeCountAsync(db, "ETHUSDT", 5);
+        (await TradeIdsAsync(db, "ETHUSDT")).ShouldBe([1L, 2L, 3L, 4L, 5L]);
+        _server.ReceivedRequests.ShouldContain("/api/v3/aggTrades?symbol=ETHUSDT&fromId=4&limit=1000");
+
+        // The removal minute is the whole minute, as the exchange has it, and nothing of the next one is stored.
+        await using var connection = new NpgsqlConnection(db.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new NpgsqlCommand(
+            """
+            SELECT c.bucket_start, c.open, c.high, c.low, c.close, c.last_trade_id, c.tick_count, c.volume
+              FROM candles_1m c JOIN symbols s ON s.id = c.symbol_id
+             WHERE s.name = 'ETHUSDT'
+            """,
+            connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        (await reader.ReadAsync(ct)).ShouldBeTrue();
+        reader.GetDateTime(0).ShouldBe(minute);
+        (reader.GetDecimal(1), reader.GetDecimal(2), reader.GetDecimal(3), reader.GetDecimal(4)).ShouldBe((3001m, 3010m, 2990m, 2990m));
+        (reader.GetInt64(5), reader.GetInt64(6), reader.GetDecimal(7)).ShouldBe((5L, 5L, 10m));
+        (await reader.ReadAsync(ct)).ShouldBeFalse();
+    }
+
+    [Fact]
     public async Task HandoverAndBack_FillsFromTheOtherLeadersLastStoredTrade()
     {
         var ct = TestContext.Current.CancellationToken;
@@ -1173,6 +1225,20 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
         public Task ReleaseAsync() => inner.ReleaseAsync();
 
         public ValueTask DisposeAsync() => inner.DisposeAsync();
+    }
+
+    /// <summary>The system clock moved by <see cref="Offset"/>; timers and timestamps stay the system's.</summary>
+    private sealed class ShiftedClock : TimeProvider
+    {
+        private long _offsetTicks;
+
+        public TimeSpan Offset
+        {
+            get => TimeSpan.FromTicks(Interlocked.Read(ref _offsetTicks));
+            set => Interlocked.Exchange(ref _offsetTicks, value.Ticks);
+        }
+
+        public override DateTimeOffset GetUtcNow() => System.GetUtcNow() + Offset;
     }
 
     // The server applies the SUBSCRIBE before the worker reads its ack, so wait for the worker's side as well.
