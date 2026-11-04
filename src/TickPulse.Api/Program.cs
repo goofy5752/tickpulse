@@ -17,7 +17,12 @@ var services = builder.Services;
 services.AddHostedService<DatabaseMigrator>();
 
 // The workers recover from their own failures; a fault that still escapes must not stop the API.
-services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
+// A stop must finish inside the container's stop grace period (see HostShutdown).
+services.Configure<HostOptions>(o =>
+{
+    o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore;
+    o.ShutdownTimeout = HostShutdown.Timeout;
+});
 
 services.AddTickPulseInfrastructure(builder.Configuration);
 services.AddTickPulseIngestion(builder.Configuration);

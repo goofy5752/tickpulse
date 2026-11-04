@@ -182,17 +182,73 @@ internal static class TelemetrySetup
 
         if (Endpoint(configuration) is { } endpoint)
         {
-            logger.WriteTo.OpenTelemetry(o =>
-            {
-                o.Endpoint = endpoint.ToString().TrimEnd('/');
-                o.Protocol = OtlpProtocol.Grpc;
-                o.ResourceAttributes = new Dictionary<string, object>
-                {
-                    ["service.name"] = ServiceName,
-                    ["service.version"] = version,
-                    ["deployment.environment"] = environment,
-                };
-            });
+            WriteToOtlp(logger, endpoint, version, environment);
+        }
+    }
+
+    /// <summary>The OTLP log sink, whose final flush on dispose takes at most <see cref="LogFlushTimeout"/>.</summary>
+    /// <remarks>
+    /// The sink lives in its own sub-logger, which owns its batching and export queue. Disposing that sub-logger flushes
+    /// all of it, so bounding that one dispose bounds the whole flush. The parent logger has already applied the levels.
+    /// </remarks>
+    internal static LoggerConfiguration WriteToOtlp(LoggerConfiguration logger, Uri endpoint, string version, string environment)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+        var otlp = new LoggerConfiguration()
+            .MinimumLevel.Verbose()
+            .WriteTo.OpenTelemetry(o => ConfigureOtlpLogs(o, endpoint, version, environment))
+            .CreateLogger();
+        return logger.WriteTo.Sink(new BoundedDisposalSink(otlp, LogFlushTimeout));
+    }
+
+    /// <summary>
+    /// How long stopping waits for the trace and metric pipelines (in parallel) to flush. A collector that is down or
+    /// does not resolve must not hold the process past the container's stop grace period; what is not sent by then is lost.
+    /// </summary>
+    internal static readonly TimeSpan ShutdownFlushTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>How long stopping waits for the OTLP log sink to flush.</summary>
+    internal static readonly TimeSpan LogFlushTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>Upper bound on one OTLP log export, connection included. Exports to a healthy collector take milliseconds.</summary>
+    internal static readonly TimeSpan ExportRequestTimeout = TimeSpan.FromSeconds(3);
+
+    /// <summary>Upper bound on resolving and connecting to the collector.</summary>
+    internal static readonly TimeSpan ExportConnectTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>The Serilog OTLP sink: gRPC to <paramref name="endpoint"/>, every request bounded (<see cref="CreateOtlpHandler"/>).</summary>
+    internal static void ConfigureOtlpLogs(BatchedOpenTelemetrySinkOptions options, Uri endpoint, string version, string environment)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(endpoint);
+        options.Endpoint = endpoint.ToString().TrimEnd('/');
+        options.Protocol = OtlpProtocol.Grpc;
+        // Without it the sink waits up to the HttpClient default (100 s) per export, also while the process stops.
+        options.HttpMessageHandler = CreateOtlpHandler();
+        options.ResourceAttributes = new Dictionary<string, object>
+        {
+            ["service.name"] = ServiceName,
+            ["service.version"] = version,
+            ["deployment.environment"] = environment,
+        };
+    }
+
+    /// <summary>
+    /// A handler that gives every request <see cref="ExportRequestTimeout"/> and every connection attempt (DNS included)
+    /// <see cref="ExportConnectTimeout"/>.
+    /// </summary>
+    internal static HttpMessageHandler CreateOtlpHandler() => new TimeoutHandler(ExportRequestTimeout, TimeProvider.System)
+    {
+        InnerHandler = new SocketsHttpHandler { ConnectTimeout = ExportConnectTimeout },
+    };
+
+    private sealed class TimeoutHandler(TimeSpan timeout, TimeProvider clock) : DelegatingHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            using var deadline = new CancellationTokenSource(timeout, clock);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
+            return await base.SendAsync(request, linked.Token).ConfigureAwait(false);
         }
     }
 }

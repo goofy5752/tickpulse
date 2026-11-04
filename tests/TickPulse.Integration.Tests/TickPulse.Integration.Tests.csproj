@@ -11,6 +11,8 @@
     <PackageReference Include="Testcontainers.PostgreSql" />
     <PackageReference Include="Microsoft.Extensions.Diagnostics.Testing" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+    <!-- ComposeFile reads the compose files as YAML. -->
+    <PackageReference Include="YamlDotNet" />
   </ItemGroup>
 
   <ItemGroup>
