@@ -258,6 +258,52 @@ public sealed class IngestionWorkerTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RestartAfterAnOutageOfDays_GapFillsFromTheLastStoredTrade()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        // The last trades were stored three days ago (longer than a day, well inside the replay window), in a chunk the
+        // compression policy has compressed by now.
+        var t0 = Now.AddDays(-3);
+        await ExecuteSqlAsync(db, string.Create(
+            CultureInfo.InvariantCulture,
+            $"""
+            INSERT INTO price_ticks (symbol_id, agg_trade_id, price, quantity, trade_time, ingested_at)
+            SELECT s.id, i, 100 + i, 1, '{t0:O}'::timestamptz + i * interval '1 millisecond', now()
+              FROM symbols s, generate_series(1, 5) AS i
+             WHERE s.name = 'BTCUSDT'
+            """));
+        await ExecuteSqlAsync(db, "SELECT compress_chunk(c) FROM show_chunks('price_ticks') AS c");
+        try
+        {
+            for (var i = 6; i <= 10; i++)
+            {
+                _server.AddTrade("BTCUSDT", i, 100m + i, t0.AddMilliseconds(i)); // while no instance ran
+            }
+
+            for (var i = 11; i <= 13; i++)
+            {
+                _server.AddTrade("BTCUSDT", i, 100m + i, Now.AddMinutes(-10).AddMilliseconds(i));
+            }
+
+            await using var host = await StartBtcOnlyAsync();
+            for (var i = 14; i <= 18; i++)
+            {
+                await _server.PushTradeAsync("BTCUSDT", i, 100m + i, Now.AddSeconds(-1));
+            }
+
+            await WaitForTradeCountAsync(db, "BTCUSDT", 18);
+            (await TradeIdsAsync(db, "BTCUSDT")).ShouldBe(Enumerable.Range(1, 18).Select(i => (long)i));
+            (await CandleTickCountAsync(db, "BTCUSDT")).ShouldBe(13); // 1..5 were stored without candles
+            _server.ReceivedRequests.ShouldContain("/api/v3/aggTrades?symbol=BTCUSDT&fromId=6&limit=1000");
+        }
+        finally
+        {
+            await ExecuteSqlAsync(db, "SELECT decompress_chunk(c, if_compressed => true) FROM show_chunks('price_ticks') AS c");
+        }
+    }
+
+    [Fact]
     public async Task FirstStreamedMinute_IsCompletedFromRest()
     {
         var ct = TestContext.Current.CancellationToken;

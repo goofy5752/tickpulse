@@ -63,11 +63,14 @@ internal sealed partial class IngestionWorker(
 
     /// <summary>How far back the start of a session looks for each symbol's last stored trade.</summary>
     /// <remarks>
-    /// Well inside <see cref="TickWriter.ReplayWindow"/>, so every trade the gap-fill recovers is still insertable, and
-    /// inside the uncompressed chunks (compression starts at two days), so the lookup is a primary-key probe of the
-    /// newest one or two daily chunks per symbol. A symbol that stored nothing for longer starts like a new one.
+    /// <para>The whole of <see cref="TickWriter.ReplayWindow"/>: REST <c>fromId</c> has no time limit, so an outage of
+    /// days is recovered trade by trade as long as the trades after the last stored one are still insertable. The
+    /// lookup reads only the newest chunk that holds a trade of the symbol, compressed or not (see
+    /// <see cref="MarketDataQueries.GetLatestTradeIdsAsync"/>).</para>
+    /// <para>A symbol that stored nothing for longer starts like a new one (a lead-in for its first minute); the
+    /// backfill worker fills that stretch of candles from klines, when backfill is enabled.</para>
     /// </remarks>
-    public static readonly TimeSpan SeedWindow = TimeSpan.FromDays(1);
+    public static readonly TimeSpan SeedWindow = TickWriter.ReplayWindow;
 
     private readonly ILogger _logger = loggerFactory.CreateLogger<IngestionWorker>();
 
