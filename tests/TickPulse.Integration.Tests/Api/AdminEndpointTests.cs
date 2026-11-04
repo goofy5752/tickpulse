@@ -292,8 +292,35 @@ public sealed class AdminEndpointTests(ApiFactory api) : IClassFixture<ApiFactor
         response.StatusCode.ShouldBe(HttpStatusCode.Created);
         using var json = await JsonAsync(response);
         json.RootElement.GetProperty("isActive").GetBoolean().ShouldBeTrue();
-        json.RootElement.GetProperty("deactivatedAt").GetString().ShouldNotBeNull().ShouldEndWith("Z"); // the last deactivation is kept
-        (await FindAsync(api, "ADAUSDT")).ShouldNotBeNull().IsActive.ShouldBeTrue();
+        json.RootElement.GetProperty("deactivatedAt").ValueKind.ShouldBe(JsonValueKind.Null); // an active symbol is not deactivated
+
+        // The repository keeps the last deactivation: the backfill needs it to find the stretch the symbol was inactive.
+        var stored = (await FindAsync(api, "ADAUSDT")).ShouldNotBeNull();
+        stored.IsActive.ShouldBeTrue();
+        stored.DeactivatedAtUtc.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task List_AfterReactivation_ShowsNoDeactivation()
+    {
+        (await SendAsync(api, HttpMethod.Delete, Path + "/ADAUSDT", ApiFactory.AdminApiKey)).Dispose();
+        (await SendAsync(api, HttpMethod.Delete, Path + "/ETHUSDT", ApiFactory.AdminApiKey)).Dispose();
+        (await SendAsync(api, HttpMethod.Post, Path, ApiFactory.AdminApiKey, body: "ADAUSDT")).Dispose();
+
+        using var response = await SendAsync(api, HttpMethod.Get, Path, ApiFactory.AdminApiKey);
+        using var json = await JsonAsync(response);
+        var items = json.RootElement.EnumerateArray().ToDictionary(i => i.GetProperty("symbol").GetString()!);
+
+        items["ADAUSDT"].GetProperty("isActive").GetBoolean().ShouldBeTrue();
+        items["ADAUSDT"].GetProperty("deactivatedAt").ValueKind.ShouldBe(JsonValueKind.Null);
+        items["ETHUSDT"].GetProperty("isActive").GetBoolean().ShouldBeFalse();
+        items["ETHUSDT"].GetProperty("deactivatedAt").GetString().ShouldNotBeNull().ShouldEndWith("Z");
+
+        using var xml = await SendAsync(api, HttpMethod.Get, Path, ApiFactory.AdminApiKey, accept: "application/xml");
+        var ada = (await XmlAsync(xml)).Elements(Schema + "adminSymbol").Single(e => e.Element(Schema + "symbol")!.Value == "ADAUSDT");
+        var deactivated = ada.Element(Schema + "deactivatedAt").ShouldNotBeNull();
+        deactivated.Value.ShouldBeEmpty();
+        deactivated.Attribute(XNamespace.Get("http://www.w3.org/2001/XMLSchema-instance") + "nil").ShouldNotBeNull().Value.ShouldBe("true");
     }
 
     [Theory]

@@ -42,12 +42,16 @@ internal static class ContractMapping
             BackfillStatus = s.BackfillStatus.ToString(),
         }));
 
+    /// <remarks>
+    /// The repository keeps <see cref="MonitoredSymbol.DeactivatedAtUtc"/> after a reactivation (the backfill uses it
+    /// to find the stretch the symbol was inactive); the contract shows it only while the symbol is inactive.
+    /// </remarks>
     public static AdminSymbolResponse ToAdminContract(this MonitoredSymbol s) => new()
     {
         Symbol = s.Name,
         IsActive = s.IsActive,
         CreatedAt = s.CreatedAtUtc,
-        DeactivatedAt = s.DeactivatedAtUtc,
+        DeactivatedAt = s.IsActive ? null : s.DeactivatedAtUtc,
         BackfillStatus = s.BackfillStatus.ToString(),
         BackfilledFrom = s.BackfilledFromUtc,
     };
