@@ -144,7 +144,7 @@ following from every span and log record before export:
 - `client.address`, `network.peer.address`
 - `http.request.header.*`, `http.response.header.*`
 - `user_agent.original`
-- `url.query`
+- `url.query`, `url.full`, `url.original`, `http.url`
 
 The API logs IPs only as `client_ip_hash`.
 
@@ -185,9 +185,9 @@ Thresholds are the same everywhere:
 
 | UID | Condition | Pending | Severity |
 |---|---|---|---|
-| `tp-ws-disconnected` | the newest `tickpulse_ws_state == 2` (Connected) sample is more than 60 s old, measured by sample timestamp, so it also fires when the API stops exporting | 0 s (fires 60–80 s after the last Connected report) | critical |
+| `tp-ws-disconnected` | WS disconnected > 60 s (alert after a 30 s pending period): the newest `tickpulse_ws_state == 2` (Connected) sample is more than 60 s old, measured by sample timestamp, so it also fires when the API stops exporting | 30 s (fires about 90–110 s after the last Connected report) | critical |
 | `tp-ingest-lag-p95` | p95 of `tickpulse_ingest_lag_milliseconds` over 5 m > 5000 | 2 m | warning |
-| `tp-zero-ticks` | a symbol with `tickpulse_ingest_symbol_active == 1` received no ticks in the last minute (never-ticked active symbols count as 0) | 1 m (= 2 min of silence) | warning |
+| `tp-zero-ticks` | a symbol with `tickpulse_ingest_symbol_active == 1` received no ticks in the last minute (never-ticked active symbols count as 0) | 5 m (= 6 min of silence) | warning |
 | `tp-api-5xx-ratio` | 5xx share of `http_server_request_duration_seconds_count` over 5 m > 2 %, only while traffic > 0.1 req/s | 5 m | critical |
 
 Remote-written series carry **no staleness markers**, so Prometheus keeps answering instant queries
@@ -198,6 +198,22 @@ therefore never read a bare gauge:
   turn to *Offline* when reports stop;
 - the WebSocket alert measures the age of the last Connected sample;
 - `tp-zero-ticks` gates on `last_over_time(tickpulse_ingest_symbol_active[45s])`.
+
+Known behaviour of the two ingestion alerts:
+
+- **`tp-ws-disconnected`, cold start.** With no Connected sample in the last hour, the age is
+  counted from the API's first `tickpulse_ws_state` sample minus 60 s, so a fresh start has
+  2 minutes to connect before the condition becomes true. With the 30 s pending period, that is
+  about 2.5 minutes in total.
+  - A deploy or failover restart is measured from the previous run's last Connected sample, so a
+    gap longer than about 90 s alerts. That is intended.
+  - With no `tickpulse_ws_state` sample at all in the last hour (the API has been down for an hour
+    or was never started), the rule has no data and **alerts**. A local stack started without the
+    API therefore shows this alert after a minute or two.
+- **`tp-zero-ticks`, newly added illiquid symbol.** A symbol counts as soon as it is active, even
+  before its first trade. A newly added, illiquid symbol that sees no trade for 6 minutes (1-minute
+  window + 5-minute pending period) alerts. This is accepted: on Binance spot, a symbol with no trade
+  for 6 minutes is unusual enough to look at.
 
 ## Telemetry contract (exact series names)
 

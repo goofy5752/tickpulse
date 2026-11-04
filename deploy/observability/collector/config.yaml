@@ -44,6 +44,12 @@ processors:
         action: delete
       - key: url.query
         action: delete
+      - key: url.full
+        action: delete
+      - key: url.original
+        action: delete
+      - key: http.url
+        action: delete
       - pattern: ^http\.request\.header\..+
         action: delete
       - pattern: ^http\.response\.header\..+

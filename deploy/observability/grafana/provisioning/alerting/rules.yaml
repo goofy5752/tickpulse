@@ -7,27 +7,32 @@ groups:
   - orgId: 1
     name: Ingestion
     folder: TickPulse
-    interval: 20s
+    interval: 10s
     rules:
       - uid: tp-ws-disconnected
         title: WebSocket disconnected
         condition: C
         data:
           - refId: A
-            relativeTimeRange: { from: 900, to: 0 }
+            relativeTimeRange: { from: 3900, to: 0 }
             datasourceUid: prom
             model:
               refId: A
               # Seconds since any instance last reported Connected (WsState 2), using the sample's
               # own timestamp. Remote-written series get no staleness markers, so a plain instant
               # query would keep returning the last value for 5 minutes after the API dies; this
-              # measures the age of the last Connected sample instead. It therefore fires about 60 s
-              # after a live disconnect *or* after the API stops exporting. Never connected in the
-              # last 15 minutes counts as disconnected (or vector(0) -> age = now).
+              # measures the age of the last Connected sample instead, so it covers both a live
+              # disconnect and the API no longer exporting.
+              # Cold start: if no Connected sample exists in the last hour, the age is counted from
+              # the API's first ws_state sample minus 60 s, so a fresh start gets 2 minutes to
+              # connect before the condition is true. No ws_state sample at all in the last hour
+              # is NoData, which alerts.
               expr: >-
-                time() - (max(max_over_time(
-                (timestamp(tickpulse_ws_state{service_name="tickpulse-api"}) and tickpulse_ws_state{service_name="tickpulse-api"} == 2)[15m:15s]
-                )) or vector(0))
+                time() - (
+                max(max_over_time((timestamp(tickpulse_ws_state{service_name="tickpulse-api"}) and tickpulse_ws_state{service_name="tickpulse-api"} == 2)[1h:15s]))
+                or
+                (min(min_over_time(timestamp(tickpulse_ws_state{service_name="tickpulse-api"})[1h:15s])) + 60)
+                )
               instant: true
               range: false
               intervalMs: 15000
@@ -40,14 +45,15 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: gt, params: [60] }
-        for: 0s
+        # 30 s pending period: rides out a short deploy or failover gap. Detection takes about 90-110 s.
+        for: 30s
         noDataState: Alerting
         execErrState: Error
         labels:
           severity: critical
           component: ingestion
         annotations:
-          summary: The Binance WebSocket has not been connected for more than 60 seconds.
+          summary: The Binance WebSocket has not been connected for more than 90 seconds.
           description: No TickPulse instance reports a Connected stream, so no trades are being ingested. Check the API logs for connection errors.
           __dashboardUid__: tp-ingestion
           __panelId__: "19"
@@ -119,14 +125,15 @@ groups:
               expression: A
               conditions:
                 - evaluator: { type: lt, params: [0.5] }
-        for: 1m
+        # 5 m pending: a newly added, illiquid symbol may legitimately go a few minutes without trades.
+        for: 5m
         noDataState: OK
         execErrState: Error
         labels:
           severity: warning
           component: ingestion
         annotations:
-          summary: '{{ .Labels.symbol }} has received no ticks for 2 minutes.'
+          summary: '{{ .Labels.symbol }} has received no ticks for 6 minutes.'
           description: The symbol is subscribed but no aggTrade messages arrived. Check the WebSocket state and the symbol's trading status on Binance.
           __dashboardUid__: tp-ingestion
           __panelId__: "9"
