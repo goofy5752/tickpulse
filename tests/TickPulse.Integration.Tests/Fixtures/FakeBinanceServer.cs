@@ -41,6 +41,8 @@ public sealed class FakeBinanceServer : IAsyncLifetime
 
     private TaskCompletionSource _changed = NewSignal();
     private TaskCompletionSource? _aggTradesHold;
+    private TaskCompletionSource? _klinesHold;
+    private (int Status, int Remaining, int? RetryAfterSeconds)? _klinesFailure;
     private (int Code, string Msg)? _rejectNext;
     private bool _suppressNextAck;
     private int _rateLimitDisconnects;
@@ -210,6 +212,7 @@ public sealed class FakeBinanceServer : IAsyncLifetime
         }
 
         ResumeAggTrades();
+        ResumeKlines();
 
         foreach (var connection in SnapshotConnections())
         {
@@ -283,6 +286,56 @@ public sealed class FakeBinanceServer : IAsyncLifetime
 
         hold?.TrySetResult();
     }
+
+    /// <summary>
+    /// Holds every <c>klines</c> request (it is recorded in <see cref="ReceivedRequests"/> first) until
+    /// <see cref="ResumeKlines"/>; the response then reflects the trades at that moment.
+    /// </summary>
+    public void PauseKlines()
+    {
+        lock (_gate)
+        {
+            _klinesHold ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    /// <summary>Releases the requests held by <see cref="PauseKlines"/>.</summary>
+    public void ResumeKlines()
+    {
+        TaskCompletionSource? hold;
+        lock (_gate)
+        {
+            hold = _klinesHold;
+            _klinesHold = null;
+        }
+
+        hold?.TrySetResult();
+    }
+
+    /// <summary>
+    /// The next <paramref name="count"/> <c>klines</c> requests answer <paramref name="status"/> with a Binance error
+    /// body (and a <c>Retry-After</c> header when <paramref name="retryAfterSeconds"/> is set), e.g. <c>500</c> or
+    /// <c>418</c>. Later requests are served normally.
+    /// </summary>
+    public void FailNextKlines(int status, int count = 1, int? retryAfterSeconds = null)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(count, 1);
+        lock (_gate)
+        {
+            _klinesFailure = (status, count, retryAfterSeconds);
+        }
+    }
+
+    /// <summary>The <c>klines</c> requests received so far, in arrival order, as their query parameters.</summary>
+    public IReadOnlyList<IReadOnlyDictionary<string, string>> KlineRequests =>
+    [
+        .. ReceivedRequests
+            .Where(r => r.StartsWith("/api/v3/klines?", StringComparison.Ordinal))
+            .Select(r => (IReadOnlyDictionary<string, string>)r["/api/v3/klines?".Length..]
+                .Split('&')
+                .Select(pair => pair.Split('=', 2))
+                .ToDictionary(kv => kv[0], kv => Uri.UnescapeDataString(kv[1]), StringComparer.Ordinal)),
+    ];
 
     /// <summary>The next WebSocket command is applied but gets no reply, so the client's ack wait never ends.</summary>
     public void SuppressNextAck()
@@ -855,6 +908,34 @@ public sealed class FakeBinanceServer : IAsyncLifetime
     // (OHLC = previous close), so code under test must accept both; BinanceRestClientTests covers the zero-volume row.
     private async Task HandleKlinesAsync(HttpContext context)
     {
+        Task? hold;
+        (int Status, int Remaining, int? RetryAfterSeconds)? failure = null;
+        lock (_gate)
+        {
+            hold = _klinesHold?.Task;
+            if (_klinesFailure is { } next)
+            {
+                failure = next;
+                _klinesFailure = next.Remaining > 1 ? next with { Remaining = next.Remaining - 1 } : null;
+            }
+        }
+
+        if (hold is not null)
+        {
+            await hold.WaitAsync(context.RequestAborted);
+        }
+
+        if (failure is { } fail)
+        {
+            if (fail.RetryAfterSeconds is { } seconds)
+            {
+                context.Response.Headers.RetryAfter = seconds.ToString(CultureInfo.InvariantCulture);
+            }
+
+            await WriteAsync(context, fail.Status, Error(-1000, "Injected failure."));
+            return;
+        }
+
         if (!TryResolveSymbol(context, out var symbol, out var error))
         {
             await WriteAsync(context, StatusCodes.Status400BadRequest, error!);

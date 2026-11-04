@@ -69,6 +69,9 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     // Reads the partial index ix_candles_1m_stream.
     internal const string FirstStreamMinuteSql = "SELECT min(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 1";
 
+    internal const string LastBackfillMinuteSql =
+        "SELECT max(bucket_start) FROM candles_1m WHERE symbol_id = $1 AND source = 2 AND bucket_start < $2";
+
     /// <inheritdoc />
     /// <remarks>
     /// Exact over <c>[fromUtc, toUtc]</c> (both inclusive): whole minutes are read from the stream candles and the
@@ -205,6 +208,17 @@ public sealed class MarketDataQueries(NpgsqlDataSource dataSource) : IMarketData
     {
         await using var command = dataSource.CreateCommand(FirstStreamMinuteSql);
         command.Parameters.Add(Integer(symbolId));
+        return await command.ExecuteScalarAsync(ct) is DateTime minute ? minute : null;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>A backward scan of the primary key from <paramref name="beforeUtc"/>.</remarks>
+    public async Task<DateTime?> LastBackfillMinuteBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct)
+    {
+        RequireUtc(beforeUtc, nameof(beforeUtc));
+        await using var command = dataSource.CreateCommand(LastBackfillMinuteSql);
+        command.Parameters.Add(Integer(symbolId));
+        command.Parameters.Add(TimestampTz(beforeUtc));
         return await command.ExecuteScalarAsync(ct) is DateTime minute ? minute : null;
     }
 

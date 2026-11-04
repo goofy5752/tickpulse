@@ -491,6 +491,26 @@ public sealed class MarketDataQueriesTests(TimescaleFixture db) : IAsyncLifetime
         first!.Value.Kind.ShouldBe(DateTimeKind.Utc);
     }
 
+    [Fact]
+    public async Task LastBackfillMinuteBefore_IgnoresStreamOtherSymbolsAndLaterMinutes()
+    {
+        var queries = Queries();
+        (await queries.LastBackfillMinuteBeforeAsync(Btc, Start.AddHours(1), Ct)).ShouldBeNull();
+
+        await CandleWriter().InsertBackfillAsync(
+            Btc, [Candle(Start, close: 1m), Candle(Start.AddMinutes(3), close: 2m), Candle(Start.AddMinutes(9), close: 3m)], Ct);
+        await CandleWriter().InsertBackfillAsync(Eth, [Candle(Start.AddMinutes(7), close: 1m)], Ct);
+        await Writer().WriteBatchAsync([NewTick(Btc, 1, 1m, 1m, Start.AddMinutes(5).AddSeconds(1))], Ct);
+
+        (await queries.LastBackfillMinuteBeforeAsync(Btc, Start.AddMinutes(9), Ct)).ShouldBe(Start.AddMinutes(3));
+        var last = await queries.LastBackfillMinuteBeforeAsync(Btc, Start.AddHours(1), Ct);
+        last.ShouldBe(Start.AddMinutes(9));
+        last!.Value.Kind.ShouldBe(DateTimeKind.Utc);
+        (await queries.LastBackfillMinuteBeforeAsync(Btc, Start, Ct)).ShouldBeNull();
+        (await queries.LastBackfillMinuteBeforeAsync(Ada, Start.AddHours(1), Ct)).ShouldBeNull();
+        await Should.ThrowAsync<ArgumentException>(() => queries.LastBackfillMinuteBeforeAsync(Btc, DateTime.SpecifyKind(Start, DateTimeKind.Unspecified), Ct));
+    }
+
     private static decimal RandomDecimal(Random rng, long maxUnitsExclusive) => rng.NextInt64(1, maxUnitsExclusive) / 100_000_000m;
 
     private static Tick NewTick(int symbolId, long id, decimal price, decimal qty, DateTime time) => new(symbolId, id, price, qty, time, time);

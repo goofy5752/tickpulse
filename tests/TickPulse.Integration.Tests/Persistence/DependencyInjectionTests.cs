@@ -7,6 +7,7 @@ using Npgsql;
 using TickPulse.Application.Abstractions;
 using TickPulse.Application.Ingestion;
 using TickPulse.Infrastructure;
+using TickPulse.Infrastructure.Backfill;
 using TickPulse.Infrastructure.Binance;
 using TickPulse.Infrastructure.Ingestion;
 using TickPulse.Infrastructure.Persistence;
@@ -63,7 +64,14 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
             .AddTickPulseIngestion(configuration)
             .BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true, ValidateOnBuild = true });
 
-        provider.GetServices<IHostedService>().ShouldHaveSingleItem().GetType().Name.ShouldBe("IngestionWorker");
+        var hosted = provider.GetServices<IHostedService>().ToArray();
+        hosted.Select(h => h.GetType().Name).ShouldBe(["IngestionWorker", "BackfillWorker"]);
+        provider.GetRequiredService<IBackfillQueue>().ShouldBeSameAs(hosted[1]);
+        provider.GetRequiredService<IBackfillQueue>().ShouldBeSameAs(provider.GetRequiredService<IBackfillQueue>());
+        provider.GetRequiredService<IKlineSource>().ShouldBeOfType<BinanceRestClient>();
+        var backfill = provider.GetRequiredService<IOptions<BackfillOptions>>().Value;
+        backfill.Enabled.ShouldBeFalse();
+        backfill.Depth.ShouldBe(TimeSpan.FromDays(182));
         provider.GetRequiredService<ISymbolChangeSignal>().ShouldBeOfType<SymbolChangeSignal>();
         provider.GetRequiredService<ISymbolChangeSignal>().ShouldBeSameAs(provider.GetRequiredService<ISymbolChangeSignal>());
         provider.GetRequiredService<IngestionState>().ShouldBeSameAs(provider.GetRequiredService<IngestionState>());
@@ -103,6 +111,28 @@ public sealed class DependencyInjectionTests(TimescaleFixture db)
 
         Should.Throw<OptionsValidationException>(() => provider.GetRequiredService<IOptions<IngestionOptions>>().Value)
             .Message.ShouldContain(key.Split(':')[1]);
+    }
+
+    [Theory]
+    [InlineData("00:00:00")]
+    [InlineData("00:00:59")]
+    [InlineData("-1.00:00:00")]
+    [InlineData("1096.00:00:00")]
+    public void AddTickPulseIngestion_InvalidBackfillDepth_FailsValidation(string value)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:TickPulse"] = db.ConnectionString,
+                ["Backfill:Depth"] = value,
+            })
+            .Build();
+        using var provider = new ServiceCollection()
+            .AddTickPulseIngestion(configuration)
+            .BuildServiceProvider();
+
+        Should.Throw<OptionsValidationException>(() => provider.GetRequiredService<IOptions<BackfillOptions>>().Value)
+            .Message.ShouldContain("Depth");
     }
 
     [Fact]

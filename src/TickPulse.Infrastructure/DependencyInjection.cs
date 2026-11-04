@@ -8,6 +8,7 @@ using Microsoft.Extensions.Options;
 using Npgsql;
 using TickPulse.Application.Abstractions;
 using TickPulse.Application.Ingestion;
+using TickPulse.Infrastructure.Backfill;
 using TickPulse.Infrastructure.Binance;
 using TickPulse.Infrastructure.Ingestion;
 using TickPulse.Infrastructure.Persistence;
@@ -106,7 +107,30 @@ public static class DependencyInjection
             sp.GetRequiredService<TimeProvider>(),
             sp.GetService<ILoggerFactory>() ?? NullLoggerFactory.Instance));
 
+        AddBackfill(services, configuration);
         return services;
+    }
+
+    // The backfill worker runs only while the ingestion worker holds leadership, so it is registered with it. One
+    // instance is both the hosted service and the IBackfillQueue the admin use case enqueues into.
+    private static void AddBackfill(IServiceCollection services, IConfiguration configuration)
+    {
+        services.AddOptions<BackfillOptions>()
+            .Bind(configuration.GetSection(BackfillOptions.SectionName))
+            .ValidateOnStart();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<BackfillOptions>, BackfillOptionsValidator>());
+
+        services.TryAddSingleton(sp => new BackfillWorker(
+            sp.GetRequiredService<IKlineSource>(),
+            sp.GetRequiredService<ICandleWriter>(),
+            sp.GetRequiredService<ISymbolRepository>(),
+            sp.GetRequiredService<IMarketDataQueries>(),
+            sp.GetRequiredService<IngestionState>(),
+            sp.GetRequiredService<IOptions<BackfillOptions>>(),
+            sp.GetRequiredService<TimeProvider>(),
+            sp.GetService<ILogger<BackfillWorker>>() ?? NullLogger<BackfillWorker>.Instance));
+        services.TryAddSingleton<IBackfillQueue>(sp => sp.GetRequiredService<BackfillWorker>());
+        services.AddHostedService(sp => sp.GetRequiredService<BackfillWorker>());
     }
 
     private static Uri WsBaseUrl(IConfiguration configuration)

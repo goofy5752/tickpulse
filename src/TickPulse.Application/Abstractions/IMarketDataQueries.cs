@@ -22,4 +22,7 @@ public interface IMarketDataQueries
     Task<long> ApproximateTickCountAsync(CancellationToken ct);
 
     Task<DateTime?> FirstStreamMinuteAsync(int symbolId, CancellationToken ct);
+
+    /// <summary>The latest backfilled (exchange) minute strictly before <paramref name="beforeUtc"/>, if any.</summary>
+    Task<DateTime?> LastBackfillMinuteBeforeAsync(int symbolId, DateTime beforeUtc, CancellationToken ct);
 }
