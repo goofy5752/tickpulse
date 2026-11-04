@@ -2,9 +2,13 @@ import { useMemo, useState } from 'react'
 import { useStats, useSymbols } from '@/api/queries'
 import { useMarketHub } from '@/hooks/useMarketHub'
 import { DEFAULT_SMA_PARAMS, type SmaParams } from '@/lib/smaParams'
+import { AdminSymbols } from '@/sections/AdminSymbols'
 import { AnalyticsPanel } from '@/sections/AnalyticsPanel'
+import { ApiPlayground } from '@/sections/ApiPlayground'
 import { ChartPanel } from '@/sections/ChartPanel'
+import { Footer } from '@/sections/Footer'
 import { Nav } from '@/sections/Nav'
+import { SystemPanel } from '@/sections/SystemPanel'
 import { TickerTiles } from '@/sections/TickerTiles'
 
 const PREFERRED_SYMBOL = 'BTCUSDT'
@@ -39,7 +43,7 @@ export function App() {
         Skip to content
       </a>
       <Nav hubStatus={hub.status} stats={stats} />
-      <main id="main" className="flex flex-col gap-5 pb-10">
+      <main id="main" className="flex flex-col gap-5 pb-4">
         <h1 className="sr-only">TickPulse market dashboard</h1>
         <TickerTiles
           symbols={symbols.data ? active : undefined}
@@ -59,7 +63,13 @@ export function App() {
           />
           <AnalyticsPanel symbol={symbol} params={params} onParamsChange={setParams} />
         </div>
+        <ApiPlayground symbol={symbol} symbols={activeNames} />
+        <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-2">
+          <AdminSymbols />
+          <SystemPanel stats={stats} hubStatus={hub.status} />
+        </div>
       </main>
+      <Footer />
     </div>
   )
 }

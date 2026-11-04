@@ -57,12 +57,26 @@ function normalise(symbol: string | undefined): string {
   return (symbol ?? '').trim().toUpperCase()
 }
 
-/** All monitored symbols with their latest price and 24h change. */
-export function useSymbols() {
+export const SYMBOLS_REFRESH_MS = 30_000
+/** How often the admin view re-reads the list while a backfill is queued or running. */
+export const BACKFILL_POLL_MS = 2_000
+
+/** Fast polling only while someone watches a backfill that is still in flight. */
+export function symbolsRefetchInterval(data: readonly SymbolResponse[] | undefined, pollBackfill: boolean): number {
+  const inFlight = data?.some((s) => s.isActive && (s.backfillStatus === 'Pending' || s.backfillStatus === 'Running'))
+  return pollBackfill && inFlight ? BACKFILL_POLL_MS : SYMBOLS_REFRESH_MS
+}
+
+/**
+ * All monitored symbols with their latest price, 24h change and backfill status. Every caller
+ * shares one cache entry, so an admin change shows up in the ticker tiles too.
+ */
+export function useSymbols(options: { pollBackfill?: boolean } = {}) {
+  const pollBackfill = options.pollBackfill ?? false
   return useQuery({
     queryKey: queryKeys.symbols(),
     queryFn: ({ signal }) => getJson<SymbolResponse[]>(apiPaths.symbols(), { signal }),
-    refetchInterval: 30_000,
+    refetchInterval: (query) => symbolsRefetchInterval(query.state.data, pollBackfill),
   })
 }
 

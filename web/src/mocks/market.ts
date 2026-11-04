@@ -11,6 +11,7 @@
 import {
   PERIODS,
   type AveragePriceResponse,
+  type BackfillStatus,
   type CandleResponse,
   type LivePrice,
   type Period,
@@ -101,6 +102,37 @@ const SPECS: Spec[] = [
     thinMinutes: 0.04,
   },
 ]
+
+/**
+ * Pairs the simulated exchange lists as trading, so the admin panel can add them. Anything else
+ * is "not a trading symbol on Binance" (422).
+ */
+const CATALOG: Spec[] = [
+  { symbol: 'SOLUSDT', price: 182.41, decimals: 2, sigma: 0.0008, change24h: 2.6, ticksPerSecond: 9.2, volumePerMinute: 600, seed: 41 },
+  { symbol: 'BNBUSDT', price: 642.1, decimals: 2, sigma: 0.0006, change24h: -0.8, ticksPerSecond: 6.1, volumePerMinute: 90, seed: 43 },
+  { symbol: 'XRPUSDT', price: 2.3114, decimals: 4, sigma: 0.0009, change24h: 1.2, ticksPerSecond: 8.4, volumePerMinute: 200_000, seed: 47 },
+  { symbol: 'DOGEUSDT', price: 0.38121, decimals: 5, sigma: 0.001, change24h: -2.1, ticksPerSecond: 7.3, volumePerMinute: 900_000, seed: 53 },
+  { symbol: 'LINKUSDT', price: 23.47, decimals: 3, sigma: 0.0008, change24h: 0.6, ticksPerSecond: 3.8, volumePerMinute: 3_000, seed: 59 },
+  { symbol: 'AVAXUSDT', price: 38.92, decimals: 2, sigma: 0.0009, change24h: -1.4, ticksPerSecond: 3.6, volumePerMinute: 2_500, seed: 61 },
+  { symbol: 'LTCUSDT', price: 104.6, decimals: 2, sigma: 0.0007, change24h: 0.3, ticksPerSecond: 2.9, volumePerMinute: 800, seed: 67 },
+]
+
+/**
+ * Lower than the real default of 20 on purpose, so the 409 `symbol-limit` answer is reachable
+ * after adding a few symbols.
+ */
+export const MOCK_MAX_ACTIVE = 6
+
+/** A new symbol's backfill: queued for this long, then running until BACKFILL_DONE_MS. */
+const BACKFILL_PENDING_MS = 3_000
+const BACKFILL_DONE_MS = 11_000
+
+const SYMBOL_FORMAT = /^[A-Z0-9]{5,20}$/
+
+export type AddOutcome =
+  | { kind: 'created' | 'already'; symbol: SymbolResponse }
+  | { kind: 'invalid-format' | 'not-trading'; symbol: string }
+  | { kind: 'limit'; max: number }
 
 /** Buckets generated per period: 25 h of minutes, then days of backfill depth and half a year of weeks. */
 const DEPTH: Record<Period, number> = { '1m': 1500, '5m': 1000, '30m': 1000, '1d': 182, '1w': 27 }
@@ -211,8 +243,15 @@ class SymbolSim {
 
 type PriceListener = (price: LivePrice) => void
 
+interface Entry {
+  sim: SymbolSim
+  active: boolean
+  /** When the backfill was queued (ms); null for the seeded symbols, whose history is complete. */
+  backfillQueuedAt: number | null
+}
+
 class MarketSim {
-  private readonly sims: Map<string, SymbolSim>
+  private readonly entries: Map<string, Entry>
   private readonly listeners = new Set<PriceListener>()
   private readonly rand = seeded(97)
   private readonly startedAt = nowSeconds()
@@ -220,19 +259,23 @@ class MarketSim {
 
   constructor() {
     const now = nowSeconds()
-    this.sims = new Map(SPECS.map((spec) => [spec.symbol, new SymbolSim(spec, now)]))
+    this.entries = new Map(
+      SPECS.map((spec) => [spec.symbol, { sim: new SymbolSim(spec, now), active: true, backfillQueuedAt: null }]),
+    )
   }
 
   private get(symbol: string): SymbolSim | undefined {
     this.ensureRunning()
-    return this.sims.get(symbol.toUpperCase())
+    return this.entries.get(symbol.toUpperCase())?.sim
   }
 
   private ensureRunning() {
     if (this.timer !== undefined) return
     const loop = () => {
       const now = nowSeconds()
-      for (const sim of this.sims.values()) {
+      for (const { sim, active } of this.entries.values()) {
+        // A removed symbol keeps its history but no longer receives trades.
+        if (!active) continue
         // Busier symbols trade more often; each emitted trade stands for a burst of real ones.
         if (this.rand() < Math.min(0.85, sim.spec.ticksPerSecond / 28)) {
           sim.trade(now, this.rand)
@@ -257,20 +300,60 @@ class MarketSim {
     return this.get(symbol) !== undefined
   }
 
+  private backfillStatus(entry: Entry): BackfillStatus {
+    if (entry.backfillQueuedAt === null) return 'Completed'
+    const elapsed = Date.now() - entry.backfillQueuedAt
+    if (elapsed < BACKFILL_PENDING_MS) return 'Pending'
+    return elapsed < BACKFILL_DONE_MS ? 'Running' : 'Completed'
+  }
+
+  private describe(entry: Entry): SymbolResponse {
+    const sim = entry.sim
+    const dayAgo = sim.priceDayAgo(nowSeconds())
+    return {
+      symbol: sim.spec.symbol,
+      isActive: entry.active,
+      latestPrice: sim.price,
+      change24hPercent: dayAgo ? Math.round(((sim.price - dayAgo) / dayAgo) * 10_000) / 100 : null,
+      backfillStatus: this.backfillStatus(entry),
+    }
+  }
+
+  private activeCount(): number {
+    let count = 0
+    for (const entry of this.entries.values()) if (entry.active) count++
+    return count
+  }
+
+  /** Every symbol ever monitored, removed ones included (as the real list does). */
   symbols(): SymbolResponse[] {
-    const now = nowSeconds()
-    return SPECS.map((spec) => {
-      const sim = this.get(spec.symbol)
-      const dayAgo = sim?.priceDayAgo(now) ?? null
-      const price = sim?.price ?? null
-      return {
-        symbol: spec.symbol,
-        isActive: true,
-        latestPrice: price,
-        change24hPercent: price !== null && dayAgo ? Math.round(((price - dayAgo) / dayAgo) * 10_000) / 100 : null,
-        backfillStatus: 'Completed' as const,
-      }
-    })
+    this.ensureRunning()
+    return [...this.entries.values()].map((entry) => this.describe(entry))
+  }
+
+  /** The admin add flow, in the real order: format, already active, limit, exchange, add. */
+  addSymbol(raw: string): AddOutcome {
+    this.ensureRunning()
+    const symbol = raw.trim().toUpperCase()
+    if (!SYMBOL_FORMAT.test(symbol)) return { kind: 'invalid-format', symbol: raw }
+    const existing = this.entries.get(symbol)
+    if (existing?.active) return { kind: 'already', symbol: this.describe(existing) }
+    if (this.activeCount() >= MOCK_MAX_ACTIVE) return { kind: 'limit', max: MOCK_MAX_ACTIVE }
+    const spec = CATALOG.find((listed) => listed.symbol === symbol) ?? SPECS.find((seeded) => seeded.symbol === symbol)
+    if (!spec) return { kind: 'not-trading', symbol }
+    const entry: Entry = existing ?? { sim: new SymbolSim(spec, nowSeconds()), active: true, backfillQueuedAt: null }
+    entry.active = true
+    entry.backfillQueuedAt = Date.now()
+    this.entries.set(symbol, entry)
+    return { kind: 'created', symbol: this.describe(entry) }
+  }
+
+  /** Stops collecting; the history stays queryable. False when the symbol is not active. */
+  removeSymbol(raw: string): boolean {
+    const entry = this.entries.get(raw.trim().toUpperCase())
+    if (!entry?.active) return false
+    entry.active = false
+    return true
   }
 
   average(symbol: string): AveragePriceResponse | null {
@@ -341,7 +424,8 @@ class MarketSim {
     this.ensureRunning()
     const now = nowSeconds()
     const elapsed = now - this.startedAt
-    const rate = SPECS.reduce((sum, spec) => sum + spec.ticksPerSecond, 0)
+    const active = [...this.entries.values()].filter((entry) => entry.active)
+    const rate = active.reduce((sum, entry) => sum + entry.sim.spec.ticksPerSecond, 0)
     const reconnect = this.startedAt - 3 * 3600 - 12 * 60
     const spike = this.rand() < 0.03
     return {
@@ -354,7 +438,7 @@ class MarketSim {
       connectedSince: iso(reconnect),
       lastReconnect: iso(reconnect),
       nextRotation: iso(reconnect + 23 * 3600),
-      activeSymbols: SPECS.length,
+      activeSymbols: active.length,
       version: '0.1.0-dev',
     }
   }

@@ -2,8 +2,15 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { renderHook, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createQueryClient, useSma, useStats } from './queries'
-import type { Period, SmaResponse } from './types'
+import {
+  BACKFILL_POLL_MS,
+  createQueryClient,
+  symbolsRefetchInterval,
+  SYMBOLS_REFRESH_MS,
+  useSma,
+  useStats,
+} from './queries'
+import type { BackfillStatus, Period, SmaResponse, SymbolResponse } from './types'
 
 function sma(symbol: string, n: number): SmaResponse {
   return {
@@ -139,5 +146,27 @@ describe('useSma', () => {
     })
     expect(result.current.data).toBeUndefined()
     expect(result.current.isPending).toBe(true)
+  })
+})
+
+describe('symbolsRefetchInterval', () => {
+  const row = (backfillStatus: BackfillStatus, isActive = true): SymbolResponse => ({
+    symbol: 'SOLUSDT',
+    isActive,
+    latestPrice: null,
+    change24hPercent: null,
+    backfillStatus,
+  })
+
+  it('polls fast while an active symbol is backfilling, only when asked to', () => {
+    expect(symbolsRefetchInterval([row('Pending')], true)).toBe(BACKFILL_POLL_MS)
+    expect(symbolsRefetchInterval([row('Running')], true)).toBe(BACKFILL_POLL_MS)
+    expect(symbolsRefetchInterval([row('Running')], false)).toBe(SYMBOLS_REFRESH_MS)
+  })
+
+  it('settles back to the normal cadence once backfills finish', () => {
+    expect(symbolsRefetchInterval([row('Completed'), row('Failed'), row('NotRequested')], true)).toBe(SYMBOLS_REFRESH_MS)
+    expect(symbolsRefetchInterval([row('Running', false)], true)).toBe(SYMBOLS_REFRESH_MS)
+    expect(symbolsRefetchInterval(undefined, true)).toBe(SYMBOLS_REFRESH_MS)
   })
 })

@@ -6,6 +6,8 @@ interface SparklineProps {
   /** Accessible summary; the line itself is decorative. */
   label: string
   className?: string
+  /** For series that are not prices (e.g. throughput): one quiet colour instead of up/down. */
+  neutral?: boolean
 }
 
 const WIDTH = 120
@@ -16,7 +18,7 @@ const PAD = 3
  * A minimal trend line with a soft fill and an end dot. It colours itself by its own direction
  * (last value vs first), so it never claims a trend the data does not show.
  */
-export function Sparkline({ values, label, className }: SparklineProps) {
+export function Sparkline({ values, label, className, neutral = false }: SparklineProps) {
   const gradientId = useId()
 
   if (values.length < 2) {
@@ -45,7 +47,7 @@ export function Sparkline({ values, label, className }: SparklineProps) {
   const last = points.at(-1) ?? [WIDTH, HEIGHT / 2]
   const first = values[0] ?? 0
   const end = values.at(-1) ?? 0
-  const tone = end > first ? 'text-up' : end < first ? 'text-down' : 'text-ink-faint'
+  const tone = neutral ? 'text-ink-muted' : end > first ? 'text-up' : end < first ? 'text-down' : 'text-ink-faint'
 
   return (
     <span role="img" aria-label={label} className={cn('relative block', tone, className)}>

@@ -13,7 +13,7 @@ interface PillState {
 }
 
 /** Lag above this reads as a warning even while the feed is connected. */
-const SLOW_LAG_MS = 5_000
+export const SLOW_LAG_MS = 5_000
 
 function describe(hub: HubStatus, stats: SystemStatsResponse | null): PillState {
   if (hub === 'reconnecting') {

@@ -6,6 +6,7 @@ import { Skeleton } from '@/components/Skeleton'
 import { formatCount, formatDuration, formatPrice, formatUtc } from '@/lib/format'
 import { PERIOD_SECONDS, toUnixSeconds } from '@/lib/sma'
 import { N_HINT, parseN, startToIso, type SmaParams } from '@/lib/smaParams'
+import { control, fieldLabel, selectControl } from '@/lib/styles'
 import { cn } from '@/lib/utils'
 
 interface AnalyticsPanelProps {
@@ -103,9 +104,6 @@ function AverageFigures({ data }: { data: AveragePriceResponse }) {
   )
 }
 
-const fieldLabel = 'mb-1.5 block text-[0.75rem] font-medium text-ink-muted'
-const control =
-  'num h-9 w-full rounded-(--radius-control) border border-glass-border bg-glass-strong px-3 text-[0.875rem] text-ink transition-colors duration-150 hover:border-ink-faint/40'
 
 function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
   const ids = useId()
@@ -189,7 +187,7 @@ function SmaCard({ symbol, params, onParamsChange }: AnalyticsPanelProps) {
               const p = event.target.value
               if (isPeriod(p)) onParamsChange({ ...params, p })
             }}
-            className={cn(control, 'select-chevron cursor-pointer appearance-none pr-8')}
+            className={selectControl}
           >
             {PERIODS.map((period) => (
               <option key={period} value={period}>

@@ -42,6 +42,11 @@
   --color-down-soft: rgb(251 113 133 / 0.16);
   --color-sma-soft: rgb(192 132 252 / 0.14);
 
+  /* Raw response bodies in the API playground. Deliberately outside the market hues, so a
+     highlighted number never reads as "up", "down" or "SMA". */
+  --color-code-name: #8fd3ff;
+  --color-code-string: #e8d5a6;
+
   /* Glass */
   --color-glass: rgb(255 255 255 / 0.055);
   --color-glass-strong: rgb(255 255 255 / 0.09);
@@ -83,6 +88,9 @@
     --color-up-soft: rgb(13 107 99 / 0.1);
     --color-down-soft: rgb(190 18 60 / 0.1);
     --color-sma-soft: rgb(126 34 206 / 0.09);
+
+    --color-code-name: #0b5f8f;
+    --color-code-string: #7a5510;
 
     --color-glass: rgb(255 255 255 / 0.62);
     --color-glass-strong: rgb(255 255 255 / 0.82);
