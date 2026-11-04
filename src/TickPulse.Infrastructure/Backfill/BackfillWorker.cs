@@ -242,9 +242,11 @@ internal sealed partial class BackfillWorker(
         {
             var active = await symbols.ListActiveAsync(ct).ConfigureAwait(false);
             unfinished = [.. active.Where(s => s.BackfillStatus != BackfillStatus.Completed)];
+            // Conditional in the database: a symbol removed since the read is not left Pending, and a completion
+            // written meanwhile (another instance that led until just now) is not overwritten.
             foreach (var symbol in unfinished.Where(s => s.BackfillStatus != BackfillStatus.Pending))
             {
-                await symbols.SetBackfillStatusAsync(symbol.Id, BackfillStatus.Pending, symbol.BackfilledFromUtc, ct).ConfigureAwait(false);
+                await symbols.MarkPendingIfUnfinishedAsync(symbol.Id, ct).ConfigureAwait(false);
             }
         }
         catch (DbException ex)

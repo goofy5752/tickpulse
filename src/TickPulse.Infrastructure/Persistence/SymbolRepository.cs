@@ -141,6 +141,18 @@ public sealed class SymbolRepository(NpgsqlDataSource dataSource, TimeProvider c
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <inheritdoc />
+    public async Task<bool> MarkPendingIfUnfinishedAsync(int symbolId, CancellationToken ct)
+    {
+        await using var command = dataSource.CreateCommand(
+            "UPDATE symbols SET backfill_status = $2, updated_at = $3 WHERE id = $1 AND is_active AND backfill_status <> $4");
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = symbolId });
+        command.Parameters.Add(new NpgsqlParameter<short> { TypedValue = (short)BackfillStatus.Pending });
+        command.Parameters.Add(NowParameter());
+        command.Parameters.Add(new NpgsqlParameter<short> { TypedValue = (short)BackfillStatus.Completed });
+        return await command.ExecuteNonQueryAsync(ct) > 0;
+    }
+
     private static NpgsqlParameter<string> NameParameter(SymbolName name) =>
         new() { TypedValue = name.Value, NpgsqlDbType = NpgsqlDbType.Varchar };
 

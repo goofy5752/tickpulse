@@ -69,6 +69,28 @@ public sealed class SymbolRepositoryTests(TimescaleFixture db) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task MarkPendingIfUnfinished_OnlyAnActiveSymbolThatHasNotCompleted()
+    {
+        var repository = Repository();
+        var btc = (await repository.FindAsync(Name("BTCUSDT"), Ct)).ShouldNotBeNull();
+        var ada = (await repository.FindAsync(Name("ADAUSDT"), Ct)).ShouldNotBeNull();
+        var eth = (await repository.FindAsync(Name("ETHUSDT"), Ct)).ShouldNotBeNull();
+        var from = new DateTime(2025, 11, 1, 0, 0, 0, DateTimeKind.Utc);
+        await repository.SetBackfillStatusAsync(btc.Id, BackfillStatus.Failed, from, Ct);
+        await repository.SetBackfillStatusAsync(ada.Id, BackfillStatus.Completed, from, Ct); // e.g. by another instance meanwhile
+        (await repository.DeactivateAsync(Name("ETHUSDT"), Ct)).ShouldBeTrue(); // removed after the scan read it
+
+        (await repository.MarkPendingIfUnfinishedAsync(btc.Id, Ct)).ShouldBeTrue();
+        (await repository.MarkPendingIfUnfinishedAsync(ada.Id, Ct)).ShouldBeFalse();
+        (await repository.MarkPendingIfUnfinishedAsync(eth.Id, Ct)).ShouldBeFalse();
+
+        var stored = (await repository.ListAsync(Ct)).ToDictionary(s => s.Id);
+        (stored[btc.Id].BackfillStatus, stored[btc.Id].BackfilledFromUtc).ShouldBe((BackfillStatus.Pending, (DateTime?)from)); // kept
+        stored[ada.Id].BackfillStatus.ShouldBe(BackfillStatus.Completed);
+        stored[eth.Id].BackfillStatus.ShouldBe(BackfillStatus.NotRequested);
+    }
+
+    [Fact]
     public async Task AddOrReactivate_Active_ReturnsAlreadyActive()
     {
         var repository = Repository();
