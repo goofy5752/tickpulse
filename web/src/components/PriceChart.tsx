@@ -1,6 +1,7 @@
 import {
   AreaSeries,
   CandlestickSeries,
+  HistogramSeries,
   ColorType,
   createChart,
   CrosshairMode,
@@ -20,11 +21,11 @@ import {
 } from 'lightweight-charts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CandleResponse, IsoDateTime, LivePrice, Period, SmaResponse } from '@/api/types'
-import { setSeriesData, toCloseRow, type CandleRow } from '@/lib/chartSeries'
+import { setSeriesData, toCloseRow, type CandleRow, type VolumeRow } from '@/lib/chartSeries'
 import { fillGaps, windowIndexRange, type WindowRange } from '@/lib/chartData'
 import { createBucketHaptics } from '@/lib/haptics'
 import { mergeTrade, reconcileBar, type OhlcBar } from '@/lib/liveBar'
-import { formatPercent, formatPlainPrice, formatPrice, formatTickmarks, formatUtc, priceDecimals } from '@/lib/format'
+import { formatCompact, formatPercent, formatPlainPrice, formatPrice, formatTickmarks, formatUtc, priceDecimals, splitSymbol } from '@/lib/format'
 import { PERIOD_SECONDS, rollingSma, toUnixSeconds, withPoint } from '@/lib/sma'
 import { cn } from '@/lib/utils'
 
@@ -43,8 +44,10 @@ export interface PriceChartProps {
   /** The latest trade, merged into the last candle so the chart moves between refetches. */
   live?: LivePrice
   symbol: string
-  /** Fits the whole series into view whenever this changes (new symbol or period). */
+  /** Fits the series into view whenever this changes (new symbol, period or range). */
   fitKey: string
+  /** Shows only the newest this many buckets on a refit (a range preset); otherwise everything fits. */
+  visibleBars?: number
   className?: string
 }
 
@@ -227,12 +230,24 @@ interface Hover {
   sma: number | undefined
 }
 
-export function PriceChart({ candles, period, type = 'candles', sma, highlight, live, symbol, fitKey, className }: PriceChartProps) {
+export function PriceChart({
+  candles,
+  period,
+  type = 'candles',
+  sma,
+  highlight,
+  live,
+  symbol,
+  fitKey,
+  visibleBars,
+  className,
+}: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const smaSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
   const closeSeriesRef = useRef<ISeriesApi<'Area'> | null>(null)
+  const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   /** The series the window shade is attached to: the visible price series. */
   const shadeHostRef = useRef<ISeriesApi<'Candlestick'> | ISeriesApi<'Area'> | null>(null)
   /** Every drawn bar by time, so the readout works whichever price series is visible. */
@@ -248,6 +263,9 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
   const n = sma?.requestedDataPoints ?? 0
 
   const rows = useMemo(() => fillGaps(candles, periodSeconds), [candles, periodSeconds])
+  /** Base-asset volume per bucket start, for the bars and the readout. */
+  const volumes = useMemo(() => new Map(candles.map((c) => [toUnixSeconds(c.bucketStart), c.volume])), [candles])
+  const { base } = splitSymbol(symbol)
   // The bucket still open at the API's reference time has no final close yet, and the API leaves
   // it out of every window, so the line does too. The point for the window's last bucket
   // (windowEnd − p) is the API's own value, set even when that bucket had no candle, so the line
@@ -317,7 +335,8 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
         vertLines: { visible: false },
         horzLines: { color: palette.grid },
       },
-      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.14, bottom: 0.08 } },
+      // The bottom fifth is left to the volume bars.
+      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.14, bottom: 0.22 } },
       timeScale: { borderVisible: false, rightOffset: 3, barSpacing: 9, minBarSpacing: 1.5 },
       crosshair: {
         mode: CrosshairMode.Normal,
@@ -346,6 +365,14 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
       crosshairMarkerBorderWidth: 2,
       visible: false,
     })
+    // Volume on its own overlay scale at the foot of the pane, under the price.
+    const volumeSeries = chart.addSeries(HistogramSeries, {
+      priceScaleId: 'volume',
+      priceFormat: { type: 'volume' },
+      lastValueVisible: false,
+      priceLineVisible: false,
+    })
+    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } })
     const smaSeries = chart.addSeries(LineSeries, {
       color: palette.sma,
       lineWidth: 2,
@@ -360,6 +387,7 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
     chartRef.current = chart
     candleSeriesRef.current = candleSeries
     closeSeriesRef.current = closeSeries
+    volumeSeriesRef.current = volumeSeries
     shadeHostRef.current = candleSeries
     smaSeriesRef.current = smaSeries
     shadeRef.current = shade
@@ -420,6 +448,7 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
       chartRef.current = null
       candleSeriesRef.current = null
       closeSeriesRef.current = null
+      volumeSeriesRef.current = null
       shadeHostRef.current = null
       smaSeriesRef.current = null
       shadeRef.current = null
@@ -450,8 +479,9 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
     const candleSeries = candleSeriesRef.current
     const smaSeries = smaSeriesRef.current
     const closeSeries = closeSeriesRef.current
+    const volumeSeries = volumeSeriesRef.current
     const shade = shadeRef.current
-    if (!chart || !candleSeries || !smaSeries || !closeSeries || !shade) return
+    if (!chart || !candleSeries || !smaSeries || !closeSeries || !volumeSeries || !shade) return
 
     const palette = readPalette()
     const precision = priceDecimals(lastBar?.close ?? 1)
@@ -494,8 +524,18 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
       priceFormat,
     })
 
+    const volumeRows = rows.map((row): VolumeRow =>
+      row.candle
+        ? {
+            time: row.time as UTCTimestamp,
+            value: row.candle.volume,
+            color: volumeColor(palette, row.candle.close >= row.candle.open),
+          }
+        : { time: row.time as UTCTimestamp },
+    )
+
     // Never leaves the SMA series empty; see setSeriesData for the charting-library bug it avoids.
-    setSeriesData(candleSeries, smaSeries, bars, smaLine, closeSeries)
+    setSeriesData(candleSeries, smaSeries, bars, smaLine, closeSeries, { series: volumeSeries, rows: volumeRows })
 
     if (priceLineRef.current) smaSeries.removePriceLine(priceLineRef.current)
     priceLineRef.current = sma
@@ -515,30 +555,37 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
     // setData dropped the live-accumulated newest bar; put it back if it belongs to this series.
     const accumulated = latestRef.current
     if (accumulated?.key === liveKey && accumulated.bar && lastBar && accumulated.bar.time >= lastBar.time) {
-      safeUpdate(candleSeries, closeSeries, accumulated.bar)
+      safeUpdate(candleSeries, closeSeries, accumulated.bar, volumeSeries, volumes.get(accumulated.bar.time), palette)
       barsRef.current.set(accumulated.bar.time, toChartBar(accumulated.bar))
     }
 
     if (fittedKeyRef.current !== fitKey && rows.length > 0) {
-      chart.timeScale().fitContent()
+      if (visibleBars !== undefined && rows.length > visibleBars) {
+        // A range preset: the newest visibleBars buckets, with the same right margin fitContent keeps.
+        chart.timeScale().setVisibleLogicalRange({ from: rows.length - visibleBars - 0.5, to: rows.length - 1 + 3 })
+      } else {
+        chart.timeScale().fitContent()
+      }
       fittedKeyRef.current = fitKey
     }
-  }, [rows, candles, smaLine, sma, range, period, lastBar, fitKey, themeVersion, liveKey])
+  }, [rows, candles, smaLine, sma, range, period, lastBar, fitKey, visibleBars, volumes, themeVersion, liveKey])
 
   // Live trades move the newest candle between refetches.
   useEffect(() => {
     latestRef.current = { key: liveKey, bar: latest }
     const series = candleSeriesRef.current
     const closeSeries = closeSeriesRef.current
-    if (series && closeSeries && latest && latest !== lastBar) {
-      safeUpdate(series, closeSeries, latest)
+    const volumeSeries = volumeSeriesRef.current
+    if (series && closeSeries && volumeSeries && latest && latest !== lastBar) {
+      safeUpdate(series, closeSeries, latest, volumeSeries, volumes.get(latest.time), readPalette())
       barsRef.current.set(latest.time, toChartBar(latest))
     }
-  }, [latest, lastBar, liveKey])
+  }, [latest, lastBar, liveKey, volumes])
 
   const shown = hover?.bar ?? latest
   const shownSma = hover ? hover.sma : smaLine.at(-1)?.value
   const change = shown && shown.open !== 0 ? ((shown.close - shown.open) / shown.open) * 100 : undefined
+  const shownVolume = shown ? volumes.get(shown.time) : undefined
   const first = candles[0]
   const lastCandle = candles.at(-1)
 
@@ -567,6 +614,13 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
               {change !== undefined && (
                 <span className={cn(change > 0 && 'text-up', change < 0 && 'text-down')}>{formatPercent(change)}</span>
               )}
+              {shownVolume !== undefined && (
+                <span>
+                  <span className="text-ink-faint">Vol</span>{' '}
+                  <span className="text-ink">{formatCompact(shownVolume)}</span>
+                  {base && <span className="text-ink-faint"> {base}</span>}
+                </span>
+              )}
               {shownSma !== undefined && sma && (
                 <span>
                   <span className="text-sma">SMA {sma.requestedDataPoints}</span>{' '}
@@ -591,12 +645,33 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
   )
 }
 
-/** `update` throws for a bar older than the series' newest one; a stale trade must not crash the page. */
-function safeUpdate(series: ISeriesApi<'Candlestick'>, closeSeries: ISeriesApi<'Area'>, bar: OhlcBar) {
+/** A volume bar takes its candle's direction, softly, so it never competes with the price. */
+function volumeColor(palette: Palette, up: boolean): string {
+  return withAlpha(up ? palette.up : palette.down, 0.32)
+}
+
+/**
+ * `update` throws for a bar older than the series' newest one; a stale trade must not crash the page.
+ * Live trades carry no quantity, so a bucket's volume comes from the API; a bucket the trades opened
+ * gets a whitespace point until the next refetch, which keeps every series on the same time grid.
+ */
+function safeUpdate(
+  series: ISeriesApi<'Candlestick'>,
+  closeSeries: ISeriesApi<'Area'>,
+  bar: OhlcBar,
+  volumeSeries: ISeriesApi<'Histogram'>,
+  volume: number | undefined,
+  palette: Palette,
+) {
   try {
     const chartBar = toChartBar(bar)
     series.update(chartBar)
     closeSeries.update(toCloseRow(chartBar))
+    volumeSeries.update(
+      volume === undefined
+        ? { time: chartBar.time }
+        : { time: chartBar.time, value: volume, color: volumeColor(palette, chartBar.close >= chartBar.open) },
+    )
   } catch {
     // The next refetch redraws the series from the API anyway.
   }

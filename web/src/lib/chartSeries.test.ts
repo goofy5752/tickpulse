@@ -1,4 +1,4 @@
-import { AreaSeries, CandlestickSeries, createChart, LineSeries, type IChartApi, type UTCTimestamp } from 'lightweight-charts'
+import { AreaSeries, CandlestickSeries, createChart, HistogramSeries, LineSeries, type IChartApi, type UTCTimestamp } from 'lightweight-charts'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { TimeValue } from '@/lib/sma'
 import { setSeriesData, type CandleRow } from './chartSeries'
@@ -88,6 +88,24 @@ describe('setSeriesData', () => {
     expect(closes.data().filter((point) => 'value' in point)).toHaveLength(14)
     expect(closes.dataByIndex(13)).toBeNull()
     expect(closes.dataByIndex(26)).toMatchObject({ time: t(26), value: 2 })
+  })
+
+  it('SetSeriesData_Volume_FollowsTheCandles_GapsIncluded', () => {
+    const candles = chart.addSeries(CandlestickSeries)
+    const sma = chart.addSeries(LineSeries)
+    const closes = chart.addSeries(AreaSeries)
+    const volume = chart.addSeries(HistogramSeries, { priceScaleId: 'volume' })
+    const volumeRows = (rows: CandleRow[]) => rows.map((r) => ('close' in r ? { time: r.time, value: r.close * 10 } : { time: r.time }))
+
+    // The same fast switches, with volume bars alongside.
+    setSeriesData(candles, sma, full(), line([19, 20, 21]), closes, { series: volume, rows: volumeRows(full()) })
+    setSeriesData(candles, sma, gappy(), [], closes, { series: volume, rows: volumeRows(gappy()) })
+    setSeriesData(candles, sma, full(), line([19, 20, 21]), closes, { series: volume, rows: volumeRows(full()) })
+
+    for (let week = 0; week < WEEKS; week++) {
+      expect(volume.dataByIndex(week), 'volume week ' + String(week)).toMatchObject({ time: t(week), value: (101 + week) * 10 })
+      expect(candles.dataByIndex(week), 'candle week ' + String(week)).toMatchObject({ time: t(week) })
+    }
   })
 
   it('SetSeriesData_NoLine_LeavesTheSmaSeriesWithoutPoints', () => {

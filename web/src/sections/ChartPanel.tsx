@@ -9,6 +9,7 @@ import { formatPrice, splitSymbol } from '@/lib/format'
 import { SECTION_IDS } from '@/lib/links'
 import { toUnixSeconds } from '@/lib/sma'
 import { startToIso, type SmaParams } from '@/lib/smaParams'
+import { RANGES, type RangeKey } from '@/lib/chartRanges'
 import { cn } from '@/lib/utils'
 
 // The charting library is the largest dependency; load it after the first paint.
@@ -17,10 +18,11 @@ const PriceChart = lazy(() => import('@/components/PriceChart').then((m) => ({ d
 /** How far back each period's chart reaches by default (6 h, 24 h, 7 d, 1 y, 5 y). */
 const CANDLE_LIMITS: Record<Period, number> = { '1m': 360, '5m': 288, '30m': 336, '1d': 365, '1w': 260 }
 
-/** Enough candles for the default range, and for the SMA window plus some context before it. */
-function candleLimit(p: Period, n: number): number {
+
+/** Enough candles for the default range or the chosen one, and for the SMA window plus some context. */
+function candleLimit(p: Period, n: number, bars = 0): number {
   const forWindow = isValidSmaN(n) ? n + Math.ceil(n / 4) : 0
-  return Math.min(SMA_MAX_POINTS, Math.max(CANDLE_LIMITS[p], forWindow))
+  return Math.min(SMA_MAX_POINTS, Math.max(CANDLE_LIMITS[p], forWindow, bars))
 }
 
 /** The viewer's last choice of candles or line, remembered per browser. */
@@ -64,7 +66,10 @@ interface Settled {
 
 /** Memoised: hub ticks for other symbols do not reach it; only its own live price does. */
 export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsChange, live, fallbackPrice }: ChartPanelProps) {
-  const limit = candleLimit(params.p, params.n)
+  // A range stays chosen only while the period is still its own; changing p anywhere drops it.
+  const [rangeKey, setRangeKey] = useState<RangeKey | null>(null)
+  const range = RANGES.find((r) => r.key === rangeKey && r.p === params.p)
+  const limit = candleLimit(params.p, params.n, range?.bars)
   const candles = useCandles(symbol, params.p, limit)
   const sma = useSma(symbol, params.n, params.p, startToIso(params.s))
   const [chartType, setChartType] = useChartType()
@@ -127,6 +132,7 @@ export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsCha
           <PeriodPicker
             value={params.p}
             onChange={(p) => {
+              setRangeKey(null)
               onParamsChange({ ...params, p })
             }}
           />
@@ -144,7 +150,8 @@ export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsCha
               type={chartType}
               sma={smaForChart}
               live={stale ? undefined : live}
-              fitKey={`${view.symbol}|${view.period}`}
+              fitKey={`${view.symbol}|${view.period}|${range?.key ?? ''}`}
+              visibleBars={range?.p === view.period ? range.bars : undefined}
               className={cn('flex-1 transition-opacity duration-300', stale && 'opacity-45')}
             />
           </Suspense>
@@ -181,6 +188,19 @@ export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsCha
         )}
       </div>
 
+      <div className="mt-3 flex items-center gap-2">
+        <RangePicker
+          value={range?.key ?? null}
+          onChange={(key) => {
+            const next = RANGES.find((r) => r.key === key)
+            if (!next) return
+            setRangeKey(next.key)
+            if (next.p !== params.p) onParamsChange({ ...params, p: next.p })
+          }}
+        />
+        <InfoTip topic="chartRange" />
+      </div>
+
       <Legend
         period={view?.period ?? params.p}
         type={chartType}
@@ -214,6 +234,33 @@ function windowNote(view: Settled | null, sma: { windowStart: string; windowEnd:
   }
   if (start < toUnixSeconds(first.bucketStart)) return 'The SMA window starts before the first candle shown.'
   return null
+}
+
+function RangePicker({ value, onChange }: { value: RangeKey | null; onChange: (key: RangeKey) => void }) {
+  const name = useId()
+  return (
+    <fieldset className="flex rounded-full border border-glass-border bg-glass p-0.5">
+      <legend className="sr-only">Range</legend>
+      {RANGES.map((r) => (
+        <label key={r.key} className="relative" title={r.label}>
+          <input
+            type="radio"
+            name={name}
+            value={r.key}
+            checked={value === r.key}
+            onChange={() => {
+              onChange(r.key)
+            }}
+            aria-label={r.label}
+            className="peer sr-only"
+          />
+          <span className="num block cursor-pointer rounded-full px-2.5 py-1 text-[0.8125rem] text-ink-muted transition-colors duration-150 peer-checked:bg-glass-strong peer-checked:font-medium peer-checked:text-ink peer-checked:shadow-[inset_0_0_0_1px_var(--color-glass-border)] peer-focus-visible:outline-2 peer-focus-visible:outline-offset-1 peer-focus-visible:outline-sma hover:text-ink sm:px-3">
+            {r.key}
+          </span>
+        </label>
+      ))}
+    </fieldset>
+  )
 }
 
 function PeriodPicker({ value, onChange }: { value: Period; onChange: (p: Period) => void }) {
@@ -324,6 +371,13 @@ function Legend({
           )}
           {type === 'line' ? `${period} closes` : `${period} candles`}
           <InfoTip topic="chartPrice" className="-ml-0.5" />
+        </li>
+        <li className="flex items-center gap-2">
+          <span aria-hidden="true" className="flex items-end gap-[2px]">
+            <span className="h-1.5 w-[5px] rounded-[1px] bg-up/40" />
+            <span className="h-2.5 w-[5px] rounded-[1px] bg-down/40" />
+          </span>
+          Volume
         </li>
         {n !== undefined && (
           <>

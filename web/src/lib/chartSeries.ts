@@ -1,8 +1,9 @@
-import type { CandlestickData, ISeriesApi, LineData, UTCTimestamp, WhitespaceData } from 'lightweight-charts'
+import type { CandlestickData, HistogramData, ISeriesApi, LineData, UTCTimestamp, WhitespaceData } from 'lightweight-charts'
 import type { TimeValue } from '@/lib/sma'
 
 export type CandleRow = CandlestickData<UTCTimestamp> | WhitespaceData<UTCTimestamp>
 export type CloseRow = LineData<UTCTimestamp> | WhitespaceData<UTCTimestamp>
+export type VolumeRow = HistogramData<UTCTimestamp> | WhitespaceData<UTCTimestamp>
 
 /** A candle as a point of the line view: its close; a gap stays a gap. */
 export function toCloseRow(row: CandleRow): CloseRow {
@@ -27,8 +28,11 @@ export function setSeriesData(
   candles: CandleRow[],
   line: readonly TimeValue[],
   closeSeries?: ISeriesApi<'Area'>,
+  volume?: { series: ISeriesApi<'Histogram'>; rows: VolumeRow[] },
 ): void {
   candleSeries.setData(candles)
+  // Volume bars under the price, on the same grid: a gap is whitespace here too.
+  volume?.series.setData(volume.rows)
   // The line view: the same time grid, so all series always share every time point.
   closeSeries?.setData(candles.map(toCloseRow))
   const first = candles[0]
