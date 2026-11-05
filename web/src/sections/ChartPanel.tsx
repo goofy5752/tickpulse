@@ -49,6 +49,31 @@ function useChartType() {
   return [type, choose] as const
 }
 
+/** Simple shows quick ranges under the chart; Pro lets the viewer pick the candle size. Remembered per browser. */
+export type ChartMode = 'simple' | 'pro'
+export const CHART_MODE_STORAGE_KEY = 'tickpulse.chartMode'
+
+function storedChartMode(): ChartMode {
+  try {
+    return localStorage.getItem(CHART_MODE_STORAGE_KEY) === 'pro' ? 'pro' : 'simple'
+  } catch {
+    return 'simple'
+  }
+}
+
+function useChartMode() {
+  const [mode, setMode] = useState<ChartMode>(storedChartMode)
+  const choose = useCallback((next: ChartMode) => {
+    setMode(next)
+    try {
+      localStorage.setItem(CHART_MODE_STORAGE_KEY, next)
+    } catch {
+      // Storage can be unavailable (private mode, blocked site data); the choice still applies.
+    }
+  }, [])
+  return [mode, choose] as const
+}
+
 interface ChartPanelProps {
   symbol: string | undefined
   params: SmaParams
@@ -67,8 +92,10 @@ interface Settled {
 /** Memoised: hub ticks for other symbols do not reach it; only its own live price does. */
 export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsChange, live, fallbackPrice }: ChartPanelProps) {
   // A range stays chosen only while the period is still its own; changing p anywhere drops it.
-  const [rangeKey, setRangeKey] = useState<RangeKey | null>(null)
-  const range = RANGES.find((r) => r.key === rangeKey && r.p === params.p)
+  // Simple mode opens on 6M, the view the chart had before ranges existed (daily candles).
+  const [mode, setMode] = useChartMode()
+  const [rangeKey, setRangeKey] = useState<RangeKey | null>('6M')
+  const range = mode === 'simple' ? RANGES.find((r) => r.key === rangeKey && r.p === params.p) : undefined
   const limit = candleLimit(params.p, params.n, range?.bars)
   const candles = useCandles(symbol, params.p, limit)
   const sma = useSma(symbol, params.n, params.p, startToIso(params.s))
@@ -129,13 +156,16 @@ export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsCha
         </div>
         <div className="flex items-center gap-2">
           <ChartTypeToggle value={chartType} onChange={setChartType} />
-          <PeriodPicker
-            value={params.p}
-            onChange={(p) => {
-              setRangeKey(null)
-              onParamsChange({ ...params, p })
-            }}
-          />
+          <ModeToggle value={mode} onChange={setMode} />
+          {mode === 'pro' && (
+            <PeriodPicker
+              value={params.p}
+              onChange={(p) => {
+                setRangeKey(null)
+                onParamsChange({ ...params, p })
+              }}
+            />
+          )}
           <InfoTip topic="chartPeriod" />
         </div>
       </div>
@@ -188,18 +218,20 @@ export const ChartPanel = memo(function ChartPanel({ symbol, params, onParamsCha
         )}
       </div>
 
-      <div className="mt-3 flex items-center gap-2">
-        <RangePicker
-          value={range?.key ?? null}
-          onChange={(key) => {
-            const next = RANGES.find((r) => r.key === key)
-            if (!next) return
-            setRangeKey(next.key)
-            if (next.p !== params.p) onParamsChange({ ...params, p: next.p })
-          }}
-        />
-        <InfoTip topic="chartRange" />
-      </div>
+      {mode === 'simple' && (
+        <div className="mt-3 flex items-center gap-2">
+          <RangePicker
+            value={range?.key ?? null}
+            onChange={(key) => {
+              const next = RANGES.find((r) => r.key === key)
+              if (!next) return
+              setRangeKey(next.key)
+              if (next.p !== params.p) onParamsChange({ ...params, p: next.p })
+            }}
+          />
+          <InfoTip topic="chartRange" />
+        </div>
+      )}
 
       <Legend
         period={view?.period ?? params.p}
@@ -234,6 +266,36 @@ function windowNote(view: Settled | null, sma: { windowStart: string; windowEnd:
   }
   if (start < toUnixSeconds(first.bucketStart)) return 'The SMA window starts before the first candle shown.'
   return null
+}
+
+function ModeToggle({ value, onChange }: { value: ChartMode; onChange: (mode: ChartMode) => void }) {
+  const name = useId()
+  const options: readonly { value: ChartMode; label: string; title: string }[] = [
+    { value: 'simple', label: 'Simple', title: 'Quick ranges under the chart' },
+    { value: 'pro', label: 'Pro', title: 'Pick the candle size yourself' },
+  ]
+  return (
+    <fieldset className="flex rounded-full border border-glass-border bg-glass p-0.5">
+      <legend className="sr-only">Chart mode</legend>
+      {options.map((option) => (
+        <label key={option.value} className="relative" title={option.title}>
+          <input
+            type="radio"
+            name={name}
+            value={option.value}
+            checked={value === option.value}
+            onChange={() => {
+              onChange(option.value)
+            }}
+            className="peer sr-only"
+          />
+          <span className="block cursor-pointer rounded-full px-2.5 py-1 text-[0.75rem] font-medium text-ink-muted transition-colors duration-150 peer-checked:bg-glass-strong peer-checked:text-ink peer-checked:shadow-[inset_0_0_0_1px_var(--color-glass-border)] peer-focus-visible:outline-2 peer-focus-visible:outline-offset-1 peer-focus-visible:outline-sma hover:text-ink">
+            {option.label}
+          </span>
+        </label>
+      ))}
+    </fieldset>
+  )
 }
 
 function RangePicker({ value, onChange }: { value: RangeKey | null; onChange: (key: RangeKey) => void }) {

@@ -5,7 +5,6 @@ import type { Period } from '@/api/types'
  * Each sets the period (and with it the SMA panel's p) and how many of the newest buckets fill the view.
  */
 export const RANGES = [
-  { key: '1H', label: 'One hour of 1-minute candles', p: '1m', bars: 60 },
   { key: '1D', label: 'One day of 5-minute candles', p: '5m', bars: 288 },
   { key: '1W', label: 'One week of 30-minute candles', p: '30m', bars: 336 },
   { key: '1M', label: 'One month of daily candles', p: '1d', bars: 31 },

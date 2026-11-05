@@ -6,7 +6,7 @@ import { createQueryClient } from '@/api/queries'
 import type { CandleResponse, Period, SmaResponse } from '@/api/types'
 import type { PriceChartProps } from '@/components/PriceChart'
 import { DEFAULT_SMA_PARAMS, type SmaParams } from '@/lib/smaParams'
-import { CHART_TYPE_STORAGE_KEY, ChartPanel } from './ChartPanel'
+import { CHART_MODE_STORAGE_KEY, CHART_TYPE_STORAGE_KEY, ChartPanel } from './ChartPanel'
 
 // The real chart needs a canvas; a stub shows what the panel hands it and counts mounts.
 const chart = vi.hoisted(() => ({ mounts: 0 }))
@@ -140,7 +140,9 @@ describe('ChartPanel', () => {
     const onParamsChange = vi.fn()
     setup({ symbol: 'BTCUSDT', params: daily }, onParamsChange)
     await chartFor('BTCUSDT', '1d')
-    expect(screen.getByTestId('chart').dataset.visibleBars).toBe('')
+    // Simple mode is the default and opens on 6M.
+    expect(screen.getByTestId('chart').dataset.visibleBars).toBe('183')
+    expect(screen.queryByRole('radio', { name: '1w' })).toBeNull()
 
     fireEvent.click(screen.getByRole('radio', { name: 'Three months of daily candles' }))
 
@@ -160,16 +162,18 @@ describe('ChartPanel', () => {
     expect(onParamsChange).toHaveBeenCalledWith({ ...daily, p: '30m' })
   })
 
-  it('ChartPanel_PickingAPeriod_ClearsTheRange', async () => {
+  it('ChartPanel_ProMode_ShowsCandleSizes_InsteadOfRanges_AndIsRemembered', async () => {
     const onParamsChange = vi.fn()
     setup({ symbol: 'BTCUSDT', params: daily }, onParamsChange)
     await chartFor('BTCUSDT', '1d')
 
-    fireEvent.click(screen.getByRole('radio', { name: 'Six months of daily candles' }))
-    fireEvent.click(screen.getByRole('radio', { name: '1w' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'Pro' }))
 
-    expect(screen.getByRole<HTMLInputElement>('radio', { name: 'Six months of daily candles' }).checked).toBe(false)
+    expect(screen.queryByRole('radio', { name: 'Six months of daily candles' })).toBeNull()
     expect(screen.getByTestId('chart').dataset.visibleBars).toBe('')
+    fireEvent.click(screen.getByRole('radio', { name: '1w' }))
+    expect(onParamsChange).toHaveBeenCalledWith({ ...daily, p: '1w' })
+    expect(localStorage.getItem(CHART_MODE_STORAGE_KEY)).toBe('pro')
   })
 
   it('ChartPanel_ChartType_SwitchesToLine_AndIsRemembered', async () => {

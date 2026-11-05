@@ -84,6 +84,7 @@ export const HELP = {
     title: 'Period',
     summary: 'The width of one candle, or of one point in the line view. It also sets the SMA period p beside the chart.',
     details: [
+      'Simple mode (the default) shows quick ranges under the chart, each with a candle size that suits it. Pro mode shows these candle sizes to pick yourself.',
       'Candles show the first, highest, lowest and last price of each bucket; the line joins the last prices (closes). Switch between them with the icons on the left.',
       'Buckets are aligned to UTC, so every client sees the same candles.',
     ],
@@ -116,13 +117,12 @@ export const HELP = {
     title: 'Range',
     summary: 'How far back the chart looks. Each range picks a candle size that suits it, and sets the SMA period p too.',
     items: [
-      { term: '1H', mono: true, text: 'The last hour, in 1-minute candles.' },
       { term: '1D', mono: true, text: 'The last day, in 5-minute candles.' },
       { term: '1W', mono: true, text: 'The last week, in 30-minute candles.' },
       { term: '1M · 3M · 6M', mono: true, text: 'The last one, three or six months, in daily candles.' },
     ],
     details: [
-      'Pick a candle size above instead to set it yourself; the range is then cleared. Scroll or drag the chart to look further back.',
+      'Switch to Pro to pick the candle size yourself. Changing the period in the SMA panel clears the range too. Scroll or drag the chart to look further back.',
     ],
   },
 
