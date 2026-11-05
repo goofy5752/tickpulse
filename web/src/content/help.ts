@@ -84,6 +84,7 @@ export const HELP = {
     title: 'Period',
     summary: 'The width of one candle, or of one point in the line view. It also sets the SMA period p beside the chart.',
     details: [
+      'Simple mode (the default) shows quick ranges under the chart, each with a candle size that suits it. Pro mode shows these candle sizes to pick yourself.',
       'Candles show the first, highest, lowest and last price of each bucket; the line joins the last prices (closes). Switch between them with the icons on the left.',
       'Buckets are aligned to UTC, so every client sees the same candles.',
     ],
@@ -104,11 +105,25 @@ export const HELP = {
       { term: 'Candle', text: 'One per bucket. The body runs from the first to the last trade price; the thin wicks reach the highest and lowest.' },
       { term: 'Teal / rose', text: 'Teal when the bucket closed above its open, rose when it closed below.' },
       { term: 'Line', text: 'Joins the closes, the last price of each bucket, with a soft fill. Teal when the range shown rose overall, rose when it fell.' },
+      { term: 'Volume', text: 'The faint bars at the foot: how much of the coin traded in each bucket, coloured like its candle. Big moves on big volume carry more weight.' },
     ],
     details: [
       'The newest bucket is still open: its candle, or the end of the line, moves with live trades. A gap is a bucket without trades. History from before collection began comes from 1-minute klines loaded from Binance.',
     ],
     example: '1d: one candle (or one point) per day, 00:00 to 00:00 UTC',
+  },
+
+  chartRange: {
+    title: 'Range',
+    summary: 'How far back the chart looks. Each range picks a candle size that suits it, and sets the SMA period p too.',
+    items: [
+      { term: '1D', mono: true, text: 'The last day, in 5-minute candles.' },
+      { term: '1W', mono: true, text: 'The last week, in 30-minute candles.' },
+      { term: '1M · 3M · 6M', mono: true, text: 'The last one, three or six months, in daily candles.' },
+    ],
+    details: [
+      'Switch to Pro to pick the candle size yourself. Changing the period in the SMA panel clears the range too. Scroll or drag the chart to look further back.',
+    ],
   },
 
   chartSma: {

@@ -126,7 +126,7 @@ async function expectTips(keys: readonly HelpKey[]) {
 const SECTIONS: Record<string, readonly HelpKey[]> = {
   nav: ['navStatus'],
   tiles: ['tilesSection', 'tileChange'],
-  chart: ['chartSection', 'chartPeriod', 'chartPrice', 'chartSma', 'chartWindow'],
+  chart: ['chartSection', 'chartPeriod', 'chartRange', 'chartPrice', 'chartSma', 'chartWindow'],
   analytics: [
     'avgPrice',
     'avgCoverage',

@@ -9,7 +9,7 @@ This record has two kinds of entries:
 
 Timestamps come from the session transcript and are in UTC.
 
-**At a glance:** 55 owner messages (two sent twice, so 53 entries); more than 100 agent dispatches across implementation, verification, reviews and scoped re-reviews; dozens of fix-loop messages sent back to running implementers.
+**At a glance:** 56 owner messages (two sent twice, so 54 entries); more than 100 agent dispatches across implementation, verification, reviews and scoped re-reviews; dozens of fix-loop messages sent back to running implementers.
 
 ---
 
@@ -765,6 +765,35 @@ Reproduce and verify:
 
 - **Intent:** Make scrubbing the chart on a phone feel tactile, one tick per candle.
 - **Outcome:** One light tick each time a finger moves the crosshair onto another bucket. Mouse moves never tick, and the same bucket never ticks twice. Android uses the Vibration API; iOS Safari has none, so a hidden native switch gives a best-effort haptic on iOS 18+. A test covers the owner's own example, three buckets giving three ticks (PR #39).
+
+### 8.34 — 2026-11-05 08:13 UTC
+
+> I want to add two improvements to the chart.
+>
+> **1. Volume indicator**
+>
+> Add small vertical bars under the candles showing the volume traded in each candle, as in TradingView and Trading212.
+> - Green for bullish candles and red for bearish ones.
+> - The volume must be aggregated from the quantities of the real trades in each bucket.
+> - Place it compactly under the main chart, in sync with it when zooming and panning.
+> - We already have the trade quantities, so use the existing data and logic.
+>
+> **2. Quick chart periods**
+>
+> Add quick periods for the chart, as in Revolut and Trading212: 1D · 1W · 1M · 3M · 6M.
+> - Choosing a period picks a suitable candle timeframe automatically. An example mapping: 1D → 5m, 1W → 30m, 1M → 1h, 3M → 4h, 6M → 1d.
+> - The current timeframe options (1m, 5m, 15m, 30m, 1h and so on) stay available in a separate Pro mode. Simple mode is the default.
+> - Changing the period loads the matching history and updates the chart.
+>
+> Use the existing chart architecture and components. Don't change working functionality unnecessarily, and no needless refactoring.
+
+- **Intent:** Bring two staples of trading apps to the chart: volume, and range presets with a Simple/Pro split.
+- **Outcome:**
+  - **Volume:** bars at the foot of the chart, coloured like their candle, from the candles' summed trade quantities, on the same time scale as the price. The readout shows the volume of the candle under the cursor.
+  - **Simple mode (the default):** 1D · 1W · 1M · 3M · 6M under the chart. Each range shows its newest buckets and also sets the SMA period.
+  - **Mapping:** the API offers 1m, 5m, 30m, 1d and 1w buckets, so 1D → 5m, 1W → 30m, and 1M, 3M and 6M → 1d.
+  - **Pro mode:** the candle-size picker. Both mode and chart type are remembered per browser.
+  - **Tests:** cover both, including one against the real charting library that keeps the volume bars on the candles' time grid.
 
 ---
 

@@ -6,7 +6,7 @@ import { createQueryClient } from '@/api/queries'
 import type { CandleResponse, Period, SmaResponse } from '@/api/types'
 import type { PriceChartProps } from '@/components/PriceChart'
 import { DEFAULT_SMA_PARAMS, type SmaParams } from '@/lib/smaParams'
-import { CHART_TYPE_STORAGE_KEY, ChartPanel } from './ChartPanel'
+import { CHART_MODE_STORAGE_KEY, CHART_TYPE_STORAGE_KEY, ChartPanel } from './ChartPanel'
 
 // The real chart needs a canvas; a stub shows what the panel hands it and counts mounts.
 const chart = vi.hoisted(() => ({ mounts: 0 }))
@@ -21,6 +21,7 @@ vi.mock('@/components/PriceChart', () => ({
         data-symbol={props.symbol}
         data-period={props.period}
         data-type={props.type ?? 'candles'}
+        data-visible-bars={props.visibleBars ?? ''}
         data-sma={props.sma ? String(props.sma.requestedDataPoints) : ''}
         className={props.className}
       />
@@ -105,11 +106,11 @@ afterEach(() => {
   localStorage.clear()
 })
 
-function setup(initial: { symbol: string; params: SmaParams }) {
+function setup(initial: { symbol: string; params: SmaParams }, onParamsChange: (next: SmaParams) => void = vi.fn()) {
   const client: QueryClient = createQueryClient()
   const panel = (symbol: string, params: SmaParams): ReactNode => (
     <QueryClientProvider client={client}>
-      <ChartPanel symbol={symbol} params={params} onParamsChange={vi.fn()} live={undefined} fallbackPrice={null} />
+      <ChartPanel symbol={symbol} params={params} onParamsChange={onParamsChange} live={undefined} fallbackPrice={null} />
     </QueryClientProvider>
   )
   const view = render(panel(initial.symbol, initial.params))
@@ -135,6 +136,46 @@ function candleRequests(key: string): number {
 }
 
 describe('ChartPanel', () => {
+  it('ChartPanel_RangeOnTheSamePeriod_ShowsItsNewestBuckets', async () => {
+    const onParamsChange = vi.fn()
+    setup({ symbol: 'BTCUSDT', params: daily }, onParamsChange)
+    await chartFor('BTCUSDT', '1d')
+    // Simple mode is the default and opens on 6M.
+    expect(screen.getByTestId('chart').dataset.visibleBars).toBe('183')
+    expect(screen.queryByRole('radio', { name: '1w' })).toBeNull()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Three months of daily candles' }))
+
+    // 3M is daily already: no period change, just the newest 92 days in view.
+    expect(onParamsChange).not.toHaveBeenCalled()
+    expect(screen.getByTestId('chart').dataset.visibleBars).toBe('92')
+    expect(screen.getByRole<HTMLInputElement>('radio', { name: 'Three months of daily candles' }).checked).toBe(true)
+  })
+
+  it('ChartPanel_RangeOnAnotherPeriod_SetsThePeriod', async () => {
+    const onParamsChange = vi.fn()
+    setup({ symbol: 'BTCUSDT', params: daily }, onParamsChange)
+    await chartFor('BTCUSDT', '1d')
+
+    fireEvent.click(screen.getByRole('radio', { name: 'One week of 30-minute candles' }))
+
+    expect(onParamsChange).toHaveBeenCalledWith({ ...daily, p: '30m' })
+  })
+
+  it('ChartPanel_ProMode_ShowsCandleSizes_InsteadOfRanges_AndIsRemembered', async () => {
+    const onParamsChange = vi.fn()
+    setup({ symbol: 'BTCUSDT', params: daily }, onParamsChange)
+    await chartFor('BTCUSDT', '1d')
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Pro' }))
+
+    expect(screen.queryByRole('radio', { name: 'Six months of daily candles' })).toBeNull()
+    expect(screen.getByTestId('chart').dataset.visibleBars).toBe('')
+    fireEvent.click(screen.getByRole('radio', { name: '1w' }))
+    expect(onParamsChange).toHaveBeenCalledWith({ ...daily, p: '1w' })
+    expect(localStorage.getItem(CHART_MODE_STORAGE_KEY)).toBe('pro')
+  })
+
   it('ChartPanel_ChartType_SwitchesToLine_AndIsRemembered', async () => {
     setup({ symbol: 'BTCUSDT', params: daily })
     const element = await chartFor('BTCUSDT', '1d')
