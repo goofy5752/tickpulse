@@ -4,7 +4,6 @@ import { createBucketHaptics, HAPTIC_TICK_MS, hapticTick } from './haptics'
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
-  for (const el of document.querySelectorAll('[data-haptics]')) el.remove()
 })
 
 describe('createBucketHaptics', () => {
@@ -51,23 +50,20 @@ describe('hapticTick', () => {
     expect(vibrate).toHaveBeenCalledWith(HAPTIC_TICK_MS)
   })
 
-  it('HapticTick_iPhoneWithoutVibration_TogglesAHiddenSwitch', () => {
+  it('HapticTick_iPhone_DoesNothing', () => {
     vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', maxTouchPoints: 5 })
-    const click = vi.spyOn(HTMLElement.prototype, 'click')
 
-    hapticTick()
-
-    const label = document.querySelector<HTMLLabelElement>('label[data-haptics]')
-    expect(label?.querySelector('input[switch]')).toBeTruthy()
-    expect(label?.getAttribute('aria-hidden')).toBe('true')
-    expect(click).toHaveBeenCalledTimes(1)
+    expect(() => {
+      hapticTick()
+    }).not.toThrow()
+    expect(document.body.children).toHaveLength(0)
   })
 
   it('HapticTick_DesktopWithoutVibration_DoesNothing', () => {
     vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Windows NT 10.0)', maxTouchPoints: 0 })
 
-    hapticTick()
-
-    expect(document.querySelector('[data-haptics]')).toBeNull()
+    expect(() => {
+      hapticTick()
+    }).not.toThrow()
   })
 })

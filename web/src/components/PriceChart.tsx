@@ -394,8 +394,8 @@ export function PriceChart({
     priceLineRef.current = null
     fittedKeyRef.current = null
 
-    // A light haptic tick each time a finger moves the crosshair onto another bucket (Android; iOS where
-    // Safari allows). The chart's own events do not say what moved it, so the last pointer type is kept.
+    // A light haptic tick each time a finger moves the crosshair onto another bucket (Android; Safari on
+    // iOS has no Vibration API). The chart's own events do not say what moved it, so the last pointer type is kept.
     let pointerType = ''
     const notePointer = (event: PointerEvent) => {
       pointerType = event.pointerType
