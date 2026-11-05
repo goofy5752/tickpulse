@@ -4,12 +4,12 @@ TickPulse was built with Claude Code (Anthropic). One session, the controller, a
 
 This record has two kinds of entries:
 
-- **Owner prompts.** Some of the owner's prompts were written in Bulgarian. Here they are all given in English; the kick-off (1.1) states the stack, hosting and working method in full. Every owner message from the session is listed, in order. Where a message carried context unrelated to the product, that part is left out and marked `[context omitted]`. References to unrelated projects or infrastructure are marked `[omitted]`. A message that is only partly translated says so.
+- **Owner prompts.** Some of the owner's prompts were written in Bulgarian. Here they are all given in English; the kick-off (1.1) states the stack, hosting and working method in full. Every owner message that shaped the product is listed, in order; questions that only asked how a part of it works are left out. Where a message carried context unrelated to the product, that part is left out and marked `[context omitted]`. References to unrelated projects or infrastructure are marked `[omitted]`. A message that is only partly translated says so.
 - **Agent prompts.** These are the controller's dispatch prompts to subagents, quoted verbatim as excerpts. `[…]` marks a cut.
 
 Timestamps come from the session transcript and are in UTC.
 
-**At a glance:** 51 owner messages (two sent twice, so 49 entries); more than 100 agent dispatches across implementation, verification, reviews and scoped re-reviews; dozens of fix-loop messages sent back to running implementers.
+**At a glance:** 55 owner messages (two sent twice, so 53 entries); more than 100 agent dispatches across implementation, verification, reviews and scoped re-reviews; dozens of fix-loop messages sent back to running implementers.
 
 ---
 
@@ -735,6 +735,36 @@ Reproduce and verify:
 
 - **Intent:** Use the production admin features.
 - **Outcome:** The key stays out of the chat. The controller pointed to the owner's local secrets file and gave a command that copies it to the clipboard.
+
+### 8.30 — 2026-11-04 22:00 UTC
+
+> Let's add line charts as well to the tooltip where we explain candles.
+
+- **Intent:** Have the chart's help cover the line view too, not only candles.
+- **Outcome:** A "Candles and line" tip on the chart legend explains what a candle shows (body, wicks, teal/rose), what the line joins and how its colour is chosen.
+
+### 8.31 — 2026-11-04 22:04 UTC
+
+> [Screenshot of the period tooltip] I still don't see it here. Where did you put it?
+
+- **Intent:** Find the explanation where the owner expected it, next to the period buttons.
+- **Outcome:** The period tip, now titled "Period", also covers the line view: one candle or one line point per bucket, and how to switch between them. The legend tip stays as the longer explanation.
+
+### 8.32 — 2026-11-04 22:07 UTC
+
+> Open a PR for it as well. [context omitted]
+
+*Translated with one omission.*
+
+- **Intent:** Ship the tooltip change.
+- **Outcome:** PR #37, merged after green CI and deployed.
+
+### 8.33 — 2026-11-05 07:16 UTC
+
+> I want to add a feature: on a phone, when you move along the chart with your finger, every change of price or time bucket gives a light vibration, as in Revolut. For example, on a 30-minute chart, moving across 1:30, 2:00 and 2:30 should give three haptic taps.
+
+- **Intent:** Make scrubbing the chart on a phone feel tactile, one tick per candle.
+- **Outcome:** One light tick each time a finger moves the crosshair onto another bucket. Mouse moves never tick, and the same bucket never ticks twice. Android uses the Vibration API; iOS Safari has none, so a hidden native switch gives a best-effort haptic on iOS 18+. A test covers the owner's own example, three buckets giving three ticks (PR #39).
 
 ---
 
