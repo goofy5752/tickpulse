@@ -22,6 +22,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CandleResponse, IsoDateTime, LivePrice, Period, SmaResponse } from '@/api/types'
 import { setSeriesData, toCloseRow, type CandleRow } from '@/lib/chartSeries'
 import { fillGaps, windowIndexRange, type WindowRange } from '@/lib/chartData'
+import { createBucketHaptics } from '@/lib/haptics'
 import { mergeTrade, reconcileBar, type OhlcBar } from '@/lib/liveBar'
 import { formatPercent, formatPlainPrice, formatPrice, formatTickmarks, formatUtc, priceDecimals } from '@/lib/format'
 import { PERIOD_SECONDS, rollingSma, toUnixSeconds, withPoint } from '@/lib/sma'
@@ -365,7 +366,18 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
     priceLineRef.current = null
     fittedKeyRef.current = null
 
+    // A light haptic tick each time a finger moves the crosshair onto another bucket (Android; iOS where
+    // Safari allows). The chart's own events do not say what moved it, so the last pointer type is kept.
+    let pointerType = ''
+    const notePointer = (event: PointerEvent) => {
+      pointerType = event.pointerType
+    }
+    container.addEventListener('pointerdown', notePointer, { capture: true, passive: true })
+    container.addEventListener('pointermove', notePointer, { capture: true, passive: true })
+    const bucketHaptics = createBucketHaptics()
+
     const onCrosshair = (param: MouseEventParams) => {
+      bucketHaptics(param.time === undefined ? undefined : (param.time as number), pointerType === 'touch' || pointerType === 'pen')
       // A hidden series may be left out of seriesData; the bar map covers the line view.
       const fromSeries = param.seriesData.get(candleSeries)
       const bar =
@@ -401,6 +413,8 @@ export function PriceChart({ candles, period, type = 'candles', sma, highlight, 
     return () => {
       themeWatch.disconnect()
       resize.disconnect()
+      container.removeEventListener('pointerdown', notePointer, { capture: true })
+      container.removeEventListener('pointermove', notePointer, { capture: true })
       chart.unsubscribeCrosshairMove(onCrosshair)
       chart.remove()
       chartRef.current = null
