@@ -764,7 +764,7 @@ Reproduce and verify:
 > I want to add a feature: on a phone, when you move along the chart with your finger, every change of price or time bucket gives a light vibration, as in Revolut. For example, on a 30-minute chart, moving across 1:30, 2:00 and 2:30 should give three haptic taps.
 
 - **Intent:** Make scrubbing the chart on a phone feel tactile, one tick per candle.
-- **Outcome:** One light tick each time a finger moves the crosshair onto another bucket. Mouse moves never tick, and the same bucket never ticks twice. Android uses the Vibration API; iOS Safari has none, so a hidden native switch gives a best-effort haptic on iOS 18+. A test covers the owner's own example, three buckets giving three ticks (PR #39).
+- **Outcome:** One light tick each time a finger moves the crosshair onto another bucket. Mouse moves never tick, and the same bucket never ticks twice. It works on Android through the Vibration API. Safari on iOS has no Vibration API and gives web pages no haptics while a finger slides, so iPhones get none; a hidden-switch workaround was tried there and removed. A test covers the owner's own example, three buckets giving three ticks (PR #39).
 
 ### 8.34 — 2026-11-05 08:13 UTC
 
