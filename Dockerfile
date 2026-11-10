@@ -48,7 +48,7 @@ RUN dotnet publish src/TickPulse.Api/TickPulse.Api.csproj -c Release --no-restor
 
 # ---------- api: the deployable host ----------
 # Alpine has no ICU, which is fine: every project sets InvariantGlobalization.
-FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine@sha256:254fe017495996d3abcc487ffacdcce2b73affb380d3af87af12c8dff41fe0b0 AS api
+FROM mcr.microsoft.com/dotnet/aspnet:11.0-alpine@sha256:d39b72ad1534fa0faf52b488bffb0762df7ba269d120f0338713d4dda2a41bf5 AS api
 # No Kerberos/GSSAPI libraries (krb5-libs): TickPulse forces Npgsql's GSS encryption off (NpgsqlConnectionPolicy), so
 # nothing loads libgssapi_krb5, and the native GSS negotiation that crashed this musl image under load never runs.
 WORKDIR /app
