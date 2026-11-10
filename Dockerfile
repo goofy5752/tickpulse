@@ -63,7 +63,7 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
 ENTRYPOINT ["dotnet", "TickPulse.Api.dll"]
 
 # ---------- cli: the console client ----------
-FROM mcr.microsoft.com/dotnet/runtime:10.0-alpine@sha256:54d48f739ebffdef82388056d420af37ed39c722b8d5ee5dedca6878537c2737 AS cli
+FROM mcr.microsoft.com/dotnet/runtime:11.0-alpine@sha256:f79ce0f256d44492ac098aa861836d1a71b3b178019d7357cc6d1437f3ad78d1 AS cli
 WORKDIR /app
 ENV DOTNET_NOLOGO=1
 COPY --from=build /out/cli ./
